@@ -1,0 +1,28 @@
+# Project Dependencies
+
+*Auto-generated on 2026-02-16 05:05*
+
+## Node.js Dependencies
+
+| Package | Version |
+|---|---|
+| @tailwindcss/vite | ^4.1.13 |
+| react | ^19.1.1 |
+| react-dom | ^19.1.1 |
+| react-icons | ^5.5.0 |
+| tailwindcss | ^4.1.13 |
+
+## Node.js Dev Dependencies
+
+| Package | Version |
+|---|---|
+| @eslint/js | ^9.33.0 |
+| @types/react | ^19.1.10 |
+| @types/react-dom | ^19.1.7 |
+| @vitejs/plugin-react | ^5.0.0 |
+| eslint | ^9.33.0 |
+| eslint-plugin-react-hooks | ^5.2.0 |
+| eslint-plugin-react-refresh | ^0.4.20 |
+| globals | ^16.3.0 |
+| vite | ^7.1.2 |
+

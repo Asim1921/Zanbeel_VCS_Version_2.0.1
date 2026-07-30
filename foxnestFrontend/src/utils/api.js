@@ -1,0 +1,679 @@
+import { API_BASE_URL } from '../config'
+import { getSessionToken, clearSessionUser, setSessionUser, getSessionUser } from './session'
+
+class FoxNestAPI {
+  constructor() {
+    this.baseURL = API_BASE_URL
+  }
+
+  formatSize(bytes = 0) {
+    const num = Number(bytes) || 0
+    if (num === 0) return '0 KB'
+    const units = ['B', 'KB', 'MB', 'GB']
+    const exponent = Math.min(Math.floor(Math.log(num) / Math.log(1024)), units.length - 1)
+    const value = num / Math.pow(1024, exponent)
+    const rounded = exponent === 0 ? value.toFixed(0) : value.toFixed(1)
+    return `${rounded} ${units[exponent]}`
+  }
+
+  async request(endpoint, options = {}) {
+    const url = `${this.baseURL}${endpoint}`
+    const token = getSessionToken()
+    const timeout = options.timeout || 10000 // 10 second default timeout
+    
+    const config = {
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...options.headers,
+      },
+      ...options,
+    }
+
+    if (config.body && typeof config.body === 'object') {
+      config.body = JSON.stringify(config.body)
+    }
+
+    try {
+      // Create abort controller for timeout
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), timeout)
+      config.signal = controller.signal
+      
+      const response = await fetch(url, config)
+      clearTimeout(timeoutId)
+      
+      if (!response.ok) {
+        // Only clear session on auth-specific 401 errors (login, /auth/me endpoints)
+        if (response.status === 401 && (endpoint.includes('/auth/login') || endpoint.includes('/auth/me'))) {
+          clearSessionUser()
+        }
+        const errorData = await response.json().catch(() => ({ detail: 'Network error' }))
+        const detail = errorData?.detail
+        const detailMessage = typeof detail === 'string' ? detail : (detail?.message || null)
+        const message = detailMessage || errorData?.message || `HTTP ${response.status}`
+        const error = new Error(message)
+        error.status = response.status
+        error.data = errorData
+        error.code = (typeof detail === 'object' && detail?.code) ? detail.code : (errorData?.code || null)
+        throw error
+      }
+      
+      return await response.json()
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        console.error(`API Request timeout: ${endpoint}`)
+        throw new Error('Request timed out. Server is not responding.')
+      }
+      console.error(`API Request failed: ${endpoint}`, error)
+      throw error
+    }
+  }
+
+  // Repository endpoints
+  async login(username, password) {
+    try {
+      const response = await this.request('/auth/login', {
+        method: 'POST',
+        body: { username, password },
+        timeout: 5000 // 5 second timeout for login
+      })
+
+      if (response?.success && response?.access_token && response?.user) {
+        setSessionUser({
+          username: response.user.username,
+          role: response.user.role,
+          token: response.access_token
+        })
+      }
+
+      return response
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        throw new Error('Login request timed out. Server is not responding. Please try again.')
+      }
+      throw error
+    }
+  }
+
+  async getCurrentUser() {
+    return this.request('/auth/me')
+  }
+
+  async changePassword(currentPassword, newPassword) {
+    return this.request('/auth/change-password', {
+      method: 'POST',
+      body: {
+        current_password: currentPassword,
+        new_password: newPassword
+      }
+    })
+  }
+
+  async bootstrapPassword(username, newPassword, setupKey) {
+    return this.request('/auth/bootstrap-password', {
+      method: 'POST',
+      body: {
+        username,
+        new_password: newPassword,
+        setup_key: setupKey
+      }
+    })
+  }
+
+  async requestRegistration(payload) {
+    return this.request('/auth/register-request', {
+      method: 'POST',
+      body: payload
+    })
+  }
+
+  async getUsers() {
+    return this.request('/users')
+  }
+
+  async getUsersEngagement() {
+    return this.request('/admin/users/engagement')
+  }
+
+  async getUserDetail(username, limit = 100) {
+    return this.request(`/admin/users/${encodeURIComponent(username)}/detail?limit=${limit}`)
+  }
+
+  async resetPassword(username, newPassword) {
+    return this.request(`/admin/users/${username}/reset-password`, {
+      method: 'POST',
+      body: {
+        new_password: newPassword
+      }
+    })
+  }
+
+  async listPendingUserRegistrations(status = 'pending') {
+    const params = new URLSearchParams()
+    if (status) params.append('status', status)
+    const suffix = params.toString() ? `?${params.toString()}` : ''
+    return this.request(`/admin/pending-user-registrations${suffix}`)
+  }
+
+  async reviewPendingUserRegistration(requestId, payload) {
+    return this.request(`/admin/pending-user-registrations/${requestId}/review`, {
+      method: 'POST',
+      body: payload
+    })
+  }
+
+  async createRepository(username, repoName) {
+    return this.request('/repository/create', {
+      method: 'POST',
+      body: { username, repo_name: repoName },
+    })
+  }
+
+  async listRepositories(username, repoName = null) {
+    const params = new URLSearchParams({ username })
+    if (repoName) params.append('repo_name', repoName)
+    
+    return this.request(`/repository/list?${params}`)
+  }
+
+  async listAllRepositories() {
+    return this.request('/repositories/all')
+  }
+
+  async getRepository(repoId) {
+    return this.request(`/repository/${repoId}`)
+  }
+
+  async getCommits(repoId, full = false, branch = null) {
+    const params = new URLSearchParams({ full: full.toString() })
+    if (branch) params.append('branch', branch)
+    return this.request(`/repository/${repoId}/commits?${params}`)
+  }
+
+  async getBranches(repoId) {
+    return this.request(`/repository/${repoId}/branches`)
+  }
+
+  async starRepository(repoId) {
+    return this.request(`/repository/${repoId}/star`, { method: 'POST' })
+  }
+
+  async unstarRepository(repoId) {
+    return this.request(`/repository/${repoId}/star`, { method: 'DELETE' })
+  }
+
+  async listPullRequests(repoId, status = null) {
+    const params = new URLSearchParams()
+    if (status) params.append('status', status)
+    const suffix = params.toString() ? `?${params.toString()}` : ''
+    return this.request(`/repository/${repoId}/pull-requests${suffix}`)
+  }
+
+  async createPullRequest(repoId, payload) {
+    return this.request(`/repository/${repoId}/pull-requests`, {
+      method: 'POST',
+      body: payload,
+    })
+  }
+
+  async closePullRequest(repoId, prId) {
+    return this.request(`/repository/${repoId}/pull-requests/${prId}/close`, {
+      method: 'POST',
+    })
+  }
+
+  async mergePullRequest(repoId, prId, expectedHeadCommitId = null) {
+    return this.request(`/repository/${repoId}/pull-requests/${prId}/merge`, {
+      method: 'POST',
+      body: expectedHeadCommitId ? { expected_head_commit_id: expectedHeadCommitId } : {},
+    })
+  }
+
+  // Issue tracking
+  async listIssues(repoId, params = {}) {
+    const qs = new URLSearchParams()
+    if (params.status) qs.append('status', params.status)
+    if (params.search) qs.append('search', params.search)
+    if (params.label) qs.append('label', params.label)
+    if (params.milestone_id != null) qs.append('milestone_id', String(params.milestone_id))
+    if (params.assignee) qs.append('assignee', params.assignee)
+    if (params.offset != null) qs.append('offset', String(params.offset))
+    if (params.limit != null) qs.append('limit', String(params.limit))
+    const suffix = qs.toString() ? `?${qs.toString()}` : ''
+    return this.request(`/repository/${repoId}/issues${suffix}`)
+  }
+
+  async createIssue(repoId, payload) {
+    return this.request(`/repository/${repoId}/issues`, {
+      method: 'POST',
+      body: payload
+    })
+  }
+
+  async getIssue(repoId, issueNumber) {
+    return this.request(`/repository/${repoId}/issues/${issueNumber}`)
+  }
+
+  async updateIssue(repoId, issueNumber, payload) {
+    return this.request(`/repository/${repoId}/issues/${issueNumber}`, {
+      method: 'PUT',
+      body: payload
+    })
+  }
+
+  async addIssueComment(repoId, issueNumber, payload) {
+    return this.request(`/repository/${repoId}/issues/${issueNumber}/comments`, {
+      method: 'POST',
+      body: payload
+    })
+  }
+
+  async watchIssue(repoId, issueNumber, watch = true) {
+    return this.request(`/repository/${repoId}/issues/${issueNumber}/watch`, {
+      method: 'POST',
+      body: { watch: !!watch }
+    })
+  }
+
+  async listIssueLabels(repoId) {
+    return this.request(`/repository/${repoId}/issue-labels`)
+  }
+
+  async upsertIssueLabel(repoId, payload) {
+    return this.request(`/repository/${repoId}/issue-labels`, {
+      method: 'POST',
+      body: payload
+    })
+  }
+
+  async listMilestones(repoId, includeClosed = true) {
+    const qs = new URLSearchParams()
+    qs.append('include_closed', includeClosed ? 'true' : 'false')
+    return this.request(`/repository/${repoId}/milestones?${qs.toString()}`)
+  }
+
+  async createMilestone(repoId, payload) {
+    return this.request(`/repository/${repoId}/milestones`, {
+      method: 'POST',
+      body: payload
+    })
+  }
+
+  // In-app notifications
+  async listNotifications({ unreadOnly = false, limit = 50 } = {}) {
+    const qs = new URLSearchParams()
+    if (unreadOnly) qs.append('unread_only', 'true')
+    if (limit != null) qs.append('limit', String(limit))
+    const suffix = qs.toString() ? `?${qs.toString()}` : ''
+    return this.request(`/notifications${suffix}`)
+  }
+
+  async markNotificationsRead(ids = []) {
+    return this.request(`/notifications/mark-read`, {
+      method: 'POST',
+      body: { ids }
+    })
+  }
+
+  async getRepositoryFiles(repoId, branch = null) {
+    const params = new URLSearchParams()
+    if (branch) params.append('branch', branch)
+    // Listing view only needs metadata, not full file content
+    params.append('include_content', 'false')
+    const suffix = params.toString() ? `?${params.toString()}` : ''
+    return this.request(`/repository/${repoId}/files${suffix}`)
+  }
+
+  async getRepositoryFile(repoId, path, branch = null) {
+    const params = new URLSearchParams({ path })
+    if (branch) params.append('branch', branch)
+    return this.request(`/repository/${repoId}/file?${params.toString()}`)
+  }
+
+  async getFileHistory(repoId, path, branch = null, limit = 100, followRenames = false, cursor = null) {
+    const params = new URLSearchParams({ path, limit: String(limit) })
+    if (branch) params.append('branch', branch)
+    if (followRenames) params.append('follow_renames', 'true')
+    if (cursor) params.append('cursor', cursor)
+    return this.request(`/repository/${repoId}/file-history?${params.toString()}`)
+  }
+
+  async compareCommits(repoId, fromCommit, toCommit, path = null) {
+    const params = new URLSearchParams({ from_commit: fromCommit, to_commit: toCommit })
+    if (path) params.append('path', path)
+    return this.request(`/repository/${repoId}/compare?${params.toString()}`)
+  }
+
+  async rollbackFile(repoId, payload) {
+    return this.request(`/repository/${repoId}/rollback/file`, {
+      method: 'POST',
+      body: payload
+    })
+  }
+
+  async rollbackBranch(repoId, payload) {
+    return this.request(`/repository/${repoId}/rollback/branch`, {
+      method: 'POST',
+      body: payload
+    })
+  }
+
+  async getRepositoryDocs(repoId, branch = null) {
+    const params = new URLSearchParams()
+    if (branch) params.append('branch', branch)
+    const suffix = params.toString() ? `?${params.toString()}` : ''
+    return this.request(`/repository/${repoId}/docs${suffix}`)
+  }
+
+  /** URL to download all generated docs as ZIP (use with API_SERVER_URL prefix). */
+  getRepositoryDocsArchivePath(repoId) {
+    return `/api/repository/${repoId}/docs/archive.zip`
+  }
+
+  async pushCommit(repoId, commit) {
+    return this.request(`/repository/${repoId}/push`, {
+      method: 'POST',
+      body: { commit },
+    })
+  }
+
+  async pullCommits(repoId, sinceCommit = null) {
+    const params = sinceCommit ? `?since_commit=${sinceCommit}` : ''
+    return this.request(`/repository/${repoId}/pull${params}`)
+  }
+
+  async deleteRepository(repoId, actorUsername) {
+    const params = new URLSearchParams()
+    if (actorUsername) params.append('actor_username', actorUsername)
+
+    const suffix = params.toString() ? `?${params.toString()}` : ''
+
+    return this.request(`/repository/${repoId}${suffix}`, {
+      method: 'DELETE',
+    })
+  }
+
+  async archiveRepository(repoId, reason = null, actorUsername) {
+    const params = new URLSearchParams()
+    if (actorUsername) params.append('actor_username', actorUsername)
+
+    const suffix = params.toString() ? `?${params.toString()}` : ''
+
+    return this.request(`/repository/${repoId}/archive${suffix}`, {
+      method: 'POST',
+      body: { reason: reason || 'Archived via web interface' },
+    })
+  }
+
+  // Health check
+  async healthCheck() {
+    return this.request('/', { method: 'GET' })
+  }
+
+  // Helper methods for data transformation
+  transformRepositoryData(repositories) {
+    return repositories.map(repo => {
+      // Get the latest commit timestamp if commits exist
+      let latestTimestamp = repo.updated_at || repo.created_at
+      if (repo.commits && Array.isArray(repo.commits) && repo.commits.length > 0) {
+        const latestCommit = repo.commits[0]
+        latestTimestamp = latestCommit.timestamp || latestTimestamp
+      }
+      
+      return {
+        id: repo.id,
+        name: repo.name,
+        description: repo.description || `Repository owned by ${repo.owner}`,
+        language: repo.language, // Use language from backend (null if not set)
+        languageColor: '#6c757d',
+        commits: repo.commits?.length || 0,
+        contributors: repo.contributor_count ?? 1,
+        stars: repo.star_count ?? 0,
+        starredByMe: !!repo.starred_by_me,
+        watchers: 0, // Not implemented in server yet
+        branches: repo.branch_count ?? 1,
+        size: this.formatSize(repo.size || repo.size_bytes || 0),
+        lastUpdate: this.formatDate(latestTimestamp),
+        status: repo.is_archived ? 'archived' : 'active',
+        visibility: repo.is_public === false ? 'private' : 'public',
+        tags: [],
+        files: [], // Empty array to prevent undefined error
+        owner: repo.owner,
+        createdAt: repo.created_at,
+        head: repo.head,
+        is_archived: repo.is_archived || false,
+        archived_at: repo.archived_at,
+        archived_reason: repo.archived_reason,
+        g1_coordinator: repo.g1_coordinator,
+        tested: repo.tested,
+        current_user_can_write: !!repo.current_user_can_write,
+        current_user_can_manage: !!repo.current_user_can_manage
+      }
+    })
+  }
+
+  transformCommitData(commits) {
+    return commits.map(commit => ({
+      id: commit.id,
+      message: commit.message,
+      author: commit.author,
+      timestamp: commit.timestamp,
+      parent: commit.parent,
+      files: Array.isArray(commit.files) ? commit.files : Object.keys(commit.files || {})
+    }))
+  }
+
+  parseServerTimestamp(dateString) {
+    if (!dateString) return null
+    if (typeof dateString !== 'string') return new Date(dateString)
+
+    const normalized = dateString.replace(' ', 'T')
+    const hasTz = /[zZ]|[+-]\d{2}:?\d{2}$/.test(normalized)
+    const withTz = hasTz ? normalized : `${normalized}Z`
+    const parsed = new Date(withTz)
+    return Number.isNaN(parsed.getTime()) ? null : parsed
+  }
+
+  formatDate(dateString) {
+    const parsedDate = this.parseServerTimestamp(dateString)
+    if (!parsedDate) return 'Unknown'
+
+    const now = new Date()
+    const diffMs = now - parsedDate
+    const diffMinutes = Math.floor(diffMs / (1000 * 60))
+    const diffHours = Math.floor(diffMs / (1000 * 60 * 60))
+    const diffDays = Math.floor(diffHours / 24)
+
+    if (diffMinutes < 1) return 'just now'
+    if (diffMinutes < 60) return `${diffMinutes} minute${diffMinutes === 1 ? '' : 's'} ago`
+    if (diffHours < 24) return `${diffHours} hour${diffHours === 1 ? '' : 's'} ago`
+    if (diffDays === 1) return '1 day ago'
+    if (diffDays < 7) return `${diffDays} days ago`
+    if (diffDays < 30) return `${Math.floor(diffDays / 7)} week${Math.floor(diffDays / 7) === 1 ? '' : 's'} ago`
+    
+    // For display of the actual date, use local timezone
+    return parsedDate.toLocaleString('en-US', { 
+      year: 'numeric', 
+      month: '2-digit', 
+      day: '2-digit', 
+      hour: '2-digit', 
+      minute: '2-digit', 
+      hour12: true 
+    })
+  }
+
+  // Get user statistics
+  async getUserStats(username) {
+    try {
+      const reposResponse = await this.listRepositories(username)
+      const repositories = reposResponse.repositories || []
+      
+      let totalCommits = 0
+      const repoDetails = []
+
+      for (const repo of repositories) {
+        try {
+          const commitsResponse = await this.getCommits(repo.id, false)
+          const commits = commitsResponse.commits || []
+          totalCommits += commits.length
+          
+          repoDetails.push({
+            name: repo.name,
+            commits: commits.length,
+            lastCommit: commits.length > 0 ? this.formatDate(commits[0].timestamp) : 'No commits',
+            language: 'Unknown' // You might want to detect this
+          })
+        } catch (error) {
+          console.error(`Error fetching commits for repo ${repo.id}:`, error)
+        }
+      }
+
+      return {
+        totalCommits,
+        activeRepos: repositories.length,
+        repositories: repoDetails
+      }
+    } catch (error) {
+      console.error('Error fetching user stats:', error)
+      return {
+        totalCommits: 0,
+        activeRepos: 0,
+        repositories: []
+      }
+    }
+  }
+
+  // Get dashboard statistics
+  async getDashboardStats() {
+    try {
+      const sessionUser = getSessionUser()
+      const isPrivileged = sessionUser.isAdmin
+      const hasUsername = !!sessionUser.username
+
+      const repoRequest = isPrivileged
+        ? this.listAllRepositories()
+        : (hasUsername ? this.listRepositories(sessionUser.username) : Promise.resolve({ success: true, repositories: [] }))
+
+      // Keep admin/team lead behavior unchanged; regular users get user-scoped dashboard data.
+      const [reposResult, usersResult] = await Promise.allSettled([
+        repoRequest,
+        isPrivileged ? this.request('/users') : Promise.resolve({ success: true, users: [] })
+      ])
+
+      const reposResponse = reposResult.status === 'fulfilled' ? reposResult.value : { success: false, repositories: [] }
+      const usersResponse = usersResult.status === 'fulfilled' ? usersResult.value : { success: false, users: [] }
+      
+      if (!reposResponse.success) {
+        return {
+          totalUsers: 0,
+          totalRepos: 0,
+          totalCommits: 0,
+          archivedProjects: 0,
+          recentActivity: []
+        }
+      }
+
+      // Backend already scopes repositories to what the user can access
+      const allRepos = reposResponse.repositories || []
+      const activeRepos = allRepos.filter(repo => !repo.is_archived)
+      const archivedRepos = allRepos.filter(repo => repo.is_archived === true)
+      
+      // Count total commits only from active repositories
+      let totalCommits = 0
+      activeRepos.forEach(repo => {
+        if (Array.isArray(repo.commits)) {
+          totalCommits += repo.commits.length
+        }
+      })
+      
+      // For non-admin users, keep this scoped to self for a user-focused dashboard.
+      const allUsers = usersResponse.success ? (usersResponse.users || []) : []
+      const totalUsers = isPrivileged ? allUsers.length : (hasUsername ? 1 : 0)
+
+      return {
+        totalUsers,
+        totalRepos: activeRepos.length,
+        totalCommits,
+        archivedProjects: archivedRepos.length,
+        recentActivity: []
+      }
+    } catch (error) {
+      console.error('Error fetching dashboard stats:', error)
+      return {
+        totalUsers: 0,
+        totalRepos: 0,
+        totalCommits: 0,
+        archivedProjects: 0,
+        recentActivity: []
+      }
+    }
+  }
+
+  // Update repository details (G1 coordinator, tested status)
+  async updateRepositoryDetails(repoId, details, actorUsername) {
+    try {
+      const params = new URLSearchParams()
+      if (actorUsername) params.append('actor_username', actorUsername)
+
+      const suffix = params.toString() ? `?${params.toString()}` : ''
+
+      const response = await this.request(`/repository/${repoId}/details${suffix}`, {
+        method: 'PUT',
+        body: details
+      })
+      
+      return response
+    } catch (error) {
+      console.error('Error updating repository details:', error)
+      throw error
+    }
+  }
+
+  // Upload instruction manual PDF
+  async uploadInstructionManual(repoId, file, actorUsername) {
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+
+      const params = new URLSearchParams()
+      if (actorUsername) params.append('actor_username', actorUsername)
+
+      const suffix = params.toString() ? `?${params.toString()}` : ''
+      
+      const response = await fetch(`${this.baseURL}/repository/${repoId}/upload-manual${suffix}`, {
+        method: 'POST',
+        body: formData
+      })
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+      
+      return await response.json()
+    } catch (error) {
+      console.error('Error uploading instruction manual:', error)
+      throw error
+    }
+  }
+
+  // Download instruction manual PDF
+  async downloadInstructionManual(repoId) {
+    try {
+      const response = await fetch(`${this.baseURL}/repository/${repoId}/download-manual`)
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+      
+      // Return the blob for download
+      const blob = await response.blob()
+      return blob
+    } catch (error) {
+      console.error('Error downloading instruction manual:', error)
+      throw error
+    }
+  }
+}
+
+export default new FoxNestAPI()

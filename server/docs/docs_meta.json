@@ -1,0 +1,16 @@
+{
+  "generated_at": "2026-02-16T05:04:56.852040",
+  "project_path": "/home/aiuser/FoxNest/server",
+  "languages": {
+    "python": {
+      "files": 4,
+      "classes": 31,
+      "functions": 40,
+      "documented": 84,
+      "undocumented": 0,
+      "coverage": 100.0,
+      "cli_files": 0
+    }
+  },
+  "frameworks": []
+}

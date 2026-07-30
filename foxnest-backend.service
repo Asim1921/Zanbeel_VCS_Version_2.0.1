@@ -1,0 +1,23 @@
+[Unit]
+Description=FoxNest Backend Server (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+User=aiuser
+Group=aiuser
+WorkingDirectory=/home/aiuser/FoxNest/server
+Environment="PATH=/home/aiuser/FoxNest/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="SERVER_HOST=0.0.0.0"
+Environment="SERVER_PORT=33333"
+Environment="DEBUG=False"
+Environment="DATABASE_URL=sqlite:///./foxnest.db"
+ExecStart=/home/aiuser/FoxNest/venv/bin/python3 /home/aiuser/FoxNest/server/server.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+

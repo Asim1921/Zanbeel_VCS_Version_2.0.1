@@ -1,0 +1,87 @@
+# ===== Secrets & local config =====
+.env
+.env.*
+!.env.example
+!**/.env.example
+**/credentials.json
+**/.foxnest/
+**/credentials.json
+
+# ===== Database / repo runtime data =====
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.db.recovering
+foxnest.db
+**/foxnest.db
+server/foxnest.db*
+**/repositories/
+**/packs/
+**/.fox/
+
+# ===== Python =====
+venv/
+.venv/
+env/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+server/server.log
+*.log.*
+
+# ===== Node / frontend =====
+node_modules/
+dist/
+dist-ssr/
+*.local
+foxnestFrontend/dist/
+
+# ===== ML / LLM model weights (never commit) =====
+models/
+**/models/
+*.gguf
+*.bin
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.ckpt
+*.h5
+*.pkl
+ollama/
+**/ollama/
+
+# ===== Build / installers / archives =====
+*.exe
+*.msi
+*.deb
+*.rpm
+*.tar.gz
+*.zip
+!docs/**/*.zip
+_archived_unused_*/
+installers/**/foxnest.db
+client/**/dist/
+release/**/*.exe
+
+# ===== IDE / OS =====
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# ===== Temp / coverage =====
+tmp/
+temp/
+.coverage
+htmlcov/
+.cache/

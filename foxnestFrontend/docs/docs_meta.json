@@ -1,0 +1,16 @@
+{
+  "generated_at": "2026-02-16T05:05:54.526423",
+  "project_path": "/home/aiuser/FoxNest/foxnestFrontend",
+  "languages": {
+    "javascript": {
+      "files": 25,
+      "symbols": 290,
+      "documented": 0,
+      "coverage": 0.0,
+      "react_components": 17
+    }
+  },
+  "frameworks": [
+    "node"
+  ]
+}
