@@ -3,6 +3,8 @@ import { FiClock, FiCheck, FiX, FiFolder, FiUser, FiFileText, FiRefreshCw } from
 import GlassCard from '../components/ui/GlassCard'
 import Badge from '../components/ui/Badge'
 import Button from '../components/ui/Button'
+import PageHeader from '../components/ui/PageHeader'
+import EmptyState from '../components/ui/EmptyState'
 import { API_SERVER_URL } from '../config.js'
 import { getSessionToken, getSessionUsername } from '../utils/session'
 
@@ -120,8 +122,8 @@ const PendingRepositories = () => {
     return (
       <div className="p-6">
         <div className="flex items-center justify-center h-64">
-          <FiClock className="w-8 h-8 animate-pulse text-yellow-400" />
-          <span className="ml-2 text-gray-300">Loading pending repositories...</span>
+          <FiClock className="w-8 h-8 animate-pulse text-warning-fg" />
+          <span className="ml-2 text-ink-soft">Loading pending repositories...</span>
         </div>
       </div>
     )
@@ -129,68 +131,58 @@ const PendingRepositories = () => {
 
   return (
     <div className="p-6 space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center space-x-3">
-          <FiClock className="w-6 h-6 text-yellow-400" />
-          <div>
-            <h1 className="text-2xl font-bold text-white">Pending Repository Requests</h1>
-            <p className="text-white/70">Review and approve repository creation requests</p>
-          </div>
-          <Badge variant="warning" className="text-yellow-400 border-yellow-400/30">
-            {pendingRepos.length}
-          </Badge>
-        </div>
-        <Button
-          variant="secondary"
-          onClick={fetchPendingRepositories}
-          className="flex items-center space-x-2"
-        >
-          <FiRefreshCw className="w-4 h-4" />
-          <span>Refresh</span>
-        </Button>
-      </div>
+      <PageHeader
+        eyebrow={
+          pendingRepos.length ? `${pendingRepos.length} awaiting review` : 'Queue clear'
+        }
+        title="Pending Repository Requests"
+        subtitle="Review and approve repository creation requests."
+        actions={
+          <Button
+            variant="secondary"
+            onClick={fetchPendingRepositories}
+            className="flex items-center gap-2"
+          >
+            <FiRefreshCw className="w-4 h-4" />
+            <span>Refresh</span>
+          </Button>
+        }
+      />
 
-      {/* Reviewer Username Input */}
-      <GlassCard className="p-4 bg-blue-500/10 border-blue-500/30">
-        <div className="flex items-center space-x-4">
-          <FiUser className="w-5 h-5 text-blue-400" />
-          <div className="flex-1">
-            <label className="block text-sm font-medium text-white/70 mb-2">
-              Your Username (required for approvals/rejections)
+      {/* One bar for both inputs — see PendingApprovals, same reviewing task. */}
+      <GlassCard className="p-4">
+        <div className="grid gap-4 md:grid-cols-2">
+          <div>
+            <label className="mb-2 flex items-center gap-2 text-sm font-medium text-ink-soft">
+              <FiUser className="h-4 w-4 text-accent" />
+              Your username
+              <span className="text-xs font-normal text-muted">
+                (required to approve or reject)
+              </span>
             </label>
             <input
               type="text"
               value={reviewerUsername}
               onChange={(e) => setReviewerUsername(e.target.value)}
               placeholder="Enter your username"
-              className="w-full px-3 py-2 bg-gray-800/50 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:border-blue-500"
+              className="w-full rounded-lg border border-border bg-cream-mid px-3 py-2 text-ink transition-colors placeholder:text-muted focus:border-accent focus:outline-none"
             />
           </div>
-        </div>
-      </GlassCard>
 
-      {/* Search by Team Lead */}
-      <GlassCard className="p-4 bg-purple-500/10 border-purple-500/30">
-        <div className="flex items-center space-x-4">
-          <FiUser className="w-5 h-5 text-purple-400" />
-          <div className="flex-1">
-            <label className="block text-sm font-medium text-white/70 mb-2">
-              Filter by Team Lead
+          <div>
+            <label className="mb-2 flex items-center gap-2 text-sm font-medium text-ink-soft">
+              <FiUser className="h-4 w-4 text-muted" />
+              Filter by team lead
             </label>
-            <div className="flex space-x-2">
+            <div className="flex gap-2">
               <input
                 type="text"
                 value={searchTeamLead}
                 onChange={(e) => handleSearchChange(e.target.value)}
-                placeholder="Enter team lead username (leave empty for all)"
-                className="flex-1 px-3 py-2 bg-gray-800/50 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:border-purple-500"
+                placeholder="Leave empty for all"
+                className="min-w-0 flex-1 rounded-lg border border-border bg-cream-mid px-3 py-2 text-ink transition-colors placeholder:text-muted focus:border-accent focus:outline-none"
               />
-              <Button
-                variant="primary"
-                onClick={handleSearchClick}
-                className="px-4"
-              >
+              <Button variant="primary" onClick={handleSearchClick} className="shrink-0 px-4">
                 Search
               </Button>
               {searchTeamLead && (
@@ -200,7 +192,7 @@ const PendingRepositories = () => {
                     setSearchTeamLead('')
                     setTimeout(fetchPendingRepositories, 100)
                   }}
-                  className="px-4"
+                  className="shrink-0 px-4"
                 >
                   Clear
                 </Button>
@@ -212,8 +204,8 @@ const PendingRepositories = () => {
 
       {/* Connection Status */}
       {error && (
-        <GlassCard className="p-4 border-red-500/30 bg-red-500/10">
-          <div className="flex items-center space-x-2 text-red-400">
+        <GlassCard className="p-4 border-danger-fg/20 bg-danger-bg">
+          <div className="flex items-center space-x-2 text-danger-fg">
             <span>⚠️</span>
             <span>{error}</span>
           </div>
@@ -228,8 +220,8 @@ const PendingRepositories = () => {
               key={repo.id}
               className={`p-6 cursor-pointer transition-all duration-300 hover:scale-105 ${
                 selectedRepo?.id === repo.id
-                  ? 'border-yellow-500/50 bg-yellow-500/10'
-                  : 'hover:border-yellow-500/30'
+                  ? 'border-warning-fg/50 bg-warning-bg'
+                  : 'hover:border-warning-fg/20'
               }`}
               onClick={() => handleRepoClick(repo)}
             >
@@ -238,55 +230,55 @@ const PendingRepositories = () => {
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
                     <div className="flex items-center space-x-2 mb-2">
-                      <FiFolder className="w-5 h-5 text-yellow-400" />
-                      <h3 className="font-semibold text-white">
+                      <FiFolder className="w-5 h-5 text-warning-fg" />
+                      <h3 className="font-semibold text-ink">
                         {repo.repo_name}
                       </h3>
                     </div>
-                    <div className="flex items-center space-x-4 text-sm text-white/70">
+                    <div className="flex items-center space-x-4 text-sm text-ink-soft">
                       <div className="flex items-center space-x-1">
                         <FiUser className="w-4 h-4" />
                         <span>Requested by: {repo.requested_by}</span>
                       </div>
                     </div>
                     {repo.requested_by_full_name && (
-                      <div className="mt-1 text-xs text-white/50">
+                      <div className="mt-1 text-xs text-muted">
                         {repo.requested_by_full_name}
                       </div>
                     )}
                     {repo.owner && (
-                      <div className="mt-2 text-xs text-purple-400 flex items-center space-x-1">
+                      <div className="mt-2 text-xs text-ink flex items-center space-x-1">
                         <FiUser className="w-3 h-3" />
                         <span>Will be owned by: {repo.owner} ({repo.owner_full_name || 'Team Lead'})</span>
                       </div>
                     )}
                   </div>
-                  <Badge variant="warning" className="text-yellow-400 border-yellow-400/30">
+                  <Badge variant="warning" className="text-warning-fg border-warning-fg/30">
                     Pending
                   </Badge>
                 </div>
 
                 {/* Repository Description */}
                 {repo.description && (
-                  <div className="bg-black/30 p-3 rounded-md">
+                  <div className="bg-cream-deep p-3 rounded-md">
                     <div className="flex items-start space-x-2">
-                      <FiFileText className="w-4 h-4 text-blue-400 mt-0.5" />
+                      <FiFileText className="w-4 h-4 text-info-fg mt-0.5" />
                       <div className="flex-1">
-                        <p className="text-sm text-white/70">{repo.description}</p>
+                        <p className="text-sm text-ink-soft">{repo.description}</p>
                       </div>
                     </div>
                   </div>
                 )}
 
                 {/* Repository Info */}
-                <div className="space-y-2 text-sm text-white/70">
+                <div className="space-y-2 text-sm text-ink-soft">
                   <div className="flex items-center">
                     <FiClock className="w-4 h-4 mr-2" />
                     <span>
                       Requested {new Date(repo.created_at).toLocaleString()}
                     </span>
                   </div>
-                  <div className="text-xs text-white/50 font-mono bg-black/30 p-2 rounded">
+                  <div className="text-xs text-muted font-mono bg-cream-deep p-2 rounded">
                     ID: {repo.id}
                   </div>
                 </div>
@@ -294,12 +286,12 @@ const PendingRepositories = () => {
                 {/* Actions (shown when selected) */}
                 {selectedRepo?.id === repo.id && (
                   <div
-                    className="pt-4 border-t border-white/10 space-y-3"
+                    className="pt-4 border-t border-border space-y-3"
                     onClick={(e) => e.stopPropagation()}
                     onFocusCapture={(e) => e.stopPropagation()}
                   >
                     <div>
-                      <label className="block text-sm font-medium text-white/70 mb-2">
+                      <label className="block text-sm font-medium text-ink-soft mb-2">
                         Review Comment (optional)
                       </label>
                       <textarea
@@ -307,7 +299,7 @@ const PendingRepositories = () => {
                         onChange={(e) => setReviewComment(e.target.value)}
                         placeholder="Add a comment about this repository request..."
                         rows={3}
-                        className="w-full px-3 py-2 bg-gray-800/50 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:border-blue-500 resize-none"
+                        className="w-full px-3 py-2 bg-cream-mid border border-border rounded-md text-ink placeholder:text-muted focus:outline-none focus:border-ink resize-none"
                         onClick={(e) => e.stopPropagation()}
                         onFocus={(e) => e.stopPropagation()}
                       />
@@ -320,7 +312,7 @@ const PendingRepositories = () => {
                           handleReview(repo.id, 'approve')
                         }}
                         disabled={!isReviewerReady}
-                        className="flex-1 flex items-center justify-center space-x-1 bg-green-600/20 text-green-400 hover:bg-green-600/30"
+                        className="flex-1 flex items-center justify-center space-x-1 bg-success-bg text-success-fg hover:bg-success-fg/30"
                         title={isReviewerReady ? 'Approve this repository' : 'Enter your username above to enable'}
                       >
                         <FiCheck className="w-4 h-4" />
@@ -333,7 +325,7 @@ const PendingRepositories = () => {
                           handleReview(repo.id, 'reject')
                         }}
                         disabled={!isReviewerReady}
-                        className="flex-1 flex items-center justify-center space-x-1 bg-red-600/20 text-red-400 hover:bg-red-600/30"
+                        className="flex-1 flex items-center justify-center space-x-1 bg-danger-fg/20 text-danger-fg hover:bg-danger-fg/30"
                         title={isReviewerReady ? 'Reject this request' : 'Enter your username above to enable'}
                       >
                         <FiX className="w-4 h-4" />
@@ -347,13 +339,11 @@ const PendingRepositories = () => {
           ))}
         </div>
       ) : (
-        <div className="text-center py-12">
-          <FiCheck className="w-16 h-16 text-green-600 mx-auto mb-4" />
-          <h3 className="text-xl font-semibold text-white mb-2">All Caught Up!</h3>
-          <p className="text-white/70">
-            There are no pending repository requests awaiting approval at this time.
-          </p>
-        </div>
+        <EmptyState
+          icon={FiCheck}
+          title="All caught up"
+          description="There are no pending repository requests awaiting approval at this time."
+        />
       )}
     </div>
   )

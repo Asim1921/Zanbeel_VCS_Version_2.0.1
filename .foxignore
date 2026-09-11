@@ -1,0 +1,65 @@
+# .foxignore — paths Zanbeel must never store.
+# Same syntax as .gitignore: globs, ! to re-include, / to anchor, trailing / for directories.
+# This file replaces the built-in defaults, so it repeats the entries worth keeping.
+
+# --- Secrets. Never store these. ------------------------------------------
+# server/.env holds FOXNEST_AUTH_SECRET; committing it would let anyone who can
+# read the repository forge session tokens for every account.
+.env
+*.env
+!.env.example
+!*.env.example
+
+# --- Server runtime data, not source --------------------------------------
+# blobstore/ is the content-addressed object store (3.5 GB) and foxnest.db is the
+# live database. Both are state this server produces, not code that describes it.
+server/blobstore/
+blobstore/
+*.db
+*.sqlite
+*.sqlite3
+*.bak
+# Dated and suffixed database copies: foxnest.db.backup-premigration is 4 GB, and
+# a bare *.bak does not match it. Match anything hanging off a .db name.
+*.db.*
+*.backup-*
+
+# --- Version control and tooling metadata ---------------------------------
+.fox/
+.git/
+.vscode/
+.idea/
+
+# --- Dependencies and virtual environments --------------------------------
+node_modules/
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# --- Build output ---------------------------------------------------------
+build/
+dist/
+out/
+target/
+obj/
+*.egg-info/
+
+# --- Archives and installers — these are what bloat a repository ----------
+*.zip
+*.tar.gz
+*.7z
+*.rar
+*.exe
+*.msi
+*.apk
+*.iso
+*.bacpac
+
+# --- Local noise ----------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.log
+nohup.out

@@ -1,0 +1,86 @@
+{
+  "name": "zanbeel-vcs",
+  "displayName": "Zanbeel VCS",
+  "description": "Run the Zanbeel fox CLI from any VS Code terminal, without installing it per machine.",
+  "version": "0.1.0",
+  "publisher": "zanbeel",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["SCM Providers", "Other"],
+  "keywords": ["zanbeel", "foxnest", "fox", "version control"],
+  "main": "./src/extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "commands": [
+      {
+        "command": "zanbeel.signIn",
+        "title": "Zanbeel: Sign In",
+        "category": "Zanbeel"
+      },
+      {
+        "command": "zanbeel.signOut",
+        "title": "Zanbeel: Sign Out",
+        "category": "Zanbeel"
+      },
+      {
+        "command": "zanbeel.openTerminal",
+        "title": "Zanbeel: Open Terminal",
+        "category": "Zanbeel"
+      },
+      {
+        "command": "zanbeel.status",
+        "title": "Zanbeel: Status",
+        "category": "Zanbeel"
+      },
+      {
+        "command": "zanbeel.diagnostics",
+        "title": "Zanbeel: Run Diagnostics",
+        "category": "Zanbeel"
+      },
+      {
+        "command": "zanbeel.installDependencies",
+        "title": "Zanbeel: Install Python Dependencies",
+        "category": "Zanbeel"
+      }
+    ],
+    "configuration": {
+      "title": "Zanbeel",
+      "properties": {
+        "zanbeel.serverUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Zanbeel server this workspace talks to, for example `http://127.0.0.1:33333`. Exported as `FOXNEST_SERVER`, so it overrides the origin stored in the repository. Leave blank to use whatever the repository is already configured with."
+        },
+        "zanbeel.pythonPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Interpreter used to run the bundled CLI. Leave blank to detect automatically (`py -3.11`, `py -3`, `python3`, `python`)."
+        },
+        "zanbeel.injectPath": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Add `fox` to the `PATH` of terminals VS Code opens. This is what makes `fox` work in the integrated terminal without a system-wide install. Only VS Code's own terminals are affected."
+        },
+        "zanbeel.injectToken": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Export the signed-in token as `FOXNEST_TOKEN` to VS Code terminals. The token is held in the OS keychain rather than written to `~/.foxnest/credentials.json` in the clear.\n\n**Note:** any process started from a VS Code terminal can read this variable."
+        },
+        "zanbeel.showStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the current Zanbeel branch in the status bar."
+        }
+      }
+    }
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.75.0",
+    "@vscode/vsce": "^3.2.0"
+  },
+  "scripts": {
+    "package": "vsce package --allow-missing-repository --skip-license"
+  }
+}

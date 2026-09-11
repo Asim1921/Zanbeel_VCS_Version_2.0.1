@@ -19,9 +19,237 @@ from datetime import datetime
 from pathlib import Path
 import requests
 import urllib.parse
+import re
+
+# ---------------------------------------------------------------------------
+# .foxignore support
+#
+# Gitignore syntax: globs, ! to re-include, leading / to anchor to the repository
+# root, trailing / for directories, ** to span directories. Rules are evaluated in
+# order and the last match wins.
+#
+# This mirrors server/app/services/ignore_rules.py. The server enforces the same
+# rules on push, so a stale client cannot smuggle build output into the store --
+# keep the two implementations in step.
+# ---------------------------------------------------------------------------
+
+IGNORE_FILENAME = ".foxignore"
+
+DEFAULT_IGNORE_PATTERNS = (
+    ".fox/", ".git/", ".svn/", ".hg/",
+    "node_modules/", "venv/", ".venv/", "env/", "vendor/",
+    "__pycache__/", "*.py[cod]", ".pytest_cache/", ".tox/", ".mypy_cache/",
+    "build/", "dist/", "out/", "target/", "bin/", "obj/",
+    "*.o", "*.so", "*.dylib", "*.class",
+    "*.zip", "*.tar", "*.tar.gz", "*.tgz", "*.rar", "*.7z",
+    "*.exe", "*.msi", "*.dmg", "*.apk", "*.iso", "*.bacpac",
+    ".DS_Store", "Thumbs.db", "*.log", "*.tmp", "*.swp",
+)
+
+DEFAULT_FOXIGNORE_TEMPLATE = """\
+# .foxignore -- paths Zanbeel must never store.
+# Same syntax as .gitignore: globs, ! to re-include, / to anchor, trailing / for directories.
+# This file replaces the built-in defaults, so keep the entries you still want.
+
+# Version control and tooling metadata
+.fox/
+.git/
+
+# Dependencies and virtual environments
+node_modules/
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+
+# Build output
+build/
+dist/
+out/
+target/
+obj/
+
+# Archives and installers -- these are what bloat a repository
+*.zip
+*.tar.gz
+*.7z
+*.exe
+*.msi
+*.apk
+*.iso
+
+# Local noise
+.DS_Store
+Thumbs.db
+*.log
+"""
+
+
+def _ignore_translate(pattern):
+    """Translate one gitignore glob into a regular expression source string."""
+    out = []
+    i, n = 0, len(pattern)
+    while i < n:
+        ch = pattern[i]
+        if ch == "*":
+            if pattern.startswith("**", i):
+                if pattern.startswith("**/", i):
+                    out.append("(?:.*/)?")
+                    i += 3
+                    continue
+                out.append(".*")
+                i += 2
+                continue
+            out.append("[^/]*")
+            i += 1
+        elif ch == "?":
+            out.append("[^/]")
+            i += 1
+        elif ch == "[":
+            end = i + 1
+            if end < n and pattern[end] in ("!", "^"):
+                end += 1
+            if end < n and pattern[end] == "]":
+                end += 1
+            while end < n and pattern[end] != "]":
+                end += 1
+            if end >= n:
+                out.append(re.escape(ch))
+                i += 1
+            else:
+                body = pattern[i + 1:end]
+                if body and body[0] in ("!", "^"):
+                    body = "^" + body[1:]
+                out.append("[" + body.replace("\\", "\\\\") + "]")
+                i = end + 1
+        else:
+            out.append(re.escape(ch))
+            i += 1
+    return "".join(out)
+
+
+def _compile_ignore_rule(raw):
+    line = raw.rstrip("\n").rstrip("\r")
+    if not line.endswith("\\"):
+        line = line.rstrip()
+    if not line or line.lstrip().startswith("#"):
+        return None
+
+    negated = line.startswith("!")
+    if negated:
+        line = line[1:]
+    if line.startswith("\\") and len(line) > 1 and line[1] in ("#", "!"):
+        line = line[1:]
+    if not line:
+        return None
+    if line.endswith("/"):
+        line = line[:-1]
+    if not line:
+        return None
+
+    anchored = line.startswith("/") or "/" in line.rstrip("/")
+    line = line.lstrip("/")
+    if not line:
+        return None
+
+    prefix = "" if anchored else "(?:.*/)?"
+    return (re.compile("^" + prefix + _ignore_translate(line) + "(?:/.*)?$"), negated, raw.strip())
+
+
+class IgnoreMatcher:
+    """Ordered .foxignore rules; the last matching rule wins."""
+
+    def __init__(self, rules):
+        self._rules = rules
+
+    @classmethod
+    def from_text(cls, text):
+        rules = []
+        for raw in (text or "").splitlines():
+            rule = _compile_ignore_rule(raw)
+            if rule is not None:
+                rules.append(rule)
+        return cls(rules)
+
+    @classmethod
+    def default(cls):
+        return cls.from_text("\n".join(DEFAULT_IGNORE_PATTERNS))
+
+    def __bool__(self):
+        return bool(self._rules)
+
+    def matched_rule(self, path):
+        normalized = (path or "").replace("\\", "/")
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        normalized = normalized.lstrip("/")
+        if not normalized:
+            return None
+
+        decision = None
+        for regex, negated, source in self._rules:
+            if regex.match(normalized):
+                decision = (negated, source)
+        if decision is None or decision[0]:
+            return None
+        return decision[1]
+
+    def is_ignored(self, path):
+        return self.matched_rule(path) is not None
+
+
+def load_ignore_matcher(root="."):
+    """Repository .foxignore when present, otherwise the built-in defaults."""
+    try:
+        candidate = Path(root) / IGNORE_FILENAME
+        if candidate.is_file():
+            matcher = IgnoreMatcher.from_text(candidate.read_text(encoding="utf-8", errors="replace"))
+            if matcher:
+                return matcher
+    except Exception:
+        pass
+    return IgnoreMatcher.default()
+
+
+def find_repository_root(start=None):
+    """Walk upwards looking for a .fox repository, the way git finds .git.
+
+    Returns (root, prefix) where prefix is the starting directory expressed
+    relative to root, or (None, "") when there is no repository above us.
+
+    Without this, `.fox` was only ever looked for in the current directory, so
+    `cd src && fox status` reported "src not a repository" even from inside a
+    perfectly good checkout. That bites hardest in an editor, where the
+    integrated terminal often opens in a subfolder.
+    """
+    current = Path(start or Path.cwd()).resolve()
+    for candidate in [current, *current.parents]:
+        if (candidate / ".fox" / "config.json").is_file():
+            try:
+                prefix = current.relative_to(candidate).as_posix()
+            except ValueError:
+                prefix = ""
+            return candidate, ("" if prefix == "." else prefix)
+    return None, ""
+
 
 class FoxClient:
-    def __init__(self):
+    def __init__(self, discover=True):
+        # Commands run from the repository root so that every path below stays
+        # relative and behaves exactly as it always has. `path_prefix` records
+        # where the user actually was, so arguments they typed can be mapped
+        # back onto the root (see `resolve_user_path`).
+        self.path_prefix = ""
+        self.repo_root = None
+        if discover:
+            root, prefix = find_repository_root()
+            if root is not None and Path.cwd().resolve() != root:
+                self.repo_root = root
+                self.path_prefix = prefix
+                os.chdir(root)
+            elif root is not None:
+                self.repo_root = root
+
         self.fox_dir = Path(".fox")
         self.config_file = self.fox_dir / "config.json"
         self.staging_dir = self.fox_dir / "staging"
@@ -151,7 +379,18 @@ class FoxClient:
         return (response.text or "").strip() or f"HTTP {response.status_code}"
 
     def get_auth_headers(self):
-        """Return Authorization headers if an access token is present in global config."""
+        """Return Authorization headers for the current credential.
+
+        FOXNEST_TOKEN wins over the credentials file. That is what lets a host
+        process -- the VS Code extension, or a CI runner -- hand the token in
+        from an OS keychain or a secret store, so it never has to be written to
+        ~/.foxnest/credentials.json in the clear. When it is unset, behaviour is
+        exactly as it was.
+        """
+        env_token = (os.environ.get("FOXNEST_TOKEN") or "").strip()
+        if env_token:
+            return {"Authorization": f"Bearer {env_token}"}
+
         cfg = self.load_global_config() or {}
         # support multiple possible token key names
         token = cfg.get('access_token') or cfg.get('token') or cfg.get('auth_token') or cfg.get('accessToken')
@@ -271,6 +510,1111 @@ class FoxClient:
         print("Failed to update global config")
         return False
 
+    # ------------------------------------------------------------------
+    # Personal access tokens
+    #
+    # `fox login` still exists, but it stores a session credential derived from
+    # the account password. A token is the better thing to put on a build agent:
+    # it is named, scoped, and can be revoked on its own without disturbing any
+    # other machine or forcing a password change.
+    # ------------------------------------------------------------------
+
+    def token_create(self, name, scopes=None, expires_in_days=None, use=False):
+        """Create a personal access token on the server and print it once."""
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+
+        payload = {"name": name}
+        if scopes:
+            payload["scopes"] = scopes
+        if expires_in_days:
+            payload["expires_in_days"] = int(expires_in_days)
+
+        try:
+            response = requests.post(
+                f"{server_url}/api/tokens",
+                json=payload,
+                headers=self.get_auth_headers(),
+                timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+
+        if response.status_code != 200:
+            print(f"Failed to create token: {self._response_error_message(response)}")
+            return False
+
+        data = response.json()
+        token = data.get("token", "")
+        meta = data.get("access_token", {})
+
+        print("")
+        print("Access token created.")
+        print("")
+        print(f"  {token}")
+        print("")
+        print("  Copy it now - the server stores only a hash and cannot show it again.")
+        print(f"  name    : {meta.get('name')}")
+        print(f"  scopes  : {', '.join(meta.get('scopes') or [])}")
+        print(f"  expires : {meta.get('expires_at') or 'never'}")
+        print("")
+
+        if use:
+            cfg = self.load_global_config() or {}
+            cfg["access_token"] = token
+            cfg["origin_url"] = server_url
+            if self.save_global_config(cfg):
+                print(f"Saved as the active credential in {self.global_config_file}")
+            else:
+                print("Warning: token created but could not be saved to global config")
+        else:
+            print("To use it on this machine:  fox token use <token>")
+        return True
+
+    def token_list(self, include_revoked=False):
+        """List the tokens belonging to the logged-in user."""
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+
+        try:
+            response = requests.get(
+                f"{server_url}/api/tokens",
+                params={"include_revoked": str(bool(include_revoked)).lower()},
+                headers=self.get_auth_headers(),
+                timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+
+        if response.status_code != 200:
+            print(f"Failed to list tokens: {self._response_error_message(response)}")
+            return False
+
+        tokens = response.json().get("tokens", [])
+        if not tokens:
+            print("No access tokens. Create one with: fox token create <name>")
+            return True
+
+        print(f"{'ID':<5} {'NAME':<22} {'PREFIX':<12} {'SCOPES':<26} {'LAST USED':<20} STATE")
+        for t in tokens:
+            state = "revoked" if t.get("revoked") else ("expired" if t.get("expired") else "active")
+            last_used = (t.get("last_used_at") or "never")[:19]
+            print(
+                f"{t['id']:<5} {t['name'][:21]:<22} {t['prefix']:<12} "
+                f"{','.join(t.get('scopes') or [])[:25]:<26} {last_used:<20} {state}"
+            )
+        return True
+
+    def token_revoke(self, token_id):
+        """Revoke one token by id."""
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+
+        try:
+            response = requests.delete(
+                f"{server_url}/api/tokens/{token_id}",
+                headers=self.get_auth_headers(),
+                timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+
+        if response.status_code == 404:
+            print(f"No token with id {token_id} belongs to you.")
+            return False
+        if response.status_code != 200:
+            print(f"Failed to revoke token: {self._response_error_message(response)}")
+            return False
+
+        print(f"Token {token_id} revoked. Any machine using it is now locked out.")
+        return True
+
+    def token_use(self, token):
+        """Store an existing token as this machine's credential.
+
+        Verified against the server before saving, so a mistyped token fails
+        here rather than on the next push.
+        """
+        server_url = self._resolve_server_url()
+        token = (token or "").strip()
+        if not token:
+            print("A token value is required.")
+            return False
+
+        try:
+            response = requests.get(
+                f"{server_url}/api/auth/me",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+
+        if response.status_code != 200:
+            print(f"That token was rejected by {server_url}: {self._response_error_message(response)}")
+            return False
+
+        user = response.json().get("user", {})
+        cfg = self.load_global_config() or {}
+        cfg["access_token"] = token
+        cfg["origin_url"] = server_url
+        if user.get("username"):
+            cfg["username"] = user["username"]
+        if not self.save_global_config(cfg):
+            print("Failed to save token to global config")
+            return False
+
+        print(f"Authenticated as {user.get('username')} using an access token.")
+        print(f"Saved to: {self.global_config_file}")
+        return True
+
+    # ------------------------------------------------------------------
+    # Webhooks
+    #
+    # Repository-scoped by default (the repo this working copy is linked to);
+    # --global manages the server-wide hooks that fire for every repository.
+    # ------------------------------------------------------------------
+
+    def _webhook_scope(self, use_global):
+        """Resolve which repository these hook commands apply to, or None."""
+        if use_global:
+            return None
+        repo_id = (self.load_config() or {}).get("repo_id")
+        if not repo_id:
+            print("This directory is not linked to a server repository.")
+            print("Run 'fox set repo-id <id>', or use --global for server-wide hooks.")
+            return False
+        return repo_id
+
+    def webhook_list(self, use_global=False):
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        repo_id = self._webhook_scope(use_global)
+        if repo_id is False:
+            return False
+
+        params = {"repository_id": repo_id} if repo_id else {}
+        try:
+            response = requests.get(
+                f"{server_url}/api/webhooks", params=params,
+                headers=self.get_auth_headers(), timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+
+        if response.status_code != 200:
+            print(f"Failed to list webhooks: {self._response_error_message(response)}")
+            return False
+
+        hooks = response.json().get("webhooks", [])
+        if not hooks:
+            scope = "server-wide" if repo_id is None else f"repository {repo_id}"
+            print(f"No webhooks configured ({scope}).")
+            print("Add one with: fox webhook add <url>")
+            return True
+
+        print(f"{'ID':<5} {'ACTIVE':<8} {'SIGNED':<8} {'EVENTS':<28} URL")
+        for h in hooks:
+            print(
+                f"{h['id']:<5} {('yes' if h['active'] else 'no'):<8} "
+                f"{('yes' if h['has_secret'] else 'no'):<8} "
+                f"{','.join(h['events'])[:27]:<28} {h['url']}"
+            )
+        return True
+
+    def webhook_add(self, url, events=None, secret=None, use_global=False):
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        repo_id = self._webhook_scope(use_global)
+        if repo_id is False:
+            return False
+
+        payload = {"url": url, "repository_id": repo_id}
+        if events:
+            payload["events"] = events
+        if secret:
+            payload["secret"] = secret
+
+        try:
+            response = requests.post(
+                f"{server_url}/api/webhooks", json=payload,
+                headers=self.get_auth_headers(), timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+
+        if response.status_code != 200:
+            print(f"Failed to add webhook: {self._response_error_message(response)}")
+            return False
+
+        hook = response.json().get("webhook", {})
+        print(f"Webhook {hook.get('id')} created for {hook.get('url')}")
+        print(f"  events: {', '.join(hook.get('events') or [])}")
+        if not hook.get("has_secret"):
+            print("  note: no secret set, so deliveries are unsigned and a receiver")
+            print("        cannot tell a real delivery from a forged one.")
+        return True
+
+    def webhook_remove(self, webhook_id):
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        try:
+            response = requests.delete(
+                f"{server_url}/api/webhooks/{webhook_id}",
+                headers=self.get_auth_headers(), timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+
+        if response.status_code != 200:
+            print(f"Failed to remove webhook: {self._response_error_message(response)}")
+            return False
+        print(f"Webhook {webhook_id} removed.")
+        return True
+
+    def webhook_ping(self, webhook_id):
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        print(f"Pinging webhook {webhook_id}...")
+        try:
+            response = requests.post(
+                f"{server_url}/api/webhooks/{webhook_id}/ping",
+                headers=self.get_auth_headers(), timeout=60,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+
+        if response.status_code != 200:
+            print(f"Ping failed: {self._response_error_message(response)}")
+            return False
+
+        delivery = response.json().get("delivery") or {}
+        if delivery.get("success"):
+            print(f"  OK  HTTP {delivery.get('status_code')} in {delivery.get('duration_ms')}ms")
+        else:
+            print(f"  FAILED  {delivery.get('error') or 'HTTP ' + str(delivery.get('status_code'))}")
+        return bool(delivery.get("success"))
+
+    def webhook_deliveries(self, webhook_id, limit=15):
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        try:
+            response = requests.get(
+                f"{server_url}/api/webhooks/{webhook_id}/deliveries",
+                params={"limit": limit},
+                headers=self.get_auth_headers(), timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+
+        if response.status_code != 200:
+            print(f"Failed to fetch deliveries: {self._response_error_message(response)}")
+            return False
+
+        deliveries = response.json().get("deliveries", [])
+        if not deliveries:
+            print("No deliveries recorded yet.")
+            return True
+
+        print(f"{'WHEN':<21} {'EVENT':<22} {'TRY':<5} {'CODE':<6} RESULT")
+        for d in deliveries:
+            when = (d.get("created_at") or "")[:19]
+            code = d.get("status_code") or "-"
+            result = "ok" if d.get("success") else (d.get("error") or "failed")[:40]
+            print(f"{when:<21} {d['event'][:21]:<22} {d.get('attempt', 1):<5} {str(code):<6} {result}")
+        return True
+
+    # ------------------------------------------------------------------
+    # Status checks
+    #
+    # This is the surface a CI job uses: report pending when the build starts,
+    # then success or failure when it finishes. Authenticate the runner with a
+    # repo:write access token rather than someone's password.
+    # ------------------------------------------------------------------
+
+    def _status_repo_and_commit(self, commit=None):
+        """Resolve which repository and commit a status applies to."""
+        config = self.load_config() or {}
+        repo_id = config.get("repo_id")
+        if not repo_id:
+            print("This directory is not linked to a server repository.")
+            print("Run: fox set repo-id <id>")
+            return None, None
+
+        commit_id = commit or self.get_head_commit_id()
+        if not commit_id:
+            print("No commit to report against. Pass one explicitly: --commit <id>")
+            return None, None
+        return repo_id, commit_id
+
+    def status_report(self, context, state, description=None, target_url=None, commit=None):
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        repo_id, commit_id = self._status_repo_and_commit(commit)
+        if not repo_id:
+            return False
+
+        payload = {"context": context, "state": state}
+        if description:
+            payload["description"] = description
+        if target_url:
+            payload["target_url"] = target_url
+
+        try:
+            response = requests.post(
+                f"{server_url}/api/repository/{repo_id}/commits/{commit_id}/statuses",
+                json=payload, headers=self.get_auth_headers(), timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+
+        if response.status_code != 200:
+            print(f"Failed to report status: {self._response_error_message(response)}")
+            return False
+
+        data = response.json()
+        combined = data.get("combined", {})
+        print(f"Reported {context} = {state} on {commit_id[:8]}")
+        print(f"  commit is now: {combined.get('state')}")
+        missing = combined.get("missing_required") or []
+        failing = combined.get("failing_required") or []
+        if failing:
+            print(f"  failing required: {', '.join(failing)}")
+        if missing:
+            print(f"  not yet reported: {', '.join(missing)}")
+        return True
+
+    def status_show(self, commit=None, history=False):
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        repo_id, commit_id = self._status_repo_and_commit(commit)
+        if not repo_id:
+            return False
+
+        try:
+            response = requests.get(
+                f"{server_url}/api/repository/{repo_id}/commits/{commit_id}/statuses",
+                params={"history": str(bool(history)).lower()},
+                headers=self.get_auth_headers(), timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+
+        if response.status_code != 200:
+            print(f"Failed to fetch statuses: {self._response_error_message(response)}")
+            return False
+
+        data = response.json()
+
+        if history:
+            rows = data.get("history", [])
+            if not rows:
+                print(f"No status reports for {commit_id[:8]}.")
+                return True
+            print(f"{'WHEN':<21} {'CONTEXT':<26} {'STATE':<10} BY")
+            for r in rows:
+                print(
+                    f"{(r.get('created_at') or '')[:19]:<21} {r['context'][:25]:<26} "
+                    f"{r['state']:<10} {r.get('reported_by') or '-'}"
+                )
+            return True
+
+        combined = data.get("combined", {})
+        statuses = combined.get("statuses", [])
+        print(f"Commit {commit_id[:8]} - overall: {combined.get('state')}")
+        if not statuses:
+            print("  no checks have reported")
+        else:
+            for s in statuses:
+                mark = {"success": "ok  ", "failure": "FAIL", "error": "ERR ", "pending": "... "}
+                print(f"  [{mark.get(s['state'], '?   ')}] {s['context']}"
+                      f"{('  - ' + s['description']) if s.get('description') else ''}")
+
+        required = combined.get("required") or []
+        if required:
+            print(f"  required: {', '.join(required)}")
+            print(f"  merge gate: {'satisfied' if combined.get('required_satisfied') else 'BLOCKED'}")
+        return True
+
+    # ------------------------------------------------------------------
+    # Server-side push rules (pre-receive hooks)
+    # ------------------------------------------------------------------
+
+    def hook_list(self, use_global=False):
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        repo_id = self._webhook_scope(use_global)
+        if repo_id is False:
+            return False
+
+        params = {"repository_id": repo_id} if repo_id else {}
+        try:
+            response = requests.get(
+                f"{server_url}/api/server-hooks", params=params,
+                headers=self.get_auth_headers(), timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+
+        if response.status_code != 200:
+            print(f"Failed to list push rules: {self._response_error_message(response)}")
+            return False
+
+        hooks = response.json().get("hooks", [])
+        if not hooks:
+            print("No push rules configured.")
+            print("Add one with: fox hook add <name> --min-message-length 20")
+            return True
+
+        for h in hooks:
+            state = "enforced" if h["enabled"] else "disabled"
+            print(f"[{h['id']}] {h['name']}  ({h['hook_type']}, {state})")
+            config = h.get("config") or {}
+            if not config:
+                print("      no rules - accepts everything")
+            for key, value in sorted(config.items()):
+                shown = ", ".join(map(str, value)) if isinstance(value, list) else value
+                print(f"      {key}: {shown}")
+        return True
+
+    def hook_add(self, name, use_global=False, min_message_length=None,
+                 message_pattern=None, forbidden_paths=None, protected_paths=None,
+                 protected_allowed_users=None, max_file_bytes=None,
+                 forbidden_content=None, external_url=None):
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        repo_id = self._webhook_scope(use_global)
+        if repo_id is False:
+            return False
+
+        config = {}
+        if min_message_length is not None:
+            config["commit_message_min_length"] = int(min_message_length)
+        if message_pattern:
+            config["commit_message_pattern"] = message_pattern
+        if forbidden_paths:
+            config["forbidden_paths"] = forbidden_paths
+        if protected_paths:
+            config["protected_paths"] = protected_paths
+        if protected_allowed_users:
+            config["protected_paths_allowed_users"] = protected_allowed_users
+        if max_file_bytes is not None:
+            config["max_file_bytes"] = int(max_file_bytes)
+        if forbidden_content:
+            config["forbidden_content"] = forbidden_content
+        if external_url:
+            config["external_url"] = external_url
+
+        if not config:
+            print("A rule with no conditions would accept everything. Pass at least one option.")
+            return False
+
+        try:
+            response = requests.post(
+                f"{server_url}/api/server-hooks",
+                json={"name": name, "repository_id": repo_id,
+                      "hook_type": "pre-receive", "config": config},
+                headers=self.get_auth_headers(), timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+
+        if response.status_code != 200:
+            print(f"Failed to add push rule: {self._response_error_message(response)}")
+            return False
+
+        hook = response.json().get("hook", {})
+        print(f"Push rule {hook.get('id')} '{hook.get('name')}' created and enforced.")
+        print("Check it before it starts refusing colleagues' work:")
+        print(f"  fox hook test {hook.get('id')} --message '<a message>' --path <a/path>")
+        return True
+
+    def hook_remove(self, hook_id):
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        try:
+            response = requests.delete(
+                f"{server_url}/api/server-hooks/{hook_id}",
+                headers=self.get_auth_headers(), timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Failed to remove push rule: {self._response_error_message(response)}")
+            return False
+        print(f"Push rule {hook_id} removed.")
+        return True
+
+    def hook_enable(self, hook_id, enabled=True):
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        try:
+            response = requests.put(
+                f"{server_url}/api/server-hooks/{hook_id}",
+                json={"enabled": bool(enabled)},
+                headers=self.get_auth_headers(), timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Failed to update push rule: {self._response_error_message(response)}")
+            return False
+        print(f"Push rule {hook_id} is now {'enforced' if enabled else 'disabled'}.")
+        return True
+
+    def hook_test(self, hook_id, message="", paths=None):
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        try:
+            response = requests.post(
+                f"{server_url}/api/server-hooks/{hook_id}/test",
+                json={"message": message, "paths": paths or []},
+                headers=self.get_auth_headers(), timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+
+        if response.status_code != 200:
+            print(f"Dry run failed: {self._response_error_message(response)}")
+            return False
+
+        data = response.json()
+        if data.get("would_accept"):
+            print("Would be ACCEPTED.")
+        else:
+            print("Would be REJECTED:")
+            for reason in data.get("reasons", []):
+                print(f"  - {reason}")
+        print(f"Note: {data.get('note')}")
+        return bool(data.get("would_accept"))
+
+    # ------------------------------------------------------------------
+    # SSH key authentication
+    #
+    # `fox ssh login` signs a one-time nonce with a local private key and trades
+    # it for a session token. Nothing reusable crosses the wire, so unlike a
+    # password or a stored token there is no long-lived secret to capture.
+    # ------------------------------------------------------------------
+
+    DEFAULT_KEY_NAMES = ("id_ed25519", "id_rsa", "id_ecdsa")
+
+    def _find_private_key(self, explicit=None):
+        """Locate a private key: the one given, else the usual names in ~/.ssh."""
+        from pathlib import Path
+
+        if explicit:
+            path = Path(explicit).expanduser()
+            if not path.exists():
+                print(f"No such key file: {path}")
+                return None
+            return path
+
+        ssh_dir = Path.home() / ".ssh"
+        for name in self.DEFAULT_KEY_NAMES:
+            candidate = ssh_dir / name
+            if candidate.exists():
+                return candidate
+
+        print(f"No private key found in {ssh_dir}.")
+        print("Generate one with:  ssh-keygen -t ed25519")
+        print("Or point at it with: fox ssh login --key <path>")
+        return None
+
+    def ssh_key_add(self, title, key_path=None):
+        """Upload a public key to the server."""
+        from pathlib import Path
+
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+
+        if key_path:
+            pub_path = Path(key_path).expanduser()
+        else:
+            private = self._find_private_key()
+            if not private:
+                return False
+            pub_path = private.with_suffix(private.suffix + ".pub") if private.suffix else Path(str(private) + ".pub")
+
+        if not pub_path.exists():
+            print(f"No public key at {pub_path}")
+            return False
+
+        try:
+            public_key = pub_path.read_text(encoding="utf-8").strip()
+        except Exception as e:
+            print(f"Could not read {pub_path}: {e}")
+            return False
+
+        try:
+            response = requests.post(
+                f"{server_url}/api/ssh-keys",
+                json={"title": title, "public_key": public_key},
+                headers=self.get_auth_headers(), timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+
+        if response.status_code != 200:
+            print(f"Failed to add key: {self._response_error_message(response)}")
+            return False
+
+        key = response.json().get("key", {})
+        print(f"Added {key.get('key_type')} key '{key.get('title')}'")
+        print(f"  fingerprint: {key.get('fingerprint')}")
+        print("Sign in with it using: fox ssh login")
+        return True
+
+    def ssh_key_list(self):
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        try:
+            response = requests.get(
+                f"{server_url}/api/ssh-keys", headers=self.get_auth_headers(), timeout=30
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+
+        if response.status_code != 200:
+            print(f"Failed to list keys: {self._response_error_message(response)}")
+            return False
+
+        keys = response.json().get("keys", [])
+        if not keys:
+            print("No SSH keys registered. Add one with: fox ssh add <title>")
+            return True
+
+        print(f"{'ID':<5} {'TITLE':<22} {'TYPE':<16} {'LAST USED':<20} FINGERPRINT")
+        for k in keys:
+            print(
+                f"{k['id']:<5} {k['title'][:21]:<22} {k['key_type']:<16} "
+                f"{(k.get('last_used_at') or 'never')[:19]:<20} {k['fingerprint']}"
+            )
+        return True
+
+    def ssh_key_remove(self, key_id):
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        try:
+            response = requests.delete(
+                f"{server_url}/api/ssh-keys/{key_id}",
+                headers=self.get_auth_headers(), timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Failed to remove key: {self._response_error_message(response)}")
+            return False
+        print(f"Key {key_id} removed. Any machine relying on it can no longer sign in.")
+        return True
+
+    def ssh_login(self, username=None, key_path=None):
+        """Authenticate with a private key and save the resulting session token."""
+        server_url = self._resolve_server_url()
+        global_cfg = self.load_global_config() or {}
+
+        if not username:
+            username = global_cfg.get("username")
+        if not username:
+            username = input("Username: ").strip()
+        if not username:
+            print("A username is required.")
+            return False
+
+        private_path = self._find_private_key(key_path)
+        if not private_path:
+            return False
+
+        try:
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
+        except ImportError:
+            print("SSH login needs the 'cryptography' package on the client:")
+            print("  pip install cryptography")
+            return False
+
+        try:
+            key_bytes = private_path.read_bytes()
+        except Exception as e:
+            print(f"Could not read {private_path}: {e}")
+            return False
+
+        try:
+            private_key = serialization.load_ssh_private_key(key_bytes, password=None)
+        except TypeError:
+            # Passphrase-protected keys need the passphrase; ask rather than fail.
+            try:
+                import getpass
+                passphrase = getpass.getpass(f"Passphrase for {private_path.name}: ").encode()
+                private_key = serialization.load_ssh_private_key(key_bytes, password=passphrase)
+            except Exception as e:
+                print(f"Could not unlock the key: {e}")
+                return False
+        except Exception as e:
+            print(f"Could not read the private key: {e}")
+            return False
+
+        try:
+            response = requests.post(
+                f"{server_url}/api/auth/ssh/challenge",
+                json={"username": username}, timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Could not get a challenge: {self._response_error_message(response)}")
+            return False
+
+        nonce = response.json().get("nonce", "")
+        message = nonce.encode("utf-8")
+
+        try:
+            if isinstance(private_key, ed25519.Ed25519PrivateKey):
+                signature = private_key.sign(message)
+            elif isinstance(private_key, rsa.RSAPrivateKey):
+                signature = private_key.sign(message, padding.PKCS1v15(), hashes.SHA256())
+            elif isinstance(private_key, ec.EllipticCurvePrivateKey):
+                signature = private_key.sign(message, ec.ECDSA(hashes.SHA256()))
+            else:
+                print(f"Unsupported key type: {type(private_key).__name__}")
+                return False
+        except Exception as e:
+            print(f"Could not sign the challenge: {e}")
+            return False
+
+        import base64 as _b64
+        try:
+            response = requests.post(
+                f"{server_url}/api/auth/ssh/verify",
+                json={"nonce": nonce, "signature": _b64.b64encode(signature).decode()},
+                timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+
+        if response.status_code != 200:
+            print(f"SSH login failed: {self._response_error_message(response)}")
+            print(f"Is {private_path.name}'s public key registered? Check: fox ssh list")
+            return False
+
+        data = response.json()
+        cfg = self.load_global_config() or {}
+        cfg["username"] = data.get("user", {}).get("username", username)
+        cfg["access_token"] = data["access_token"]
+        cfg["origin_url"] = server_url
+        if not self.save_global_config(cfg):
+            print("Authenticated, but the token could not be saved")
+            return False
+
+        print(f"Signed in as {cfg['username']} using {private_path.name}.")
+        return True
+
+    # ------------------------------------------------------------------
+    # Search
+    #
+    # Code search is scoped to one repository (the linked one by default),
+    # because a store-wide content scan would read gigabytes per query.
+    # ------------------------------------------------------------------
+
+    def search_repos(self, query=None, owner=None, limit=50):
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        params = {"limit": limit}
+        if query:
+            params["q"] = query
+        if owner:
+            params["owner"] = owner
+        try:
+            response = requests.get(f"{server_url}/api/search/repositories", params=params,
+                                    headers=self.get_auth_headers(), timeout=60)
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Search failed: {self._response_error_message(response)}")
+            return False
+
+        data = response.json()
+        repos = data.get("repositories", [])
+        if not repos:
+            print("No repositories matched.")
+            return True
+        print(f"{'ID':<18} {'NAME':<28} {'OWNER':<14} DESCRIPTION")
+        for r in repos:
+            flag = " [archived]" if r.get("is_archived") else ""
+            print(f"{r['id']:<18} {(r['name'] or '')[:27]:<28} {(r.get('owner') or '-')[:13]:<14} "
+                  f"{(r.get('description') or '')[:40]}{flag}")
+        if data.get("truncated"):
+            print(f"... {data['total']} total; raise --limit to see more")
+        return True
+
+    def search_commits_cmd(self, query=None, author=None, all_repos=False, limit=50):
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        params = {"limit": limit}
+        if query:
+            params["q"] = query
+        if author:
+            params["author"] = author
+        if not all_repos:
+            repo_id = (self.load_config() or {}).get("repo_id")
+            if repo_id:
+                params["repository_id"] = repo_id
+
+        try:
+            response = requests.get(f"{server_url}/api/search/commits", params=params,
+                                    headers=self.get_auth_headers(), timeout=60)
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Search failed: {self._response_error_message(response)}")
+            return False
+
+        commits = response.json().get("commits", [])
+        if not commits:
+            print("No commits matched.")
+            return True
+        for c in commits:
+            when = (c.get("created_at") or "")[:19].replace("T", " ")
+            print(f"{c['id'][:12]}  {when:<20} {(c.get('author') or '-'):<12} "
+                  f"{(c.get('repository_name') or '-')[:18]:<19} {(c.get('message') or '')[:48]}")
+        return True
+
+    def search_code_cmd(self, query, branch=None, path=None, regex=False,
+                        case_sensitive=False, repo=None, limit=200):
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+
+        repo_id = repo or (self.load_config() or {}).get("repo_id")
+        if not repo_id:
+            print("Code search needs a repository.")
+            print("Run this inside a linked repo, or pass --repo <id>.")
+            return False
+
+        params = {"repository_id": repo_id, "q": query, "limit": limit}
+        if branch:
+            params["branch"] = branch
+        if path:
+            params["path"] = path
+        if regex:
+            params["regex"] = "true"
+        if case_sensitive:
+            params["case_sensitive"] = "true"
+
+        try:
+            response = requests.get(f"{server_url}/api/search/code", params=params,
+                                    headers=self.get_auth_headers(), timeout=120)
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Search failed: {self._response_error_message(response)}")
+            return False
+
+        data = response.json()
+        results = data.get("results", [])
+        if not results:
+            print(f"No matches. Scanned {data.get('files_scanned', 0)} file(s).")
+            return True
+
+        for f in results:
+            print(f"\n{f['path']}  ({f['match_count']})")
+            for m in f["matches"]:
+                print(f"  {m['line']:>6}: {m['text'].rstrip()[:110]}")
+
+        print(f"\n{data['total_matches']} match(es) in {len(results)} file(s); "
+              f"{data['files_scanned']} scanned, {data['files_skipped']} skipped")
+        if data.get("truncated"):
+            print("Results were truncated; narrow the query or use --path.")
+        return True
+
+    # ------------------------------------------------------------------
+    # Administrative operations
+    #
+    # Backup, restore and schema checks live in server/tools/ rather than here:
+    # they need filesystem access on the server host, so putting them in the
+    # developer client would only ever produce a confusing error. What belongs
+    # here is what an admin can genuinely do remotely.
+    # ------------------------------------------------------------------
+
+    def admin_lockouts(self):
+        """Show locked accounts and where failed sign-ins are coming from."""
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        try:
+            response = requests.get(
+                f"{server_url}/api/admin/security/lockouts",
+                headers=self.get_auth_headers(), timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Failed to read lockouts: {self._response_error_message(response)}")
+            return False
+
+        data = response.json()
+        p = data.get("policy", {})
+        print(f"Policy: {p.get('max_account_failures')} failures per account in "
+              f"{p.get('account_window_minutes')} min -> {p.get('lockout_minutes')} min lockout; "
+              f"{p.get('max_ip_failures')} per address")
+        print()
+
+        locked = data.get("locked_accounts", [])
+        if not locked:
+            print("No accounts are locked.")
+        else:
+            print(f"{'USERNAME':<24} {'REMAINING':<12} {'FAILURES':<10} LAST IP")
+            for l in locked:
+                mins = max(1, round(l["seconds_remaining"] / 60))
+                print(f"{l['username'][:23]:<24} {str(mins) + ' min':<12} "
+                      f"{l['failed_count']:<10} {l.get('last_ip') or '-'}")
+
+        ips = data.get("recent_failures_by_ip", [])
+        if ips:
+            print()
+            print(f"Failed attempts in the last {data.get('window_minutes')} minutes, by source:")
+            for row in ips[:10]:
+                print(f"  {row['ip_address']:<24} {row['failures']}")
+        return True
+
+    def admin_unlock(self, username):
+        """Clear a lockout early."""
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        try:
+            response = requests.post(
+                f"{server_url}/api/admin/security/unlock",
+                json={"username": username},
+                headers=self.get_auth_headers(), timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Unlock failed: {self._response_error_message(response)}")
+            return False
+        data = response.json()
+        if data.get("was_locked"):
+            print(f"{username} unlocked; its failure history was cleared too.")
+        else:
+            print(f"{username} was not locked. Any failure history has been cleared.")
+        return True
+
+    def admin_schema(self):
+        """Report whether the live schema matches the models."""
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        try:
+            response = requests.get(
+                f"{server_url}/api/admin/schema",
+                headers=self.get_auth_headers(), timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Failed to read schema health: {self._response_error_message(response)}")
+            return False
+
+        s = response.json().get("schema", {})
+        print(f"  tables expected : {s.get('tables_expected')}")
+        print(f"  tables present  : {s.get('tables_present')}")
+        print(f"  missing tables  : {len(s.get('missing_tables') or [])}")
+        print(f"  missing columns : {len(s.get('missing_columns') or [])}")
+        if s.get("healthy"):
+            print("\n  healthy - the live schema matches the models.")
+            return True
+        print()
+        for t in s.get("missing_tables") or []:
+            print(f"  missing table : {t}")
+        for c in (s.get("missing_columns") or [])[:20]:
+            print(f"  missing column: {c['table']}.{c['column']}")
+        print("\n  DRIFT - run 'py -3.11 tools/schema.py --check' on the server.")
+        return False
+
+    def admin_backups(self):
+        """List backups recorded on the server."""
+        server_url = self._resolve_server_url()
+        if not self.ensure_authenticated():
+            return False
+        try:
+            response = requests.get(
+                f"{server_url}/api/admin/backups",
+                headers=self.get_auth_headers(), timeout=60,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Failed to list backups: {self._response_error_message(response)}")
+            return False
+
+        data = response.json()
+        rows = data.get("backups", [])
+        print(f"Destination: {data.get('destination')}")
+        print()
+        if not rows:
+            print("No backups recorded.")
+            print("On the server: py -3.11 tools/backup.py --create")
+            return True
+
+        def mb(n):
+            return f"{(n or 0) / 1024 / 1024:.1f} MB"
+
+        print(f"{'WHEN':<21} {'LABEL':<16} {'DB':<11} {'BLOBS':<11} {'OBJECTS':<9} OK")
+        for b in rows:
+            when = (b.get("created_at") or "")[:19].replace("T", " ")
+            print(f"{when:<21} {b['label'][:15]:<16} {mb(b['database_bytes']):<11} "
+                  f"{mb(b['blob_bytes']):<11} {b['blob_count']:<9} "
+                  f"{'yes' if b['verified'] else 'NO'}")
+        return True
+
     def _authed_post(self, url, json=None, params=None, timeout=30):
         """POST with auth header; on 401, prompt login once and retry."""
         if not self.ensure_authenticated():
@@ -387,6 +1731,30 @@ class FoxClient:
             return True
         return False
     
+    def resolve_user_path(self, user_path):
+        """Map a path the user typed onto one relative to the repository root.
+
+        Commands run from the root, so `fox add main.py` issued from `src/`
+        means `src/main.py`. Absolute paths are left alone but made relative to
+        the root when they fall inside it, so both forms end up in the same
+        shape the index and the server expect.
+        """
+        if not user_path or not self.path_prefix:
+            return user_path
+
+        candidate = Path(user_path)
+        if candidate.is_absolute():
+            try:
+                return candidate.resolve().relative_to(Path.cwd().resolve()).as_posix()
+            except ValueError:
+                return user_path  # outside the repository; leave it to fail loudly
+
+        # "." from a subfolder means that subfolder, not the whole repository.
+        text = str(user_path).replace("\\", "/")
+        if text in (".", "./"):
+            return self.path_prefix
+        return f"{self.path_prefix}/{text.lstrip('./')}"
+
     def check_repository(self, command_name="command"):
         """Check if current directory is a Fox repository"""
         if not self.is_initialized():
@@ -492,6 +1860,14 @@ class FoxClient:
         return variants
 
     def _resolve_server_url(self, config=None):
+        """Which server to talk to.
+
+        FOXNEST_SERVER overrides everything, so a host can point one workspace at
+        a different server without rewriting the user's global config.
+        """
+        env_server = (os.environ.get("FOXNEST_SERVER") or "").strip()
+        if env_server:
+            return env_server.rstrip("/")
         if config is not None:
             return config.get("origin_url") or config.get("server_url") or self.server_url
         origin = self.get_origin_url()
@@ -550,7 +1926,17 @@ class FoxClient:
         self._write_ref(self.heads_dir / "main", "")
         with open(self.head_file, "w") as f:
             f.write("ref: refs/heads/main")
-        
+
+        # Seed a .foxignore so build output and archives never enter the store.
+        # Never clobber one the user already wrote.
+        ignore_path = Path(IGNORE_FILENAME)
+        if not ignore_path.exists():
+            try:
+                ignore_path.write_text(DEFAULT_FOXIGNORE_TEMPLATE, encoding="utf-8")
+                print(f"Created {IGNORE_FILENAME} (edit it to change what Fox tracks)")
+            except OSError as exc:
+                print(f"Warning: could not create {IGNORE_FILENAME}: {exc}")
+
         print(f"Initialized Fox repository for {username}/{repo_name}")
         print("Use 'fox add <files>' to add files and 'fox commit' to commit changes")
         return True
@@ -1016,34 +2402,40 @@ class FoxClient:
         return modified_files
     
     def get_all_files(self):
-        """Get all files in the working directory (excluding .fox directory and common ignore patterns)"""
+        """Every trackable file in the working directory, honouring .foxignore.
+
+        Falls back to the built-in defaults when the repository has no .foxignore.
+        Note this no longer skips every dotfile: real configuration such as
+        .env.example or .foxignore itself is trackable, and the ignore rules decide.
+        """
+        matcher = load_ignore_matcher(".")
         all_files = []
-        current_dir = Path(".")
-        
-        # Common directories to ignore
-        ignore_patterns = {
-            ".fox", ".git", ".svn", ".hg",
-            "venv", "env", ".venv", ".env",
-            "node_modules", "__pycache__", ".pytest_cache",
-            ".tox", ".coverage", "dist", "build",
-            ".DS_Store", "Thumbs.db"
-        }
-        
-        for file_path in current_dir.rglob("*"):
-            if file_path.is_file():
-                # Check if any part of the path contains ignored patterns
-                path_parts = file_path.parts
-                should_ignore = False
-                
-                for part in path_parts:
-                    if part in ignore_patterns or part.startswith('.'):
-                        should_ignore = True
-                        break
-                
-                if not should_ignore:
-                    all_files.append(file_path)
-        
+
+        for file_path in Path(".").rglob("*"):
+            if not file_path.is_file():
+                continue
+            relative = file_path.as_posix()
+            if relative.startswith("./"):
+                relative = relative[2:]
+            if not matcher.is_ignored(relative):
+                all_files.append(file_path)
+
         return all_files
+
+    def report_ignored_files(self, limit=10):
+        """List what .foxignore is currently excluding, for `fox status`."""
+        matcher = load_ignore_matcher(".")
+        hits = []
+        for file_path in Path(".").rglob("*"):
+            if not file_path.is_file():
+                continue
+            relative = file_path.as_posix()
+            pattern = matcher.matched_rule(relative)
+            if pattern and not relative.startswith(".fox/"):
+                hits.append((relative, pattern))
+                if len(hits) >= limit:
+                    break
+        return hits
     
     def get_last_commit_files(self):
         """Get file states from the last commit"""
@@ -2768,8 +4160,11 @@ class FoxClient:
             
             for filepath in file_paths:
                 if filepath.exists() and filepath.is_file():
-                    # Skip .fox directory files
-                    if ".fox" in str(filepath):
+                    # Skip files inside the .fox metadata directory. Test path
+                    # *components*, not a substring of the whole path: ".fox" in
+                    # str(path) also matched ".foxignore", so the one file the
+                    # server relies on for ignore rules could never be committed.
+                    if ".fox" in filepath.parts:
                         continue
                     
                     # For individual files, always add them (don't check if modified)
@@ -2793,8 +4188,18 @@ class FoxClient:
                     # Update delta cache for future delta compression
                     self.update_delta_cache(str(filepath), file_hash)
                     
-                    # Add to staging
-                    staging_file = self.staging_dir / filepath.name
+                    # Add to staging. The entry is named from the file's whole
+                    # relative path, not its basename: keying by basename meant
+                    # client/fox.py, release/fox.py and client/client1/fox.py all
+                    # wrote to the same staging entry and silently overwrote each
+                    # other, so only the last one survived the commit. On this
+                    # repository that quietly dropped 33 files, including six of
+                    # the seven __init__.py files. Hashed rather than sanitised so
+                    # a deep path cannot exceed the filesystem's name length.
+                    staging_key = hashlib.sha1(
+                        str(filepath).replace("\\", "/").encode("utf-8")
+                    ).hexdigest()[:16]
+                    staging_file = self.staging_dir / f"{staging_key}.json"
                     with open(staging_file, "w") as f:
                         json.dump({
                             "path": str(filepath),
@@ -3459,8 +4864,26 @@ class FoxClient:
                         # In this case, we don't have the path, so use hash (legacy fallback)
                         server_files[file_hash] = file_info
                 
+                # Drop ignored paths before they go over the wire. The server enforces the
+                # same rules, but doing it here saves uploading what would be discarded.
+                matcher = load_ignore_matcher(".")
+                skipped_locally = []
+                for path in list(server_files):
+                    if path == IGNORE_FILENAME:
+                        continue
+                    pattern = matcher.matched_rule(path)
+                    if pattern:
+                        skipped_locally.append((path, pattern))
+                        server_files.pop(path)
+                if skipped_locally:
+                    print(f"  Skipping {len(skipped_locally)} ignored file(s):")
+                    for path, pattern in skipped_locally[:5]:
+                        print(f"    - {path}  ({IGNORE_FILENAME}: {pattern})")
+                    if len(skipped_locally) > 5:
+                        print(f"    ... and {len(skipped_locally) - 5} more")
+
                 commit_data["files"] = server_files
-                
+
                 # Calculate dynamic timeout based on payload size
                 # Minimum 120 seconds, plus 30 seconds per MB of data
                 import json as json_module
@@ -3495,12 +4918,23 @@ class FoxClient:
                     else:
                         print(f"Failed to push commit {commit['id']}: {data.get('error')}")
                         return False
+                elif response.status_code == 413:
+                    # Server refused the payload: a file, or the commit as a whole, is
+                    # over the configured limit. Refusing beats silently dropping it.
+                    try:
+                        detail = response.json().get("detail", "Payload too large")
+                    except Exception:
+                        detail = "Payload too large"
+                    print(f"\nPush rejected: {detail}")
+                    print(f"\nAdd the offending paths to {IGNORE_FILENAME} and commit again,")
+                    print("or ask an administrator to raise the server limit.")
+                    return False
                 elif response.status_code == 400:
                     # Handle specific error messages from server
                     try:
                         error_data = response.json()
                         error_msg = error_data.get("detail", "Bad request")
-                        
+
                         if "archived" in error_msg.lower():
                             print(f"\nError: Repository is archived.")
                             print(f"To push to an archived repository, use: fox push --archive")
@@ -4035,6 +5469,16 @@ def print_extended_help():
     print("  gc                      Optimize repository (garbage collection)")
     print("  docs [path]             Generate documentation locally")
     print("  generate-docs           Generate documentation on server")
+    print("")
+    print("  AUTOMATION AND INTEGRATION")
+    print("  token                   Named, scoped, revocable access tokens")
+    print("  ssh                     Register SSH keys; sign in without a password")
+    print("  webhook                 Notify an external service when things happen")
+    print("  status-check            Report or view CI results against a commit")
+    print("  hook                    Server-side push rules (pre-receive policy)")
+    print("  search                  Find repositories, commits or code")
+    print("  admin                   Lockouts, schema health and backups (admin)")
+    print("")
     print("  help, --help, -h        Show this help message")
     print("  version, --version, -v  Show version information")
     print("")
@@ -4071,6 +5515,11 @@ def print_extended_help():
     print("  fox gc                  # Optimize repository storage")
     print("  fox docs                # Generate docs for current project")
     print("  fox generate-docs       # Push latest code, then generate docs on server")
+    print("  fox token create ci-runner --scope repo:write   # a credential for a build agent")
+    print("  fox ssh add work-laptop && fox ssh login        # password-free sign-in")
+    print("  fox webhook add https://ci.example/hook --event push")
+    print("  fox status-check report ci/unit-tests success   # from inside a CI job")
+    print("  fox hook add no-secrets --forbid-content 'AKIA[0-9A-Z]{16}'")
     print("")
     print("GETTING STARTED:")
     print("  1. Set username: fox set username <your_name>")
@@ -4471,6 +5920,164 @@ def main():
     login_parser.add_argument("--password", help="Password for login (not recommended on CLI)")
     # Logout command
     logout_parser = subparsers.add_parser("logout", help="Remove saved access token from global config")
+
+    # Personal access tokens: named, scoped, individually revocable credentials.
+    token_parser = subparsers.add_parser("token", help="Manage personal access tokens")
+    token_subparsers = token_parser.add_subparsers(dest="token_command", help="Token commands")
+
+    token_create = token_subparsers.add_parser("create", help="Create a new access token")
+    token_create.add_argument("name", help="A name you will recognise later, e.g. 'ci-runner'")
+    token_create.add_argument(
+        "--scope", action="append", dest="scopes",
+        choices=["repo:read", "repo:write", "admin"],
+        help="Grant a scope (repeatable). Defaults to repo:read.",
+    )
+    token_create.add_argument("--expires-in-days", type=int, help="Expire the token after N days")
+    token_create.add_argument(
+        "--use", action="store_true",
+        help="Also save the new token as this machine's credential",
+    )
+
+    token_list = token_subparsers.add_parser("list", help="List your access tokens")
+    token_list.add_argument(
+        "--all", action="store_true", dest="include_revoked",
+        help="Include revoked and expired tokens",
+    )
+
+    token_revoke = token_subparsers.add_parser("revoke", help="Revoke an access token by id")
+    token_revoke.add_argument("token_id", help="Token id from 'fox token list'")
+
+    token_use = token_subparsers.add_parser("use", help="Authenticate this machine with an existing token")
+    token_use.add_argument("token", help="The fxp_... token value")
+
+    # Webhooks: tell an external system that something happened here.
+    webhook_parser = subparsers.add_parser("webhook", help="Manage webhooks")
+    webhook_subparsers = webhook_parser.add_subparsers(dest="webhook_command", help="Webhook commands")
+
+    wh_list = webhook_subparsers.add_parser("list", help="List webhooks")
+    wh_list.add_argument("--global", action="store_true", dest="use_global", help="Server-wide hooks")
+
+    wh_add = webhook_subparsers.add_parser("add", help="Add a webhook")
+    wh_add.add_argument("url", help="Receiver URL (http:// or https://)")
+    wh_add.add_argument("--event", action="append", dest="events", help="Subscribe to one event (repeatable); default all")
+    wh_add.add_argument("--secret", help="Shared secret used to sign deliveries")
+    wh_add.add_argument("--global", action="store_true", dest="use_global", help="Server-wide hook")
+
+    wh_remove = webhook_subparsers.add_parser("remove", help="Remove a webhook")
+    wh_remove.add_argument("webhook_id", help="Webhook id from 'fox webhook list'")
+
+    wh_ping = webhook_subparsers.add_parser("ping", help="Send a test delivery and report the result")
+    wh_ping.add_argument("webhook_id", help="Webhook id")
+
+    wh_deliveries = webhook_subparsers.add_parser("deliveries", help="Show recent delivery attempts")
+    wh_deliveries.add_argument("webhook_id", help="Webhook id")
+    wh_deliveries.add_argument("--limit", type=int, default=15, help="How many to show")
+
+    # Status checks: what a CI job reports back.
+    status_parser = subparsers.add_parser("status-check", help="Report or view commit status checks")
+    status_subparsers = status_parser.add_subparsers(dest="status_command", help="Status check commands")
+
+    sc_report = status_subparsers.add_parser("report", help="Report a check result against a commit")
+    sc_report.add_argument("context", help="Check name, e.g. ci/unit-tests")
+    sc_report.add_argument("state", choices=["pending", "success", "failure", "error"], help="Result")
+    sc_report.add_argument("--description", help="Short summary, e.g. '42 passed'")
+    sc_report.add_argument("--url", dest="target_url", help="Link to the build log")
+    sc_report.add_argument("--commit", help="Commit id (defaults to HEAD)")
+
+    sc_show = status_subparsers.add_parser("show", help="Show checks on a commit")
+    sc_show.add_argument("--commit", help="Commit id (defaults to HEAD)")
+    sc_show.add_argument("--history", action="store_true", help="Show every report, not just current state")
+
+    # Server-side push rules (pre-receive policy).
+    hook_parser = subparsers.add_parser("hook", help="Manage server-side push rules")
+    hook_subparsers = hook_parser.add_subparsers(dest="hook_command", help="Hook commands")
+
+    hk_list = hook_subparsers.add_parser("list", help="List push rules")
+    hk_list.add_argument("--global", action="store_true", dest="use_global", help="Server-wide rules")
+
+    hk_add = hook_subparsers.add_parser("add", help="Add a push rule")
+    hk_add.add_argument("name", help="A name you will recognise, e.g. 'no-secrets'")
+    hk_add.add_argument("--global", action="store_true", dest="use_global", help="Server-wide rule")
+    hk_add.add_argument("--min-message-length", type=int, help="Reject shorter commit messages")
+    hk_add.add_argument("--message-pattern", help="Regex the commit message must match")
+    hk_add.add_argument("--forbid-path", action="append", dest="forbidden_paths",
+                        help="Glob that may never be pushed (repeatable)")
+    hk_add.add_argument("--protect-path", action="append", dest="protected_paths",
+                        help="Glob only listed users may change (repeatable)")
+    hk_add.add_argument("--allow-user", action="append", dest="protected_allowed_users",
+                        help="User allowed to change protected paths (repeatable)")
+    hk_add.add_argument("--max-file-bytes", type=int, help="Per-file ceiling for this repository")
+    hk_add.add_argument("--forbid-content", action="append", dest="forbidden_content",
+                        help="Regex refused inside text files (repeatable)")
+    hk_add.add_argument("--external-url", help="Policy service that answers allow/deny")
+
+    hk_remove = hook_subparsers.add_parser("remove", help="Remove a push rule")
+    hk_remove.add_argument("hook_id", help="Rule id from 'fox hook list'")
+
+    hk_enable = hook_subparsers.add_parser("enable", help="Enforce a push rule")
+    hk_enable.add_argument("hook_id", help="Rule id")
+
+    hk_disable = hook_subparsers.add_parser("disable", help="Stop enforcing a push rule")
+    hk_disable.add_argument("hook_id", help="Rule id")
+
+    hk_test = hook_subparsers.add_parser("test", help="Dry-run a rule against a hypothetical commit")
+    hk_test.add_argument("hook_id", help="Rule id")
+    hk_test.add_argument("--message", default="", help="Commit message to try")
+    hk_test.add_argument("--path", action="append", dest="paths", help="File path to try (repeatable)")
+
+    # SSH key authentication.
+    ssh_parser = subparsers.add_parser("ssh", help="SSH key authentication")
+    ssh_subparsers = ssh_parser.add_subparsers(dest="ssh_command", help="SSH commands")
+
+    ssh_add = ssh_subparsers.add_parser("add", help="Register a public key on your account")
+    ssh_add.add_argument("title", help="A name for this key, e.g. 'work-laptop'")
+    ssh_add.add_argument("--key", dest="key_path", help="Path to the .pub file (default: ~/.ssh/id_ed25519.pub)")
+
+    ssh_subparsers.add_parser("list", help="List your registered keys")
+
+    ssh_remove = ssh_subparsers.add_parser("remove", help="Remove a registered key")
+    ssh_remove.add_argument("key_id", help="Key id from 'fox ssh list'")
+
+    ssh_login_parser = ssh_subparsers.add_parser("login", help="Sign in with a private key instead of a password")
+    ssh_login_parser.add_argument("--username", help="Account to sign in as")
+    ssh_login_parser.add_argument("--key", dest="key_path", help="Private key to sign with")
+
+    # Search across repositories, commit messages and file contents.
+    search_parser = subparsers.add_parser("search", help="Search repositories, commits and code")
+    search_subparsers = search_parser.add_subparsers(dest="search_command", help="Search commands")
+
+    se_repos = search_subparsers.add_parser("repos", help="Find repositories")
+    se_repos.add_argument("query", nargs="?", help="Match name, description or owner")
+    se_repos.add_argument("--owner", help="Only repositories owned by this user")
+    se_repos.add_argument("--limit", type=int, default=50)
+
+    se_commits = search_subparsers.add_parser("commits", help="Find commits by message")
+    se_commits.add_argument("query", nargs="?", help="Words from the commit message")
+    se_commits.add_argument("--author", help="Only commits by this user")
+    se_commits.add_argument("--all", action="store_true", dest="all_repos",
+                            help="Search every repository, not just this one")
+    se_commits.add_argument("--limit", type=int, default=50)
+
+    se_code = search_subparsers.add_parser("code", help="Find a string in tracked files")
+    se_code.add_argument("query", help="The string to look for")
+    se_code.add_argument("--repo", help="Repository id (defaults to the linked one)")
+    se_code.add_argument("--branch", help="Branch to search (defaults to the head)")
+    se_code.add_argument("--path", help="Only files whose path contains this")
+    se_code.add_argument("--regex", action="store_true", help="Treat the query as a regex")
+    se_code.add_argument("--case-sensitive", action="store_true", dest="case_sensitive")
+    se_code.add_argument("--limit", type=int, default=200)
+
+    # Administrative operations reachable over the API.
+    admin_parser = subparsers.add_parser("admin", help="Administrative operations")
+    admin_subparsers = admin_parser.add_subparsers(dest="admin_command", help="Admin commands")
+
+    admin_subparsers.add_parser("lockouts", help="Show locked accounts and failed sign-ins")
+
+    ad_unlock = admin_subparsers.add_parser("unlock", help="Clear an account lockout")
+    ad_unlock.add_argument("username", help="Account to unlock")
+
+    admin_subparsers.add_parser("schema", help="Check the live schema against the models")
+    admin_subparsers.add_parser("backups", help="List backups recorded on the server")
     link_parser = subparsers.add_parser("link", help="Link local repo to an existing remote (after admin approval)")
     
     args = parser.parse_args()
@@ -4495,8 +6102,23 @@ def main():
         print_extended_help()
         return
     
-    fox = FoxClient()
-    
+    # `init` must not discover an enclosing repository: creating a repo inside
+    # another one is a deliberate act, and climbing out of the directory the
+    # user chose would silently re-initialise the parent instead.
+    fox = FoxClient(discover=(args.command != "init"))
+
+    # Commands now run from the repository root, so remap the paths the user
+    # typed from wherever they actually were.
+    if fox.path_prefix:
+        if getattr(args, "files", None):
+            args.files = [fox.resolve_user_path(f) for f in args.files]
+        for attr in ("path", "paths"):
+            value = getattr(args, attr, None)
+            if isinstance(value, str):
+                setattr(args, attr, fox.resolve_user_path(value))
+            elif isinstance(value, list):
+                setattr(args, attr, [fox.resolve_user_path(v) for v in value])
+
     # Handle special commands
     if args.command == "help":
         print_extended_help()
@@ -4698,6 +6320,141 @@ def main():
         fox.login(username=uname, password=pwd)
     elif args.command == "logout":
         fox.logout()
+
+    elif args.command == "token":
+        sub = getattr(args, "token_command", None)
+        if sub == "create":
+            fox.token_create(
+                args.name,
+                scopes=getattr(args, "scopes", None),
+                expires_in_days=getattr(args, "expires_in_days", None),
+                use=getattr(args, "use", False),
+            )
+        elif sub == "list":
+            fox.token_list(include_revoked=getattr(args, "include_revoked", False))
+        elif sub == "revoke":
+            fox.token_revoke(args.token_id)
+        elif sub == "use":
+            fox.token_use(args.token)
+        else:
+            print("Usage: fox token <create|list|revoke|use> ...")
+
+    elif args.command == "webhook":
+        sub = getattr(args, "webhook_command", None)
+        if sub == "list":
+            fox.webhook_list(use_global=getattr(args, "use_global", False))
+        elif sub == "add":
+            fox.webhook_add(
+                args.url,
+                events=getattr(args, "events", None),
+                secret=getattr(args, "secret", None),
+                use_global=getattr(args, "use_global", False),
+            )
+        elif sub == "remove":
+            fox.webhook_remove(args.webhook_id)
+        elif sub == "ping":
+            fox.webhook_ping(args.webhook_id)
+        elif sub == "deliveries":
+            fox.webhook_deliveries(args.webhook_id, limit=getattr(args, "limit", 15))
+        else:
+            print("Usage: fox webhook <list|add|remove|ping|deliveries> ...")
+
+    elif args.command == "status-check":
+        sub = getattr(args, "status_command", None)
+        if sub == "report":
+            fox.status_report(
+                args.context, args.state,
+                description=getattr(args, "description", None),
+                target_url=getattr(args, "target_url", None),
+                commit=getattr(args, "commit", None),
+            )
+        elif sub == "show":
+            fox.status_show(
+                commit=getattr(args, "commit", None),
+                history=getattr(args, "history", False),
+            )
+        else:
+            print("Usage: fox status-check <report|show> ...")
+
+    elif args.command == "hook":
+        sub = getattr(args, "hook_command", None)
+        if sub == "list":
+            fox.hook_list(use_global=getattr(args, "use_global", False))
+        elif sub == "add":
+            fox.hook_add(
+                args.name,
+                use_global=getattr(args, "use_global", False),
+                min_message_length=getattr(args, "min_message_length", None),
+                message_pattern=getattr(args, "message_pattern", None),
+                forbidden_paths=getattr(args, "forbidden_paths", None),
+                protected_paths=getattr(args, "protected_paths", None),
+                protected_allowed_users=getattr(args, "protected_allowed_users", None),
+                max_file_bytes=getattr(args, "max_file_bytes", None),
+                forbidden_content=getattr(args, "forbidden_content", None),
+                external_url=getattr(args, "external_url", None),
+            )
+        elif sub == "remove":
+            fox.hook_remove(args.hook_id)
+        elif sub == "enable":
+            fox.hook_enable(args.hook_id, True)
+        elif sub == "disable":
+            fox.hook_enable(args.hook_id, False)
+        elif sub == "test":
+            fox.hook_test(args.hook_id, message=getattr(args, "message", ""),
+                          paths=getattr(args, "paths", None))
+        else:
+            print("Usage: fox hook <list|add|remove|enable|disable|test> ...")
+
+    elif args.command == "ssh":
+        sub = getattr(args, "ssh_command", None)
+        if sub == "add":
+            fox.ssh_key_add(args.title, key_path=getattr(args, "key_path", None))
+        elif sub == "list":
+            fox.ssh_key_list()
+        elif sub == "remove":
+            fox.ssh_key_remove(args.key_id)
+        elif sub == "login":
+            fox.ssh_login(
+                username=getattr(args, "username", None),
+                key_path=getattr(args, "key_path", None),
+            )
+        else:
+            print("Usage: fox ssh <add|list|remove|login> ...")
+
+    elif args.command == "search":
+        sub = getattr(args, "search_command", None)
+        if sub == "repos":
+            fox.search_repos(query=getattr(args, "query", None),
+                             owner=getattr(args, "owner", None),
+                             limit=getattr(args, "limit", 50))
+        elif sub == "commits":
+            fox.search_commits_cmd(query=getattr(args, "query", None),
+                                   author=getattr(args, "author", None),
+                                   all_repos=getattr(args, "all_repos", False),
+                                   limit=getattr(args, "limit", 50))
+        elif sub == "code":
+            fox.search_code_cmd(args.query,
+                                branch=getattr(args, "branch", None),
+                                path=getattr(args, "path", None),
+                                regex=getattr(args, "regex", False),
+                                case_sensitive=getattr(args, "case_sensitive", False),
+                                repo=getattr(args, "repo", None),
+                                limit=getattr(args, "limit", 200))
+        else:
+            print("Usage: fox search <repos|commits|code> ...")
+
+    elif args.command == "admin":
+        sub = getattr(args, "admin_command", None)
+        if sub == "lockouts":
+            fox.admin_lockouts()
+        elif sub == "unlock":
+            fox.admin_unlock(args.username)
+        elif sub == "schema":
+            fox.admin_schema()
+        elif sub == "backups":
+            fox.admin_backups()
+        else:
+            print("Usage: fox admin <lockouts|unlock|schema|backups>")
 
     elif args.command == "link":
         if not fox.check_repository("link"):

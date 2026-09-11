@@ -1,5 +1,9 @@
 import React, { useState, useEffect } from 'react'
 import api from '../utils/api'
+import GlassCard from '../components/ui/GlassCard'
+import Button from '../components/ui/Button'
+import PageHeader from '../components/ui/PageHeader'
+import FadeContent from '../components/react-bits/FadeContent'
 
 export default function PasswordReset() {
   const [users, setUsers] = useState([])
@@ -75,83 +79,76 @@ export default function PasswordReset() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-screen">
-        <div className="text-gray-400">Loading users...</div>
+      <div className="flex items-center justify-center py-24">
+        <p className="text-muted">Loading users…</p>
       </div>
     )
   }
 
   return (
-    <div className="p-8 max-w-2xl mx-auto">
-      <div className="bg-slate-800 rounded-lg shadow-lg p-6">
-        <h1 className="text-3xl font-bold text-white mb-6">Password Reset</h1>
-        
+    <FadeContent className="mx-auto max-w-xl">
+      <PageHeader
+        title="Password Reset"
+        subtitle="Set a new password for any user account."
+      />
+
+      <GlassCard className="p-6" hover={false}>
         {error && (
-          <div className="mb-4 p-4 bg-red-500/20 border border-red-500 text-red-200 rounded">
+          <div className="mb-4 rounded-xl border border-danger-fg/20 bg-danger-bg px-4 py-3 text-sm text-danger-fg">
             {error}
           </div>
         )}
-        
+
         {success && (
-          <div className="mb-4 p-4 bg-green-500/20 border border-green-500 text-green-200 rounded">
+          <div className="mb-4 rounded-xl border border-success-fg/20 bg-success-bg px-4 py-3 text-sm text-success-fg">
             {success}
           </div>
         )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-gray-300 font-medium mb-2">
-              Select User
-            </label>
+          <label className="block space-y-1.5">
+            <span className="text-sm font-medium text-ink">Select user</span>
             <select
               value={selectedUser}
               onChange={(e) => setSelectedUser(e.target.value)}
-              className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+              className="w-full rounded-xl border border-border bg-cream-mid px-3.5 py-2.5 text-sm text-ink outline-none focus:border-ink focus:ring-2 focus:ring-ink/10"
             >
-              <option value="">-- Choose a user --</option>
+              <option value="">— Choose a user —</option>
               {users.map((user) => (
                 <option key={user.id} value={user.username}>
                   {user.username} ({user.role})
                 </option>
               ))}
             </select>
-          </div>
+          </label>
 
-          <div>
-            <label className="block text-gray-300 font-medium mb-2">
-              New Password
-            </label>
+          <label className="block space-y-1.5">
+            <span className="text-sm font-medium text-ink">New password</span>
             <input
               type="password"
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
-              className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+              className="w-full rounded-xl border border-border bg-cream-mid px-3.5 py-2.5 text-sm text-ink outline-none placeholder:text-muted focus:border-ink focus:ring-2 focus:ring-ink/10"
               placeholder="Enter new password"
             />
-          </div>
+          </label>
 
-          <div>
-            <label className="block text-gray-300 font-medium mb-2">
-              Confirm Password
-            </label>
+          <label className="block space-y-1.5">
+            <span className="text-sm font-medium text-ink">Confirm password</span>
             <input
               type="password"
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
-              className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-blue-500"
+              className="w-full rounded-xl border border-border bg-cream-mid px-3.5 py-2.5 text-sm text-ink outline-none placeholder:text-muted focus:border-ink focus:ring-2 focus:ring-ink/10"
               placeholder="Confirm new password"
             />
-          </div>
+          </label>
 
-          <button
-            type="submit"
-            disabled={submitting}
-            className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white font-medium py-2 rounded transition-colors"
-          >
-            {submitting ? 'Resetting...' : 'Reset Password'}
-          </button>
+          <Button type="submit" className="w-full" disabled={submitting}>
+            {submitting ? 'Resetting…' : 'Reset password'}
+          </Button>
         </form>
-      </div>
-    </div>
+      </GlassCard>
+    </FadeContent>
   )
 }

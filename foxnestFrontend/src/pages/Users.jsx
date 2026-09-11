@@ -17,23 +17,23 @@ const Users = () => {
       <div className="space-y-6">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-3xl font-bold text-white mb-2">Users</h1>
-            <p className="text-white/70">Loading user data...</p>
+            <h1 className="text-3xl font-bold text-ink mb-2">Users</h1>
+            <p className="text-ink-soft">Loading user data...</p>
           </div>
         </div>
         <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
           {[...Array(6)].map((_, i) => (
             <GlassCard key={i} className="p-6 animate-pulse">
               <div className="flex items-center space-x-4 mb-4">
-                <div className="w-12 h-12 bg-white/20 rounded-full"></div>
+                <div className="w-12 h-12 bg-cream-deep rounded-full"></div>
                 <div className="flex-1">
-                  <div className="h-4 bg-white/20 rounded mb-2"></div>
-                  <div className="h-3 bg-white/20 rounded"></div>
+                  <div className="h-4 bg-cream-deep rounded mb-2"></div>
+                  <div className="h-3 bg-cream-deep rounded"></div>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-4">
-                <div className="h-16 bg-white/20 rounded"></div>
-                <div className="h-16 bg-white/20 rounded"></div>
+                <div className="h-16 bg-cream-deep rounded"></div>
+                <div className="h-16 bg-cream-deep rounded"></div>
               </div>
             </GlassCard>
           ))}
@@ -48,10 +48,10 @@ const Users = () => {
       <div className="space-y-6">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-3xl font-bold text-white mb-2">Users</h1>
+            <h1 className="text-3xl font-bold text-ink mb-2">Users</h1>
             <div className="flex items-center space-x-2">
-              <FiWifiOff className="w-5 h-5 text-red-400" />
-              <p className="text-red-300">Error loading user data: {usersError}</p>
+              <FiWifiOff className="w-5 h-5 text-danger-fg" />
+              <p className="text-danger-fg">Error loading user data: {usersError}</p>
             </div>
           </div>
         </div>
@@ -68,8 +68,8 @@ const Users = () => {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-white mb-2">Users</h1>
-          <p className="text-white/70">View all users and their repository contributions</p>
+          <h1 className="text-3xl font-bold text-ink mb-2">Users</h1>
+          <p className="text-ink-soft">View all users and their repository contributions</p>
         </div>
         <div className="flex items-center space-x-3">
           <Button variant="primary">
@@ -100,42 +100,42 @@ const Users = () => {
             <GlassCard 
               key={user.id} 
               className={`p-6 cursor-pointer transition-all duration-300 ${
-                selectedUser?.id === user.id ? 'ring-2 ring-blue-400 bg-white/15' : ''
+                selectedUser?.id === user.id ? 'ring-2 ring-info-fg bg-cream-mid' : ''
               }`}
               onClick={() => handleUserClick(user)}
             >
               {/* User Header */}
               <div className="flex items-center space-x-4 mb-4">
-                <div className="w-12 h-12 bg-gradient-to-br from-blue-400 to-blue-600 rounded-full flex items-center justify-center flex-shrink-0">
-                  <span className="text-white font-semibold text-lg">{user.avatar}</span>
+                <div className="w-12 h-12 bg-gradient-to-br from-glow to-accent rounded-full flex items-center justify-center flex-shrink-0">
+                  <span className="text-ink font-semibold text-lg">{user.avatar}</span>
                 </div>
                 <div className="flex-1 min-w-0">
-                  <h3 className="font-semibold text-white truncate">{user.name}</h3>
-                  <p className="text-sm text-white/70 truncate">@{user.username}</p>
+                  <h3 className="font-semibold text-ink truncate">{user.name}</h3>
+                  <p className="text-sm text-ink-soft truncate">@{user.username}</p>
                   <Badge variant="info" className="mt-1">{user.role}</Badge>
                 </div>
               </div>
 
               {/* User Stats */}
               <div className="grid grid-cols-2 gap-4 mb-4">
-                <div className="text-center p-3 rounded-lg bg-white/10">
+                <div className="text-center p-3 rounded-lg bg-cream-mid">
                   <div className="flex items-center justify-center mb-1">
-                    <FiGitCommit className="w-4 h-4 text-green-400 mr-1" />
-                    <span className="text-lg font-semibold text-white">{user.totalCommits}</span>
+                    <FiGitCommit className="w-4 h-4 text-success-fg mr-1" />
+                    <span className="text-lg font-semibold text-ink">{user.totalCommits}</span>
                   </div>
-                  <p className="text-xs text-white/70">Total Commits</p>
+                  <p className="text-xs text-ink-soft">Total Commits</p>
                 </div>
-                <div className="text-center p-3 rounded-lg bg-white/10">
+                <div className="text-center p-3 rounded-lg bg-cream-mid">
                   <div className="flex items-center justify-center mb-1">
-                    <FiFolder className="w-4 h-4 text-blue-400 mr-1" />
-                    <span className="text-lg font-semibold text-white">{user.activeRepos}</span>
+                    <FiFolder className="w-4 h-4 text-info-fg mr-1" />
+                    <span className="text-lg font-semibold text-ink">{user.activeRepos}</span>
                   </div>
-                  <p className="text-xs text-white/70">Active Repos</p>
+                  <p className="text-xs text-ink-soft">Active Repos</p>
                 </div>
               </div>
 
               {/* User Info */}
-              <div className="space-y-2 text-sm text-white/70">
+              <div className="space-y-2 text-sm text-ink-soft">
                 <div className="flex items-center">
                   <FiMail className="w-4 h-4 mr-2" />
                   <span className="truncate">{user.email}</span>
@@ -145,7 +145,7 @@ const Users = () => {
                   <span>Joined {new Date(user.joinDate).toLocaleDateString()}</span>
                 </div>
                 <div className="flex items-center">
-                  <div className="w-2 h-2 bg-green-400 rounded-full mr-2"></div>
+                  <div className="w-2 h-2 bg-success-fg rounded-full mr-2"></div>
                   <span>Last active {user.lastActive}</span>
                 </div>
               </div>
@@ -153,16 +153,16 @@ const Users = () => {
           ))
         ) : (
           <div className="col-span-full text-center py-12">
-            <FiUser className="w-16 h-16 mx-auto mb-4 text-white/30" />
-            <h3 className="text-xl font-semibold text-white mb-2">No Users Found</h3>
-            <p className="text-white/70 mb-4">
+            <FiUser className="w-16 h-16 mx-auto mb-4 text-muted" />
+            <h3 className="text-xl font-semibold text-ink mb-2">No Users Found</h3>
+            <p className="text-ink-soft mb-4">
               {serverHealth?.status !== 'connected' 
                 ? 'Connect to the server to view users' 
                 : 'No users have been added to the system yet'
               }
             </p>
             {serverHealth?.status !== 'connected' && (
-              <div className="text-sm text-orange-300 bg-orange-500/10 p-3 rounded-lg border border-orange-400/20 max-w-md mx-auto">
+              <div className="text-sm text-warning-fg bg-warning-bg p-3 rounded-lg border border-warning-fg/20 max-w-md mx-auto">
                 <strong>Note:</strong> Please ensure the zanbeel server is running on {API_SERVER_URL}
               </div>
             )}
@@ -174,7 +174,7 @@ const Users = () => {
       {selectedUser && (
         <GlassCard className="p-6 mt-6">
           <div className="flex items-center justify-between mb-6">
-            <h2 className="text-xl font-semibold text-white">
+            <h2 className="text-xl font-semibold text-ink">
               {selectedUser.name}'s Repositories
             </h2>
             <Button 
@@ -191,15 +191,15 @@ const Users = () => {
               selectedUser.repositories.map((repo, index) => (
                 <div 
                   key={index} 
-                  className="p-4 rounded-xl bg-white/10 hover:bg-white/15 transition-colors cursor-pointer border border-white/10"
+                  className="p-4 rounded-xl bg-cream-mid hover:bg-cream-deep transition-colors cursor-pointer border border-border"
                 >
                   <div className="flex items-start justify-between mb-2">
-                    <h4 className="font-medium text-white text-sm">{repo.name}</h4>
+                    <h4 className="font-medium text-ink text-sm">{repo.name}</h4>
                     <Badge variant="default">{repo.commits}</Badge>
                   </div>
-                  <div className="space-y-1 text-xs text-white/70">
+                  <div className="space-y-1 text-xs text-ink-soft">
                     <div className="flex items-center">
-                      <div className="w-2 h-2 bg-blue-400 rounded-full mr-2"></div>
+                      <div className="w-2 h-2 bg-info-fg rounded-full mr-2"></div>
                       <span>{repo.language}</span>
                     </div>
                     <p>Last commit: {repo.lastCommit}</p>
@@ -207,7 +207,7 @@ const Users = () => {
                 </div>
               ))
             ) : (
-              <div className="col-span-full text-center py-8 text-white/70">
+              <div className="col-span-full text-center py-8 text-ink-soft">
                 <FiFolder className="w-12 h-12 mx-auto mb-4 opacity-50" />
                 <p>No repositories found for this user</p>
               </div>

@@ -2,14 +2,14 @@ import { FiMenu, FiLogOut, FiBell, FiCheck, FiChevronDown, FiChevronUp, FiExtern
 import React, { useEffect, useMemo, useState } from 'react'
 import GlassCard from '../ui/GlassCard'
 import Button from '../ui/Button'
+import Modal from '../ui/Modal'
 import api from '../../utils/api'
 
-/** Legacy rows stored the full CLI guide in `body`; keep commands only in the downloadable .txt. */
 function getNotificationDisplayBody(n) {
   const t = (n?.type || '').toLowerCase()
   const p = n?.payload || {}
   if (t === 'issue_access_request_approved' && p.cli_setup_guide) {
-    const lines = ['✅ REPOSITORY ACCESS GRANTED', '']
+    const lines = ['REPOSITORY ACCESS GRANTED', '']
     if (p.repository_name) lines.push(`Repository: ${p.repository_name}`)
     if (p.repository_owner) lines.push(`Owner: @${p.repository_owner}`)
     lines.push('Permission Level: Developer (write access)')
@@ -17,7 +17,7 @@ function getNotificationDisplayBody(n) {
       try {
         lines.push(`Granted At: ${new Date(n.created_at).toLocaleString()}`)
       } catch {
-        // ignore invalid date
+        // ignore
       }
     }
     if (p.repository_id) lines.push(`Repository ID: ${p.repository_id}`)
@@ -29,7 +29,7 @@ function getNotificationDisplayBody(n) {
 
 const Header = ({ sidebarOpen, setSidebarOpen, activeTab, setActiveTab, currentUser, onLogout }) => {
   const displayName = currentUser?.full_name || currentUser?.username || 'User'
-  const role = currentUser?.role === 'team_lead' ? 'Admin' : 'User'
+  const role = currentUser?.role === 'team_lead' || currentUser?.role === 'admin' ? 'Admin' : 'User'
 
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [notifications, setNotifications] = useState([])
@@ -38,7 +38,7 @@ const Header = ({ sidebarOpen, setSidebarOpen, activeTab, setActiveTab, currentU
   const [expandedNotifIds, setExpandedNotifIds] = useState(() => new Set())
 
   const unreadCount = useMemo(
-    () => (notifications || []).filter(n => !n.is_read).length,
+    () => (notifications || []).filter((n) => !n.is_read).length,
     [notifications]
   )
 
@@ -56,7 +56,7 @@ const Header = ({ sidebarOpen, setSidebarOpen, activeTab, setActiveTab, currentU
   }
 
   const toggleExpanded = (id) => {
-    setExpandedNotifIds(prev => {
+    setExpandedNotifIds((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
       else next.add(id)
@@ -74,14 +74,21 @@ const Header = ({ sidebarOpen, setSidebarOpen, activeTab, setActiveTab, currentU
       const issueNumber = actionPayload.issue_number || notif?.payload?.issue_number
       if (repositoryId && issueNumber) {
         try {
-          // Ensure the repositories page is mounted before sending the open-issue event.
           if (typeof setActiveTab === 'function' && activeTab !== 'repositories') {
             setActiveTab('repositories')
             setTimeout(() => {
-              window.dispatchEvent(new CustomEvent('foxnest:open-issue', { detail: { repository_id: repositoryId, issue_number: issueNumber } }))
+              window.dispatchEvent(
+                new CustomEvent('foxnest:open-issue', {
+                  detail: { repository_id: repositoryId, issue_number: issueNumber },
+                })
+              )
             }, 50)
           } else {
-            window.dispatchEvent(new CustomEvent('foxnest:open-issue', { detail: { repository_id: repositoryId, issue_number: issueNumber } }))
+            window.dispatchEvent(
+              new CustomEvent('foxnest:open-issue', {
+                detail: { repository_id: repositoryId, issue_number: issueNumber },
+              })
+            )
           }
           setNotificationsOpen(false)
         } catch {
@@ -116,12 +123,10 @@ const Header = ({ sidebarOpen, setSidebarOpen, activeTab, setActiveTab, currentU
       if (type === 'APPROVE' || type === 'DENY') {
         const ok = window.confirm(`${type === 'APPROVE' ? 'Approve' : 'Deny'} this access request?`)
         if (!ok) return
-        // Notification payloads may include backend-style "/api/..." URLs.
-        // The frontend API client already prefixes "/api", so strip to avoid "/api/api/...".
         const normalizedUrl = (url || '').startsWith('/api/') ? (url || '').slice(4) : url
         await api.request(normalizedUrl, {
           method: 'POST',
-          body: { comment: '' }
+          body: { comment: '' },
         })
         await loadNotifications()
         try {
@@ -132,7 +137,6 @@ const Header = ({ sidebarOpen, setSidebarOpen, activeTab, setActiveTab, currentU
         return
       }
 
-      // REVIEW or unknown: open as best-effort in a new tab.
       if (typeof window !== 'undefined') {
         window.open(url, '_blank', 'noopener,noreferrer')
       }
@@ -142,122 +146,126 @@ const Header = ({ sidebarOpen, setSidebarOpen, activeTab, setActiveTab, currentU
   }
 
   useEffect(() => {
-    // Poll lightly to keep the bell fresh without hammering the server.
     loadNotifications()
     const t = setInterval(loadNotifications, 30000)
     return () => clearInterval(t)
   }, [currentUser?.username])
 
   return (
-    <header className="sticky top-0 z-10">
-      {/* Gradient background */}
-      <div className="absolute inset-0 bg-gradient-to-r from-purple-900/40 via-pink-900/40 to-purple-900/40 backdrop-blur-xl"></div>
-      <div className="absolute inset-0 bg-gradient-to-b from-white/10 to-transparent"></div>
-      <div className="absolute bottom-0 inset-x-0 h-px bg-gradient-to-r from-transparent via-purple-400/50 to-transparent"></div>
-      
-      {/* Content */}
-      <div className="relative flex items-center justify-between h-16 px-6">
-        {/* Left side */}
-        <div className="flex items-center space-x-4">
+    <header className="sticky top-0 z-10 px-3 pt-2 sm:px-4 sm:pt-3 md:px-6">
+      <div className="panel-float relative flex h-14 items-center justify-between gap-2 px-3 sm:px-4 md:h-16 md:px-5">
+        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
           <button
+            type="button"
             onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="p-2 rounded-lg text-white/70 hover:text-white hover:bg-white/10 transition-colors lg:hidden"
+            className="shrink-0 rounded-full p-2 text-ink-soft transition hover:bg-cream-deep hover:text-ink lg:hidden"
+            aria-label="Open menu"
           >
-            <FiMenu className="w-5 h-5" />
+            <FiMenu className="h-5 w-5" />
           </button>
-          
-          {/* Title with gradient */}
-          <div className="hidden md:block">
-            <h2 className="text-lg font-bold bg-gradient-to-r from-purple-300 via-pink-300 to-purple-300 bg-clip-text text-transparent">
-              Zanbeel: Version Control System
+          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+            <img
+              src="/zanbeel-logo.png"
+              alt=""
+              className="hidden h-8 w-8 shrink-0 rounded-full object-cover ring-1 ring-black/5 sm:block"
+              aria-hidden
+            />
+            <h2 className="truncate text-sm font-semibold tracking-tight text-ink sm:text-[15px]">
+              Zanbeel Workspace
             </h2>
+            <span className="hidden items-center gap-1.5 rounded-full bg-success-bg px-2.5 py-1 text-[11px] font-medium text-success-fg sm:inline-flex">
+              <span className="h-1.5 w-1.5 rounded-full bg-success-fg" />
+              Live
+            </span>
           </div>
         </div>
 
-        {/* Right side */}
-        <div className="flex items-center space-x-4">
-          <div className="relative">
-            <button
-              type="button"
-              onClick={() => setNotificationsOpen(true)}
-              className="relative p-2 rounded-lg text-white/70 hover:text-white hover:bg-white/10 transition-colors"
-              title="Notifications"
-            >
-              <FiBell className="w-5 h-5" />
-              {unreadCount > 0 && (
-                <span className="absolute -top-1 -right-1 min-w-5 h-5 px-1 rounded-full bg-pink-500 text-white text-[11px] flex items-center justify-center">
-                  {unreadCount > 99 ? '99+' : unreadCount}
-                </span>
-              )}
-            </button>
-          </div>
-          {/* User Avatar */}
-          <div className="relative">
-            <button className="flex items-center space-x-3 p-2 rounded-xl bg-gradient-to-r from-purple-500/20 to-pink-500/20 hover:from-purple-500/30 hover:to-pink-500/30 border border-purple-400/30 transition-all">
-              <div className="w-8 h-8 bg-gradient-to-br from-purple-400 to-pink-400 rounded-full flex items-center justify-center shadow-lg">
-                <span className="text-white font-bold text-sm">{displayName.charAt(0).toUpperCase()}</span>
-              </div>
-              <span className="hidden sm:block text-white font-medium">{displayName}</span>
-              <span className="hidden sm:block text-xs text-white/60">{role}</span>
-            </button>
-          </div>
+        <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
           <button
-            onClick={onLogout}
-            className="p-2 rounded-lg text-white/70 hover:text-white hover:bg-white/10 transition-colors"
-            title="Sign out"
+            type="button"
+            onClick={() => setNotificationsOpen(true)}
+            className="relative rounded-full border border-border bg-surface p-2 text-ink-soft transition hover:bg-cream-mid hover:text-ink"
+            title="Notifications"
           >
-            <FiLogOut className="w-5 h-5" />
+            <FiBell className="h-4 w-4" />
+            {unreadCount > 0 && (
+              <span className="absolute -top-1 -right-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-semibold text-white">
+                {unreadCount > 99 ? '99+' : unreadCount}
+              </span>
+            )}
           </button>
+
+          <div className="flex items-center gap-2 rounded-full border border-border bg-cream-mid/80 py-1 pr-2 pl-1 sm:pr-3">
+            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-accent text-white">
+              <span className="text-xs font-semibold">{displayName.charAt(0).toUpperCase()}</span>
+            </div>
+            <div className="hidden min-w-0 md:block">
+              <p className="max-w-[120px] truncate text-sm font-medium leading-tight text-ink">{displayName}</p>
+              <p className="text-[11px] leading-tight text-muted">{role}</p>
+            </div>
+          </div>
+
+          <Button variant="primary" size="sm" onClick={onLogout} title="Sign out" className="!px-3">
+            <FiLogOut className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Sign out</span>
+          </Button>
         </div>
       </div>
 
-      {notificationsOpen && (
-        <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 backdrop-blur-sm p-4">
-          <div className="absolute inset-0" onClick={() => setNotificationsOpen(false)} />
-          <GlassCard className="relative mt-16 w-full max-w-2xl p-5" hover={false}>
-            <div className="flex items-start justify-between gap-4 mb-4">
-              <div>
-                <p className="text-xs uppercase tracking-[0.16em] text-white/50">Notifications</p>
-                <p className="text-white/80 text-sm">Mentions, comments, and status changes.</p>
-              </div>
-              <div className="flex items-center gap-2">
-                <Button variant="ghost" size="sm" onClick={loadNotifications} disabled={notifLoading}>
-                  Refresh
-                </Button>
-                <Button variant="ghost" size="sm" onClick={() => setNotificationsOpen(false)}>
-                  Close
-                </Button>
-              </div>
+      {/* The panel used to hand-roll its own overlay with `bg-ink/40`. After the
+          dark-theme flip `ink` is near-white, so the scrim *lightened* the page
+          instead of dimming it and the unbacked container let the dashboard show
+          straight through the text. Modal already solves the scrim, the panel
+          background, stacking, Escape and the scroll lock, so use it. */}
+      <Modal
+        open={notificationsOpen}
+        onClose={() => setNotificationsOpen(false)}
+        title="Notifications"
+        subtitle="Mentions, comments, and status changes."
+        panelClassName="max-w-2xl"
+      >
+        <div>
+            <div className="mb-4 flex justify-end">
+              <Button variant="ghost" size="sm" onClick={loadNotifications} disabled={notifLoading}>
+                Refresh
+              </Button>
             </div>
 
             {notifError && (
-              <div className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+              <div className="mb-3 rounded-xl border border-danger-fg/20 bg-danger-bg px-3 py-2 text-sm text-danger-fg">
                 {notifError}
               </div>
             )}
 
-            <div className="max-h-[60vh] overflow-auto space-y-2">
+            <div className="max-h-[60vh] space-y-2 overflow-auto">
               {notifLoading ? (
-                <div className="py-10 text-white/70 text-center">Loading…</div>
+                <div className="py-10 text-center text-muted">Loading…</div>
               ) : notifications.length === 0 ? (
-                <p className="text-white/50 text-sm">No notifications.</p>
+                <p className="text-sm text-muted">No notifications.</p>
               ) : (
                 notifications.map((n) => (
-                  <div key={n.id} className={`rounded-lg border p-3 ${n.is_read ? 'border-white/10 bg-white/5' : 'border-pink-400/30 bg-pink-500/10'}`}>
+                  <div
+                    key={n.id}
+                    className={`rounded-xl border p-3 ${
+                      n.is_read
+                        ? 'border-border bg-cream-mid/50'
+                        : 'border-border-strong bg-cream-deep'
+                    }`}
+                  >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <p className="text-white font-medium truncate">{n.title || n.type}</p>
+                        <p className="truncate font-medium text-ink">{n.title || n.type}</p>
                         {(() => {
                           const bodyText = getNotificationDisplayBody(n)
                           return bodyText ? (
-                            <p className="text-white/70 text-sm mt-1 whitespace-pre-wrap">{bodyText}</p>
+                            <p className="mt-1 whitespace-pre-wrap text-sm text-ink-soft">{bodyText}</p>
                           ) : null
                         })()}
 
                         {n?.payload?.cli_setup_guide && (
                           <div className="mt-3">
-                            <button
-                              type="button"
+                            <Button
+                              size="sm"
                               onClick={() =>
                                 handleNotificationAction(
                                   {
@@ -270,72 +278,71 @@ const Header = ({ sidebarOpen, setSidebarOpen, activeTab, setActiveTab, currentU
                                   n
                                 )
                               }
-                              className="inline-flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-emerald-900/40 bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-600 hover:from-emerald-400 hover:via-teal-400 hover:to-cyan-500 border border-emerald-300/30 transition-all"
-                              title="Download full FoxNest CLI quick start as a text file"
                             >
-                              <FiDownload className="w-4 h-4 shrink-0" />
-                              Download CLI quick start (.txt)
-                            </button>
-                            <p className="text-[11px] text-white/45 mt-1.5">Step-by-step commands are in the file only.</p>
+                              <FiDownload className="h-4 w-4" />
+                              Download CLI quick start
+                            </Button>
+                            <p className="mt-1.5 text-[11px] text-muted">
+                              Step-by-step commands are in the file only.
+                            </p>
                           </div>
                         )}
 
-                        <p className="text-xs text-white/40 mt-2">{n.created_at ? new Date(n.created_at).toLocaleString() : ''}</p>
+                        <p className="mt-2 text-xs text-muted">
+                          {n.created_at ? new Date(n.created_at).toLocaleString() : ''}
+                        </p>
 
-                        {(n?.payload?.repository_id && n?.payload?.issue_number) && (
+                        {n?.payload?.repository_id && n?.payload?.issue_number && (
                           <div className="mt-2 flex flex-wrap gap-2">
                             <button
                               type="button"
                               onClick={() => handleNotificationAction({ type: 'OPEN_ISSUE' }, n)}
-                              className="inline-flex items-center gap-1 text-xs text-white/90 border border-white/20 rounded px-2 py-1 hover:bg-white/10"
-                              title="Open issue"
+                              className="inline-flex items-center gap-1 rounded-lg border border-border px-2 py-1 text-xs text-ink hover:bg-cream-mid"
                             >
-                              <FiExternalLink className="w-3.5 h-3.5" />
+                              <FiExternalLink className="h-3.5 w-3.5" />
                               Open issue #{n.payload.issue_number}
                             </button>
                           </div>
                         )}
 
                         {(() => {
-                          const otherActions = (Array.isArray(n?.payload?.actions) ? n.payload.actions : []).filter(
-                            (a) => String(a?.type || '').toUpperCase() !== 'DOWNLOAD_TXT'
-                          )
+                          const otherActions = (
+                            Array.isArray(n?.payload?.actions) ? n.payload.actions : []
+                          ).filter((a) => String(a?.type || '').toUpperCase() !== 'DOWNLOAD_TXT')
                           if (otherActions.length === 0) return null
                           return (
                             <div className="mt-2">
                               <button
                                 type="button"
                                 onClick={() => toggleExpanded(n.id)}
-                                className="inline-flex items-center gap-1 text-xs text-white/80 border border-white/20 rounded px-2 py-1 hover:bg-white/10"
-                                title="Show details"
+                                className="inline-flex items-center gap-1 rounded-lg border border-border px-2 py-1 text-xs text-ink-soft hover:bg-cream-mid"
                               >
-                                {expandedNotifIds.has(n.id) ? <FiChevronUp className="w-3.5 h-3.5" /> : <FiChevronDown className="w-3.5 h-3.5" />}
+                                {expandedNotifIds.has(n.id) ? (
+                                  <FiChevronUp className="h-3.5 w-3.5" />
+                                ) : (
+                                  <FiChevronDown className="h-3.5 w-3.5" />
+                                )}
                                 Details
                               </button>
                             </div>
                           )
                         })()}
 
-                        {expandedNotifIds.has(n.id) && (
-                          <div className="mt-3 space-y-3">
-                            {Array.isArray(n?.payload?.actions) && (
-                              <div className="flex flex-wrap gap-2">
-                                {n.payload.actions
-                                  .filter((action) => String(action?.type || '').toUpperCase() !== 'DOWNLOAD_TXT')
-                                  .map((action, idx) => (
-                                    <button
-                                      key={`${n.id}_action_${idx}`}
-                                      type="button"
-                                      onClick={() => handleNotificationAction(action, n)}
-                                      className="inline-flex items-center gap-1 text-xs text-white/90 border border-white/20 rounded px-2 py-1 hover:bg-white/10"
-                                      title={action?.url || ''}
-                                    >
-                                      <FiExternalLink className="w-3.5 h-3.5" />
-                                      {action?.type || 'OPEN'}
-                                    </button>
-                                  ))}
-                              </div>
-                            )}
+                        {expandedNotifIds.has(n.id) && Array.isArray(n?.payload?.actions) && (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {n.payload.actions
+                              .filter((action) => String(action?.type || '').toUpperCase() !== 'DOWNLOAD_TXT')
+                              .map((action, idx) => (
+                                <button
+                                  key={`${n.id}_action_${idx}`}
+                                  type="button"
+                                  onClick={() => handleNotificationAction(action, n)}
+                                  className="inline-flex items-center gap-1 rounded-lg border border-border px-2 py-1 text-xs text-ink hover:bg-cream-mid"
+                                >
+                                  <FiExternalLink className="h-3.5 w-3.5" />
+                                  {action?.type || 'OPEN'}
+                                </button>
+                              ))}
                           </div>
                         )}
                       </div>
@@ -345,15 +352,16 @@ const Header = ({ sidebarOpen, setSidebarOpen, activeTab, setActiveTab, currentU
                           onClick={async () => {
                             try {
                               await api.markNotificationsRead([n.id])
-                              setNotifications(prev => prev.map(x => (x.id === n.id ? { ...x, is_read: true } : x)))
+                              setNotifications((prev) =>
+                                prev.map((x) => (x.id === n.id ? { ...x, is_read: true } : x))
+                              )
                             } catch {
                               // ignore
                             }
                           }}
-                          className="shrink-0 inline-flex items-center gap-1 text-xs text-white/80 border border-white/20 rounded px-2 py-1 hover:bg-white/10"
-                          title="Mark as read"
+                          className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-border px-2 py-1 text-xs text-ink-soft hover:bg-cream-mid"
                         >
-                          <FiCheck className="w-3.5 h-3.5" />
+                          <FiCheck className="h-3.5 w-3.5" />
                           Read
                         </button>
                       )}
@@ -362,9 +370,8 @@ const Header = ({ sidebarOpen, setSidebarOpen, activeTab, setActiveTab, currentU
                 ))
               )}
             </div>
-          </GlassCard>
         </div>
-      )}
+      </Modal>
     </header>
   )
 }

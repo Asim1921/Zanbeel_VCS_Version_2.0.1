@@ -13,6 +13,9 @@ import hashlib
 import json
 import re
 
+# Imported as a module so tests can repoint `blob_store.store` at a temp directory.
+from app.services import blob_store
+
 class UserCRUD:
     @staticmethod
     def create_user(db: Session, username: str, email: str = None, full_name: str = None, role: str = 'developer', team_lead_id: int = None, password_hash: str = None) -> User:
@@ -465,21 +468,32 @@ class FileObjectCRUD:
     
     @staticmethod
     def store_file_object(db: Session, content: bytes, mime_type: str = None) -> FileObject:
-        """Store a file object"""
+        """Store a file object.
+
+        Bytes go to the on-disk blob store; the row keeps only hash, size and mime type.
+        Content is written before the row is committed, so a row can never reference a
+        blob that is not on disk (the reverse -- a blob with no row -- is just garbage
+        and is what `fox gc` reclaims).
+        """
         file_hash = FileObjectCRUD.calculate_file_hash(content)
-        
+
         # Check if file already exists
         existing_file = db.query(FileObject).filter(FileObject.hash == file_hash).first()
         if existing_file:
+            # A legacy row may still hold its bytes inline; leave it alone. Otherwise make
+            # sure the blob is really on disk before handing the row back.
+            if existing_file.is_on_disk and not blob_store.store.exists(file_hash):
+                blob_store.store.put(content, file_hash)
             return existing_file
-        
+
+        blob_store.store.put(content, file_hash)
+
         file_object = FileObject(
             hash=file_hash,
-            content=content,
             size=len(content),
-            mime_type=mime_type
+            mime_type=mime_type,
         )
-        
+
         db.add(file_object)
         db.commit()
         db.refresh(file_object)
@@ -1357,8 +1371,8 @@ class RepositoryStarCRUD:
         return False
 
 
-def contributor_count_for_repository(db: Session, repository: Repository) -> int:
-    """Distinct people: owner, commit authors, issue creators/assignees/watchers, explicit collaborators."""
+def _contributor_ids_for_repository(db: Session, repository: Repository) -> set:
+    """Distinct user IDs: owner, commit authors, issue participants, explicit collaborators."""
     ids = set()
     if repository.owner_id:
         ids.add(repository.owner_id)
@@ -1391,7 +1405,77 @@ def contributor_count_for_repository(db: Session, repository: Repository) -> int
     for (uid,) in db.query(UserPermission.user_id).filter(UserPermission.repository_id == rid).distinct():
         if uid is not None:
             ids.add(uid)
-    return len(ids)
+    return ids
+
+
+def contributor_count_for_repository(db: Session, repository: Repository) -> int:
+    """Distinct people: owner, commit authors, issue creators/assignees/watchers, explicit collaborators."""
+    return len(_contributor_ids_for_repository(db, repository))
+
+
+def contributors_for_repository(db: Session, repository: Repository) -> List[dict]:
+    """Named contributors for a repository (same set as contributor_count_for_repository)."""
+    ids = _contributor_ids_for_repository(db, repository)
+    if not ids:
+        return []
+
+    rid = repository.id
+    commit_author_ids = {
+        aid for (aid,) in db.query(Commit.author_id).filter(Commit.repository_id == rid).distinct()
+        if aid is not None
+    }
+    collaborator_ids = {
+        uid for (uid,) in db.query(UserPermission.user_id).filter(UserPermission.repository_id == rid).distinct()
+        if uid is not None
+    }
+    issue_participant_ids = set()
+    for (iid,) in (
+        db.query(Issue.assigned_to_id)
+        .filter(Issue.repository_id == rid, Issue.assigned_to_id.isnot(None))
+        .distinct()
+    ):
+        if iid is not None:
+            issue_participant_ids.add(iid)
+    for (cid,) in (
+        db.query(Issue.created_by_id)
+        .filter(Issue.repository_id == rid, Issue.created_by_id.isnot(None))
+        .distinct()
+    ):
+        if cid is not None:
+            issue_participant_ids.add(cid)
+    for (wid,) in (
+        db.query(IssueWatcher.user_id)
+        .join(Issue, IssueWatcher.issue_id == Issue.id)
+        .filter(Issue.repository_id == rid, IssueWatcher.user_id.isnot(None))
+        .distinct()
+    ):
+        if wid is not None:
+            issue_participant_ids.add(wid)
+
+    users = db.query(User).filter(User.id.in_(ids)).all()
+    contributors = []
+    for user in users:
+        roles = []
+        if repository.owner_id == user.id:
+            roles.append("owner")
+        if user.id in commit_author_ids:
+            roles.append("commit_author")
+        if user.id in collaborator_ids:
+            roles.append("collaborator")
+        if user.id in issue_participant_ids:
+            roles.append("issue_participant")
+        contributors.append({
+            "id": user.id,
+            "username": user.username,
+            "full_name": user.full_name,
+            "roles": roles,
+        })
+
+    contributors.sort(key=lambda c: (
+        0 if "owner" in c["roles"] else 1,
+        (c["full_name"] or c["username"] or "").lower(),
+    ))
+    return contributors
 
 
 class PendingRepositoryCRUD:

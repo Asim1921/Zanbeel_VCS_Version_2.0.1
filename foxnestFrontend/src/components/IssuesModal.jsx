@@ -283,29 +283,29 @@ const IssuesModal = ({ repo, onClose }) => {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 backdrop-blur-sm p-4">
       <div className="absolute inset-0" onClick={onClose} />
       <div className="relative w-full max-w-6xl">
         <GlassCard className="p-6" hover={false}>
           <div className="flex items-start justify-between gap-4 mb-5">
             <div>
-              <p className="text-xs uppercase tracking-[0.16em] text-white/50">Issues</p>
-              <h2 className="text-xl font-semibold text-white">{repo?.name}</h2>
-              <p className="text-sm text-white/60">Track work items linked to branches, commits, and PRs.</p>
+              <p className="text-xs uppercase tracking-[0.16em] text-muted">Issues</p>
+              <h2 className="text-xl font-semibold text-ink">{repo?.name}</h2>
+              <p className="text-sm text-muted">Track work items linked to branches, commits, and PRs.</p>
             </div>
             <div className="flex items-center gap-2">
-              <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 p-1">
+              <div className="flex items-center gap-1 rounded-lg border border-border bg-cream-mid/70 p-1">
                 <button
                   type="button"
                   onClick={() => setActiveTab('issues')}
-                  className={`px-3 py-1.5 rounded text-xs transition-colors ${activeTab === 'issues' ? 'bg-white/15 text-white' : 'text-white/70 hover:text-white'}`}
+                  className={`px-3 py-1.5 rounded text-xs transition-colors ${activeTab === 'issues' ? 'bg-cream-mid text-ink' : 'text-ink-soft hover:text-ink'}`}
                 >
                   Issues
                 </button>
                 <button
                   type="button"
                   onClick={() => setActiveTab('milestones')}
-                  className={`px-3 py-1.5 rounded text-xs transition-colors ${activeTab === 'milestones' ? 'bg-white/15 text-white' : 'text-white/70 hover:text-white'}`}
+                  className={`px-3 py-1.5 rounded text-xs transition-colors ${activeTab === 'milestones' ? 'bg-cream-mid text-ink' : 'text-ink-soft hover:text-ink'}`}
                 >
                   Milestones
                 </button>
@@ -322,35 +322,35 @@ const IssuesModal = ({ repo, onClose }) => {
           </div>
 
           {error && (
-            <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+            <div className="mb-4 rounded-lg border border-danger-fg/20 bg-danger-bg px-3 py-2 text-sm text-danger-fg">
               {error}
             </div>
           )}
 
           {activeTab === 'milestones' ? (
             <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-              <div className="xl:col-span-1 rounded-xl border border-white/10 bg-white/5 p-4">
-                <h3 className="text-white font-medium mb-3 flex items-center gap-2"><FiPlus className="w-4 h-4" />New Milestone</h3>
+              <div className="xl:col-span-1 rounded-xl border border-border bg-cream-mid/70 p-4">
+                <h3 className="text-ink font-medium mb-3 flex items-center gap-2"><FiPlus className="w-4 h-4" />New Milestone</h3>
                 <div className="space-y-3">
                   <input
                     value={milestoneTitle}
                     onChange={(e) => setMilestoneTitle(e.target.value)}
                     placeholder="Milestone title"
-                    className="w-full bg-white/10 border border-white/20 rounded px-3 py-2 text-sm text-white placeholder:text-white/40"
+                    className="w-full bg-cream-mid border border-border rounded px-3 py-2 text-sm text-ink placeholder:text-muted"
                   />
                   <textarea
                     value={milestoneDescription}
                     onChange={(e) => setMilestoneDescription(e.target.value)}
                     placeholder="Description (optional)"
-                    className="w-full min-h-20 bg-white/10 border border-white/20 rounded px-3 py-2 text-sm text-white placeholder:text-white/40"
+                    className="w-full min-h-20 bg-cream-mid border border-border rounded px-3 py-2 text-sm text-ink placeholder:text-muted"
                   />
                   <div>
-                    <label className="text-xs text-white/60">Due date (optional)</label>
+                    <label className="text-xs text-muted">Due date (optional)</label>
                     <input
                       type="date"
                       value={milestoneDueDate}
                       onChange={(e) => setMilestoneDueDate(e.target.value)}
-                      className="w-full mt-1 bg-white/10 border border-white/20 rounded px-3 py-2 text-sm text-white"
+                      className="w-full mt-1 bg-cream-mid border border-border rounded px-3 py-2 text-sm text-ink"
                     />
                   </div>
                   <Button variant="primary" size="sm" className="w-full" onClick={handleCreateMilestone} disabled={milestoneSubmitting || !milestoneTitle.trim()}>
@@ -359,21 +359,21 @@ const IssuesModal = ({ repo, onClose }) => {
                 </div>
               </div>
 
-              <div className="xl:col-span-2 rounded-xl border border-white/10 bg-white/5 p-4 max-h-[64vh] overflow-auto">
-                <h3 className="text-white font-medium mb-3">Milestones</h3>
+              <div className="xl:col-span-2 rounded-xl border border-border bg-cream-mid/70 p-4 max-h-[64vh] overflow-auto">
+                <h3 className="text-ink font-medium mb-3">Milestones</h3>
                 {loading ? (
-                  <div className="py-10 text-white/70 flex items-center justify-center"><FiLoader className="w-5 h-5 animate-spin mr-2" />Loading...</div>
+                  <div className="py-10 text-ink-soft flex items-center justify-center"><FiLoader className="w-5 h-5 animate-spin mr-2" />Loading...</div>
                 ) : milestones.length === 0 ? (
-                  <p className="text-white/50 text-sm">No milestones yet.</p>
+                  <p className="text-muted text-sm">No milestones yet.</p>
                 ) : (
                   <div className="space-y-3">
                     {milestones.map((m) => (
-                      <div key={m.id} className="rounded-lg border border-white/10 bg-white/5 p-3">
+                      <div key={m.id} className="rounded-lg border border-border bg-cream-mid/70 p-3">
                         <div className="flex items-start justify-between gap-3">
                           <div>
-                            <p className="text-white font-medium">{m.title}</p>
-                            {m.description && <p className="text-white/70 text-sm mt-1">{m.description}</p>}
-                            <p className="text-white/45 text-xs mt-2">
+                            <p className="text-ink font-medium">{m.title}</p>
+                            {m.description && <p className="text-ink-soft text-sm mt-1">{m.description}</p>}
+                            <p className="text-muted text-xs mt-2">
                               Due: {m.due_date ? new Date(m.due_date).toLocaleDateString() : '—'}
                             </p>
                           </div>
@@ -391,68 +391,68 @@ const IssuesModal = ({ repo, onClose }) => {
             </div>
           ) : (
             <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-              <div className="xl:col-span-1 rounded-xl border border-white/10 bg-white/5 p-4">
-                <h3 className="text-white font-medium mb-3 flex items-center gap-2"><FiPlus className="w-4 h-4" />New Issue</h3>
+              <div className="xl:col-span-1 rounded-xl border border-border bg-cream-mid/70 p-4">
+                <h3 className="text-ink font-medium mb-3 flex items-center gap-2"><FiPlus className="w-4 h-4" />New Issue</h3>
                 <div className="space-y-3">
                   <input
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
                     placeholder="Issue title"
-                    className="w-full bg-white/10 border border-white/20 rounded px-3 py-2 text-sm text-white placeholder:text-white/40"
+                    className="w-full bg-cream-mid border border-border rounded px-3 py-2 text-sm text-ink placeholder:text-muted"
                   />
                   <textarea
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
                     placeholder="Description (supports @mentions, Fixes #123 references)"
-                    className="w-full min-h-20 bg-white/10 border border-white/20 rounded px-3 py-2 text-sm text-white placeholder:text-white/40"
+                    className="w-full min-h-20 bg-cream-mid border border-border rounded px-3 py-2 text-sm text-ink placeholder:text-muted"
                   />
 
                   <div className="grid grid-cols-2 gap-2">
                     <div>
-                      <label className="text-xs text-white/60">Type</label>
-                      <select value={issueType} onChange={(e) => setIssueType(e.target.value)} className="w-full mt-1 bg-white/10 border border-white/20 rounded px-3 py-2 text-sm text-white">
+                      <label className="text-xs text-muted">Type</label>
+                      <select value={issueType} onChange={(e) => setIssueType(e.target.value)} className="w-full mt-1 bg-cream-mid border border-border rounded px-3 py-2 text-sm text-ink">
                         {['bug', 'feature', 'task', 'question'].map(t => (
-                          <option className="bg-slate-100 text-slate-900" key={t} value={t}>{t}</option>
+                          <option className="bg-surface text-ink" key={t} value={t}>{t}</option>
                         ))}
                       </select>
                     </div>
                     <div>
-                      <label className="text-xs text-white/60">Priority</label>
-                      <select value={priority} onChange={(e) => setPriority(e.target.value)} className="w-full mt-1 bg-white/10 border border-white/20 rounded px-3 py-2 text-sm text-white">
+                      <label className="text-xs text-muted">Priority</label>
+                      <select value={priority} onChange={(e) => setPriority(e.target.value)} className="w-full mt-1 bg-cream-mid border border-border rounded px-3 py-2 text-sm text-ink">
                         {PRIORITY_ORDER.map(p => (
-                          <option className="bg-slate-100 text-slate-900" key={p} value={p}>{p}</option>
+                          <option className="bg-surface text-ink" key={p} value={p}>{p}</option>
                         ))}
                       </select>
                     </div>
                   </div>
 
                   <div>
-                    <label className="text-xs text-white/60">Assignee (username, optional)</label>
+                    <label className="text-xs text-muted">Assignee (username, optional)</label>
                     <input
                       value={assignedTo}
                       onChange={(e) => setAssignedTo(e.target.value)}
                       placeholder="e.g. alice"
-                      className="w-full mt-1 bg-white/10 border border-white/20 rounded px-3 py-2 text-sm text-white placeholder:text-white/40"
+                      className="w-full mt-1 bg-cream-mid border border-border rounded px-3 py-2 text-sm text-ink placeholder:text-muted"
                     />
                   </div>
 
                   <div>
-                    <label className="text-xs text-white/60">Milestone (optional)</label>
-                    <select value={milestoneId} onChange={(e) => setMilestoneId(e.target.value)} className="w-full mt-1 bg-white/10 border border-white/20 rounded px-3 py-2 text-sm text-white">
-                      <option className="bg-slate-100 text-slate-900" value="">—</option>
+                    <label className="text-xs text-muted">Milestone (optional)</label>
+                    <select value={milestoneId} onChange={(e) => setMilestoneId(e.target.value)} className="w-full mt-1 bg-cream-mid border border-border rounded px-3 py-2 text-sm text-ink">
+                      <option className="bg-surface text-ink" value="">—</option>
                       {milestones.filter(m => !m.is_closed).map(m => (
-                        <option className="bg-slate-100 text-slate-900" key={m.id} value={String(m.id)}>{m.title}</option>
+                        <option className="bg-surface text-ink" key={m.id} value={String(m.id)}>{m.title}</option>
                       ))}
                     </select>
                   </div>
 
                   <div>
-                    <label className="text-xs text-white/60">Labels (comma-separated, optional)</label>
+                    <label className="text-xs text-muted">Labels (comma-separated, optional)</label>
                     <input
                       value={labelsText}
                       onChange={(e) => setLabelsText(e.target.value)}
                       placeholder="e.g. backend, urgent"
-                      className="w-full mt-1 bg-white/10 border border-white/20 rounded px-3 py-2 text-sm text-white placeholder:text-white/40"
+                      className="w-full mt-1 bg-cream-mid border border-border rounded px-3 py-2 text-sm text-ink placeholder:text-muted"
                     />
                     {parsedLabels.length > 0 && (
                       <div className="mt-2 flex flex-wrap gap-1">
@@ -473,13 +473,13 @@ const IssuesModal = ({ repo, onClose }) => {
                 </div>
               </div>
 
-              <div className="xl:col-span-1 rounded-xl border border-white/10 bg-white/5 p-4 max-h-[64vh] overflow-auto">
+              <div className="xl:col-span-1 rounded-xl border border-border bg-cream-mid/70 p-4 max-h-[64vh] overflow-auto">
                 <div className="flex items-center justify-between gap-2 mb-3">
-                  <h3 className="text-white font-medium">Issues</h3>
+                  <h3 className="text-ink font-medium">Issues</h3>
                   <div className="flex items-center gap-2">
-                    <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="bg-white/10 border border-white/20 rounded px-2 py-1 text-xs text-white">
+                    <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="bg-cream-mid border border-border rounded px-2 py-1 text-xs text-ink">
                       {['open', 'in_progress', 'resolved', 'closed', ''].map(s => (
-                        <option className="bg-slate-100 text-slate-900" key={s || 'all'} value={s}>{s ? s : 'all'}</option>
+                        <option className="bg-surface text-ink" key={s || 'all'} value={s}>{s ? s : 'all'}</option>
                       ))}
                     </select>
                   </div>
@@ -489,13 +489,13 @@ const IssuesModal = ({ repo, onClose }) => {
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Search issues…"
-                  className="w-full mb-3 bg-white/10 border border-white/20 rounded px-3 py-2 text-sm text-white placeholder:text-white/40"
+                  className="w-full mb-3 bg-cream-mid border border-border rounded px-3 py-2 text-sm text-ink placeholder:text-muted"
                 />
 
                 {loading ? (
-                  <div className="py-10 text-white/70 flex items-center justify-center"><FiLoader className="w-5 h-5 animate-spin mr-2" />Loading issues...</div>
+                  <div className="py-10 text-ink-soft flex items-center justify-center"><FiLoader className="w-5 h-5 animate-spin mr-2" />Loading issues...</div>
                 ) : issues.length === 0 ? (
-                  <p className="text-white/50 text-sm">No issues found.</p>
+                  <p className="text-muted text-sm">No issues found.</p>
                 ) : (
                   <div className="space-y-2">
                     {issues.map((i) => (
@@ -505,17 +505,17 @@ const IssuesModal = ({ repo, onClose }) => {
                         onClick={() => handleSelectIssue(i.number)}
                         className={`w-full text-left rounded-lg border px-3 py-2 transition-colors ${
                           selectedIssueNumber === i.number
-                            ? 'border-purple-400/60 bg-white/10'
-                            : 'border-white/10 bg-white/5 hover:bg-white/10'
+                            ? 'border-ink/40 bg-cream-mid'
+                            : 'border-border bg-cream-mid/70 hover:bg-cream-mid'
                         }`}
                       >
                         <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0">
-                            <p className="text-white font-medium truncate">
-                              <span className="text-white/60 mr-2">#{i.number}</span>
+                            <p className="text-ink font-medium truncate">
+                              <span className="text-muted mr-2">#{i.number}</span>
                               {i.title}
                             </p>
-                            <div className="mt-1 flex items-center gap-2 text-xs text-white/60 flex-wrap">
+                            <div className="mt-1 flex items-center gap-2 text-xs text-muted flex-wrap">
                               <span className="inline-flex items-center gap-1"><FiFlag className="w-3.5 h-3.5" />{i.priority}</span>
                               <span className="inline-flex items-center gap-1"><FiTag className="w-3.5 h-3.5" />{i.issue_type}</span>
                               {i.assigned_to && <span className="inline-flex items-center gap-1"><FiUser className="w-3.5 h-3.5" />{i.assigned_to}</span>}
@@ -523,7 +523,7 @@ const IssuesModal = ({ repo, onClose }) => {
                           </div>
                           <div className="flex items-center gap-2">
                             {statusBadge(i.status)}
-                            <span className="text-xs text-white/50 inline-flex items-center gap-1">
+                            <span className="text-xs text-muted inline-flex items-center gap-1">
                               <FiMessageSquare className="w-3.5 h-3.5" />
                               {i.comment_count || 0}
                             </span>
@@ -535,7 +535,7 @@ const IssuesModal = ({ repo, onClose }) => {
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="w-full mt-2 border border-white/15"
+                        className="w-full mt-2 border border-border"
                         onClick={loadMoreIssues}
                       >
                         Load more ({issues.length}/{totalIssues})
@@ -545,21 +545,21 @@ const IssuesModal = ({ repo, onClose }) => {
                 )}
               </div>
 
-              <div className="xl:col-span-1 rounded-xl border border-white/10 bg-white/5 p-4 max-h-[64vh] overflow-auto">
-                <h3 className="text-white font-medium mb-3">Issue detail</h3>
+              <div className="xl:col-span-1 rounded-xl border border-border bg-cream-mid/70 p-4 max-h-[64vh] overflow-auto">
+                <h3 className="text-ink font-medium mb-3">Issue detail</h3>
                 {!selectedIssueNumber ? (
-                  <p className="text-white/50 text-sm">Select an issue to view details.</p>
+                  <p className="text-muted text-sm">Select an issue to view details.</p>
                 ) : detailLoading ? (
-                  <div className="py-10 text-white/70 flex items-center justify-center"><FiLoader className="w-5 h-5 animate-spin mr-2" />Loading issue...</div>
+                  <div className="py-10 text-ink-soft flex items-center justify-center"><FiLoader className="w-5 h-5 animate-spin mr-2" />Loading issue...</div>
                 ) : !selectedIssue ? (
-                  <p className="text-white/50 text-sm">Unable to load issue.</p>
+                  <p className="text-muted text-sm">Unable to load issue.</p>
                 ) : (
                   <div className="space-y-4">
-                    <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+                    <div className="rounded-lg border border-border bg-cream-mid p-3">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
-                          <p className="text-white font-semibold flex items-center gap-2">
-                            <FiHash className="w-4 h-4 text-white/60" />
+                          <p className="text-ink font-semibold flex items-center gap-2">
+                            <FiHash className="w-4 h-4 text-muted" />
                             #{selectedIssue.number} {selectedIssue.title}
                           </p>
                           <div className="mt-2 flex items-center gap-2 flex-wrap">
@@ -567,20 +567,20 @@ const IssuesModal = ({ repo, onClose }) => {
                             <Badge variant="default" className="text-[11px]">{selectedIssue.issue_type}</Badge>
                             <Badge variant="default" className="text-[11px]">{selectedIssue.priority}</Badge>
                           </div>
-                          <p className="text-xs text-white/50 mt-2">
+                          <p className="text-xs text-muted mt-2">
                             Created by {selectedIssue.created_by || 'unknown'}
                             {selectedIssue.assigned_to ? ` • Assigned to ${selectedIssue.assigned_to}` : ''}
                           </p>
                         </div>
                         <div className="flex items-center gap-2">
                           {selectedIssue.status !== 'closed' && selectedIssue?.permissions?.can_close && (
-                            <Button variant="ghost" size="sm" className="text-white/90 border border-white/20" onClick={() => handleTransition('closed')}>
+                            <Button variant="ghost" size="sm" className="text-ink border border-border" onClick={() => handleTransition('closed')}>
                               <FiCheckCircle className="w-4 h-4 mr-2" />
                               Close
                             </Button>
                           )}
                           {selectedIssue.status === 'closed' && selectedIssue?.permissions?.can_reopen && (
-                            <Button variant="ghost" size="sm" className="text-white/90 border border-white/20" onClick={() => handleTransition('open')}>
+                            <Button variant="ghost" size="sm" className="text-ink border border-border" onClick={() => handleTransition('open')}>
                               Reopen
                             </Button>
                           )}
@@ -588,7 +588,7 @@ const IssuesModal = ({ repo, onClose }) => {
                       </div>
 
                       {selectedIssue.description && (
-                        <p className="text-white/80 text-sm mt-3 whitespace-pre-wrap">{selectedIssue.description}</p>
+                        <p className="text-ink-soft text-sm mt-3 whitespace-pre-wrap">{selectedIssue.description}</p>
                       )}
 
                       {Array.isArray(selectedIssue.labels) && selectedIssue.labels.length > 0 && (
@@ -601,36 +601,36 @@ const IssuesModal = ({ repo, onClose }) => {
                     </div>
 
                     {selectedIssue.links && (
-                      <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                        <p className="text-white/80 text-sm font-medium mb-2">Links</p>
-                        <div className="space-y-2 text-xs text-white/70">
+                      <div className="rounded-lg border border-border bg-cream-mid p-3">
+                        <p className="text-ink-soft text-sm font-medium mb-2">Links</p>
+                        <div className="space-y-2 text-xs text-ink-soft">
                           <div>
-                            <p className="text-white/60 mb-1">Branches</p>
+                            <p className="text-muted mb-1">Branches</p>
                             {(selectedIssue.links.branches || []).length === 0 ? (
-                              <p className="text-white/40">—</p>
+                              <p className="text-muted">—</p>
                             ) : (
                               (selectedIssue.links.branches || []).map((b) => (
-                                <p key={b.name} className="font-mono text-white/80">{b.name}</p>
+                                <p key={b.name} className="font-mono text-ink-soft">{b.name}</p>
                               ))
                             )}
                           </div>
                           <div>
-                            <p className="text-white/60 mb-1">Pull requests</p>
+                            <p className="text-muted mb-1">Pull requests</p>
                             {(selectedIssue.links.pull_requests || []).length === 0 ? (
-                              <p className="text-white/40">—</p>
+                              <p className="text-muted">—</p>
                             ) : (
                               (selectedIssue.links.pull_requests || []).map((p) => (
-                                <p key={p.id} className="text-white/80">#{p.id} {p.title || ''} <span className="text-white/50">({p.status})</span></p>
+                                <p key={p.id} className="text-ink-soft">#{p.id} {p.title || ''} <span className="text-muted">({p.status})</span></p>
                               ))
                             )}
                           </div>
                           <div>
-                            <p className="text-white/60 mb-1">Commits</p>
+                            <p className="text-muted mb-1">Commits</p>
                             {(selectedIssue.links.commits || []).length === 0 ? (
-                              <p className="text-white/40">—</p>
+                              <p className="text-muted">—</p>
                             ) : (
                               (selectedIssue.links.commits || []).slice(0, 8).map((c) => (
-                                <p key={c.id} className="font-mono text-white/80">{(c.id || '').slice(0, 12)} {c.message ? `— ${c.message}` : ''}</p>
+                                <p key={c.id} className="font-mono text-ink-soft">{(c.id || '').slice(0, 12)} {c.message ? `— ${c.message}` : ''}</p>
                               ))
                             )}
                           </div>
@@ -638,16 +638,16 @@ const IssuesModal = ({ repo, onClose }) => {
                       </div>
                     )}
 
-                    <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                      <p className="text-white/80 text-sm font-medium mb-2">Comments</p>
+                    <div className="rounded-lg border border-border bg-cream-mid p-3">
+                      <p className="text-ink-soft text-sm font-medium mb-2">Comments</p>
                       <div className="space-y-3 max-h-48 overflow-auto pr-1">
                         {(selectedIssue.comments || []).length === 0 ? (
-                          <p className="text-white/40 text-sm">No comments yet.</p>
+                          <p className="text-muted text-sm">No comments yet.</p>
                         ) : (
                           (selectedIssue.comments || []).map((c) => (
-                            <div key={c.id} className="rounded border border-white/10 bg-white/5 p-2">
-                              <p className="text-xs text-white/50">{c.author || 'unknown'} • {c.created_at ? new Date(c.created_at).toLocaleString() : ''}</p>
-                              <p className="text-sm text-white/80 whitespace-pre-wrap mt-1">{c.body}</p>
+                            <div key={c.id} className="rounded border border-border bg-cream-mid/70 p-2">
+                              <p className="text-xs text-muted">{c.author || 'unknown'} • {c.created_at ? new Date(c.created_at).toLocaleString() : ''}</p>
+                              <p className="text-sm text-ink-soft whitespace-pre-wrap mt-1">{c.body}</p>
                             </div>
                           ))
                         )}
@@ -658,7 +658,7 @@ const IssuesModal = ({ repo, onClose }) => {
                           value={commentBody}
                           onChange={(e) => setCommentBody(e.target.value)}
                           placeholder="Add a comment (supports @mentions)…"
-                          className="w-full min-h-20 bg-white/10 border border-white/20 rounded px-3 py-2 text-sm text-white placeholder:text-white/40"
+                          className="w-full min-h-20 bg-cream-mid border border-border rounded px-3 py-2 text-sm text-ink placeholder:text-muted"
                         />
                         <Button variant="primary" size="sm" onClick={handleAddComment} disabled={commentSubmitting || !commentBody.trim()}>
                           {commentSubmitting ? <><FiLoader className="w-4 h-4 mr-2 animate-spin" />Posting…</> : <>Post comment</>}
@@ -666,18 +666,18 @@ const IssuesModal = ({ repo, onClose }) => {
                       </div>
                     </div>
 
-                    <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                      <p className="text-white/80 text-sm font-medium mb-2">Activity</p>
+                    <div className="rounded-lg border border-border bg-cream-mid p-3">
+                      <p className="text-ink-soft text-sm font-medium mb-2">Activity</p>
                       <div className="space-y-2 max-h-44 overflow-auto pr-1">
                         {(selectedIssue.events || []).length === 0 ? (
-                          <p className="text-white/40 text-sm">No activity recorded.</p>
+                          <p className="text-muted text-sm">No activity recorded.</p>
                         ) : (
                           (selectedIssue.events || []).slice(-50).reverse().map((e) => (
-                            <div key={e.id} className="text-xs text-white/70">
-                              <span className="text-white/50">{e.created_at ? new Date(e.created_at).toLocaleString() : ''}</span>
-                              <span className="mx-2 text-white/30">•</span>
-                              <span className="text-white/80">{formatEvent(e)}</span>
-                              {e.actor && <span className="text-white/50"> by {e.actor}</span>}
+                            <div key={e.id} className="text-xs text-ink-soft">
+                              <span className="text-muted">{e.created_at ? new Date(e.created_at).toLocaleString() : ''}</span>
+                              <span className="mx-2 text-muted">•</span>
+                              <span className="text-ink-soft">{formatEvent(e)}</span>
+                              {e.actor && <span className="text-muted"> by {e.actor}</span>}
                             </div>
                           ))
                         )}

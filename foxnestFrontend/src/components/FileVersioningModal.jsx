@@ -145,39 +145,39 @@ const FileVersioningModal = ({ repo, branch, filePath, onClose, onRollbackComple
 
   const rowClass = (column, rowType) => {
     if (column === 'previous') {
-      if (rowType === 'removed' || rowType === 'changed') return 'bg-red-500/15 text-red-100'
-      if (rowType === 'same') return 'text-white/70'
-      return 'text-white/40'
+      if (rowType === 'removed' || rowType === 'changed') return 'bg-danger-fg/15 text-danger-fg'
+      if (rowType === 'same') return 'text-ink-soft'
+      return 'text-muted'
     }
 
-    if (rowType === 'added' || rowType === 'changed') return 'bg-green-500/15 text-green-100'
-    if (rowType === 'same') return 'text-white/70'
-    return 'text-white/40'
+    if (rowType === 'added' || rowType === 'changed') return 'bg-success-fg/15 text-success-fg'
+    if (rowType === 'same') return 'text-ink-soft'
+    return 'text-muted'
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 backdrop-blur-sm p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 backdrop-blur-sm p-4">
       <div className="absolute inset-0" onClick={onClose} />
       <div className="relative w-full max-w-7xl">
         <GlassCard className="p-6" hover={false}>
           <div className="flex items-start justify-between gap-4 mb-5">
             <div>
-              <p className="text-xs uppercase tracking-[0.16em] text-white/50">File Versioning</p>
-              <h2 className="text-xl font-semibold text-white">{filePath}</h2>
-              <p className="text-sm text-white/60">Repository: {repo?.name} {branch ? `• Branch: ${branch}` : ''}</p>
-              <p className="text-xs text-green-200/85 mt-1">Switching versions is safe. Restores create a new immutable version entry.</p>
-              <div className="mt-3 inline-flex rounded-lg border border-white/15 overflow-hidden">
+              <p className="text-xs uppercase tracking-[0.16em] text-muted">File Versioning</p>
+              <h2 className="text-xl font-semibold text-ink">{filePath}</h2>
+              <p className="text-sm text-muted">Repository: {repo?.name} {branch ? `• Branch: ${branch}` : ''}</p>
+              <p className="text-xs text-success-fg/85 mt-1">Switching versions is safe. Restores create a new immutable version entry.</p>
+              <div className="mt-3 inline-flex rounded-lg border border-border overflow-hidden">
                 <button
                   type="button"
                   onClick={() => setHistoryScope('all')}
-                  className={`px-3 py-1.5 text-xs transition-colors ${historyScope === 'all' ? 'bg-blue-500/30 text-blue-100' : 'bg-white/5 text-white/70 hover:bg-white/10'}`}
+                  className={`px-3 py-1.5 text-xs transition-colors ${historyScope === 'all' ? 'bg-info-fg/30 text-info-fg' : 'bg-cream-mid/70 text-ink-soft hover:bg-cream-mid'}`}
                 >
                   Full Repository History
                 </button>
                 <button
                   type="button"
                   onClick={() => setHistoryScope('branch')}
-                  className={`px-3 py-1.5 text-xs transition-colors ${historyScope === 'branch' ? 'bg-blue-500/30 text-blue-100' : 'bg-white/5 text-white/70 hover:bg-white/10'}`}
+                  className={`px-3 py-1.5 text-xs transition-colors ${historyScope === 'branch' ? 'bg-info-fg/30 text-info-fg' : 'bg-cream-mid/70 text-ink-soft hover:bg-cream-mid'}`}
                   disabled={!branch}
                   title={branch ? `Only commits reachable from ${branch}` : 'No branch selected'}
                 >
@@ -192,22 +192,22 @@ const FileVersioningModal = ({ repo, branch, filePath, onClose, onRollbackComple
           </div>
 
           {error && (
-            <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+            <div className="mb-4 rounded-lg border border-danger-fg/20 bg-danger-bg px-3 py-2 text-sm text-danger-fg">
               {error}
             </div>
           )}
 
           {loading ? (
-            <div className="flex items-center justify-center py-14 text-white/70">
+            <div className="flex items-center justify-center py-14 text-ink-soft">
               <FiLoader className="w-5 h-5 animate-spin mr-2" />
               Loading file history...
             </div>
           ) : (
             <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
-              <div className="xl:col-span-3 rounded-xl border border-white/10 bg-white/5 p-3 max-h-[64vh] overflow-y-auto">
+              <div className="xl:col-span-3 rounded-xl border border-border bg-cream-mid/70 p-3 max-h-[64vh] overflow-y-auto">
                 <div className="flex items-center justify-between mb-2 gap-2">
-                  <p className="text-xs uppercase text-white/50 tracking-wider">Versions</p>
-                  <p className="text-[11px] text-white/45">
+                  <p className="text-xs uppercase text-muted tracking-wider">Versions</p>
+                  <p className="text-[11px] text-muted">
                     Loaded {versions.length}
                   </p>
                 </div>
@@ -222,42 +222,42 @@ const FileVersioningModal = ({ repo, branch, filePath, onClose, onRollbackComple
                         onClick={() => setSelectedVersion(version)}
                         className={`w-full text-left rounded-lg border px-3 py-2 transition-colors ${
                           isSelected
-                            ? 'border-blue-400/50 bg-blue-500/10'
-                            : 'border-white/10 bg-white/5 hover:bg-white/10'
+                            ? 'border-info-fg/50 bg-info-bg'
+                            : 'border-border bg-cream-mid/70 hover:bg-cream-mid'
                         }`}
                       >
                         <div className="flex items-center justify-between gap-2">
-                          <span className="text-xs text-white/70">v{version.version_number}</span>
+                          <span className="text-xs text-ink-soft">v{version.version_number}</span>
                           {isActive && (
                             <Badge variant="success" className="text-[10px]">CURRENT ACTIVE</Badge>
                           )}
                         </div>
-                        <p className="text-white text-sm font-medium mt-1 line-clamp-2">{version.message}</p>
-                        <p className="text-xs text-white/60 mt-1">{version.author || 'Unknown'}</p>
-                        <p className="text-xs text-white/60 mt-1 inline-flex items-center gap-1">
+                        <p className="text-ink text-sm font-medium mt-1 line-clamp-2">{version.message}</p>
+                        <p className="text-xs text-muted mt-1">{version.author || 'Unknown'}</p>
+                        <p className="text-xs text-muted mt-1 inline-flex items-center gap-1">
                           <FiClock className="w-3 h-3" />
                           {api.formatDate(version.timestamp)}
                         </p>
-                        <p className="text-[11px] text-white/45 mt-1 uppercase tracking-wide">{version.change_type || 'modified'}</p>
+                        <p className="text-[11px] text-muted mt-1 uppercase tracking-wide">{version.change_type || 'modified'}</p>
                         {version?.lineage?.renamed && (
-                          <p className="text-[11px] text-amber-200/90 mt-1">
+                          <p className="text-[11px] text-warning-fg/90 mt-1">
                             Renamed path: {version.observed_path}
                           </p>
                         )}
-                        <p className="text-xs text-white/45 font-mono mt-1">{version.commit_id.slice(0, 12)}</p>
+                        <p className="text-xs text-muted font-mono mt-1">{version.commit_id.slice(0, 12)}</p>
                       </button>
                     )
                   })}
 
                   {versions.length === 0 && (
-                    <p className="text-sm text-white/50">No version history found for this file.</p>
+                    <p className="text-sm text-muted">No version history found for this file.</p>
                   )}
 
                   {hasMoreHistory && (
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="w-full text-blue-200 hover:text-white border border-blue-400/30"
+                      className="w-full text-info-fg hover:text-ink border border-info-fg/30"
                       onClick={loadOlderVersions}
                       disabled={loadingMoreHistory}
                     >
@@ -269,10 +269,10 @@ const FileVersioningModal = ({ repo, branch, filePath, onClose, onRollbackComple
 
               <div className="xl:col-span-9">
                 <div className="flex items-center justify-between mb-3">
-                  <div className="text-sm text-white/70 flex items-center gap-2">
+                  <div className="text-sm text-ink-soft flex items-center gap-2">
                     <FiGitCommit className="w-4 h-4" />
                     <span>
-                      Comparing <span className="text-white">{selectedVersion?.commit_id?.slice(0, 8) || '—'}</span> → <span className="text-white">{latestVersion?.commit_id?.slice(0, 8) || '—'}</span>
+                      Comparing <span className="text-ink">{selectedVersion?.commit_id?.slice(0, 8) || '—'}</span> → <span className="text-ink">{latestVersion?.commit_id?.slice(0, 8) || '—'}</span>
                     </span>
                   </div>
                   <div className="flex items-center gap-2">
@@ -289,18 +289,18 @@ const FileVersioningModal = ({ repo, branch, filePath, onClose, onRollbackComple
                 </div>
 
                 {loadingCompare ? (
-                  <div className="flex items-center justify-center py-14 text-white/70 border border-white/10 rounded-xl bg-white/5">
+                  <div className="flex items-center justify-center py-14 text-ink-soft border border-border rounded-xl bg-cream-mid/70">
                     <FiLoader className="w-5 h-5 animate-spin mr-2" />
                     Building visual diff...
                   </div>
                 ) : compareResult?.is_binary ? (
-                  <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-4 text-yellow-100 text-sm">
+                  <div className="rounded-xl border border-warning-fg/20 bg-warning-bg p-4 text-warning-fg text-sm">
                     Binary or oversized file detected. Inline text diff is not available for this comparison.
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                    <div className="rounded-xl border border-red-500/30 bg-red-500/5 overflow-hidden">
-                      <div className="px-3 py-2 text-xs font-semibold text-red-200 border-b border-red-500/30">Previous (red)</div>
+                    <div className="rounded-xl border border-danger-fg/20 bg-danger-fg/5 overflow-hidden">
+                      <div className="px-3 py-2 text-xs font-semibold text-danger-fg border-b border-danger-fg/20">Previous (red)</div>
                       <div className="max-h-[56vh] overflow-auto font-mono text-xs">
                         {compareRows.map((row, idx) => (
                           <pre key={`prev-${idx}`} className={`px-3 py-1 whitespace-pre-wrap break-words ${rowClass('previous', row.type)}`}>
@@ -310,8 +310,8 @@ const FileVersioningModal = ({ repo, branch, filePath, onClose, onRollbackComple
                       </div>
                     </div>
 
-                    <div className="rounded-xl border border-green-500/30 bg-green-500/5 overflow-hidden">
-                      <div className="px-3 py-2 text-xs font-semibold text-green-200 border-b border-green-500/30">Current (green)</div>
+                    <div className="rounded-xl border border-success-fg/20 bg-success-fg/5 overflow-hidden">
+                      <div className="px-3 py-2 text-xs font-semibold text-success-fg border-b border-success-fg/20">Current (green)</div>
                       <div className="max-h-[56vh] overflow-auto font-mono text-xs">
                         {compareRows.map((row, idx) => (
                           <pre key={`curr-${idx}`} className={`px-3 py-1 whitespace-pre-wrap break-words ${rowClass('current', row.type)}`}>
@@ -327,13 +327,13 @@ const FileVersioningModal = ({ repo, branch, filePath, onClose, onRollbackComple
           )}
 
           {showConfirm && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 backdrop-blur-sm p-4">
               <GlassCard className="p-5 max-w-md w-full" hover={false}>
-                <h3 className="text-lg font-semibold text-white mb-2">Confirm rollback</h3>
-                <p className="text-sm text-white/70 mb-4">
-                  Switch <span className="text-white font-medium">{filePath}</span> to historical commit <span className="text-white font-mono">{selectedVersion?.commit_id?.slice(0, 12)}</span> and save as current?
+                <h3 className="text-lg font-semibold text-ink mb-2">Confirm rollback</h3>
+                <p className="text-sm text-ink-soft mb-4">
+                  Switch <span className="text-ink font-medium">{filePath}</span> to historical commit <span className="text-ink font-mono">{selectedVersion?.commit_id?.slice(0, 12)}</span> and save as current?
                 </p>
-                <p className="text-xs text-white/55 mb-5">
+                <p className="text-xs text-ink/55 mb-5">
                   This creates a new commit so restore is reversible and all prior versions remain accessible.
                 </p>
                 <div className="flex justify-end gap-2">

@@ -113,7 +113,7 @@ const IssueAccessRequests = () => {
   if (!token) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
-        <span className="text-gray-400">Please log in first</span>
+        <span className="text-muted">Please log in first</span>
       </div>
     )
   }
@@ -121,8 +121,8 @@ const IssueAccessRequests = () => {
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
-        <FiRefreshCw className="w-8 h-8 text-orange-400 animate-spin mr-3" />
-        <span className="ml-2 text-gray-300">Loading access requests...</span>
+        <FiRefreshCw className="w-8 h-8 text-warning-fg animate-spin mr-3" />
+        <span className="ml-2 text-ink-soft">Loading access requests...</span>
       </div>
     )
   }
@@ -131,8 +131,8 @@ const IssueAccessRequests = () => {
     <div className="min-h-screen p-8">
       <div className="max-w-6xl mx-auto">
         <div className="flex items-center justify-between mb-8">
-          <h1 className="text-3xl font-bold text-white flex items-center">
-            <FiAlertCircle className="mr-3 text-orange-400" />
+          <h1 className="text-3xl font-bold text-ink flex items-center">
+            <FiAlertCircle className="mr-3 text-warning-fg" />
             Issue Access Requests
           </h1>
           <Button onClick={handleRefresh} variant="secondary" size="sm">
@@ -141,7 +141,7 @@ const IssueAccessRequests = () => {
         </div>
 
         {error && (
-          <div className="bg-red-900/20 border border-red-500 rounded-lg p-4 mb-6 text-red-200">
+          <div className="bg-danger-fg/20 border border-danger-fg/30 rounded-lg p-4 mb-6 text-danger-fg">
             {error}
           </div>
         )}
@@ -149,9 +149,9 @@ const IssueAccessRequests = () => {
         {requests.length === 0 ? (
           <GlassCard className="p-8">
             <div className="text-center">
-              <FiCheck className="w-12 h-12 text-green-400 mx-auto mb-4" />
-              <h2 className="text-xl font-semibold text-white mb-2">All Caught Up!</h2>
-              <p className="text-gray-300">There are no pending access requests at this time.</p>
+              <FiCheck className="w-12 h-12 text-success-fg mx-auto mb-4" />
+              <h2 className="text-xl font-semibold text-ink mb-2">All Caught Up!</h2>
+              <p className="text-ink-soft">There are no pending access requests at this time.</p>
             </div>
           </GlassCard>
         ) : (
@@ -159,43 +159,43 @@ const IssueAccessRequests = () => {
             {requests.map((request) => (
               <GlassCard 
                 key={request.id}
-                className={`p-6 cursor-pointer transition ${selectedRequest?.id === request.id ? 'ring-2 ring-orange-400' : ''}`}
+                className={`p-6 cursor-pointer transition ${selectedRequest?.id === request.id ? 'ring-2 ring-warning-fg' : ''}`}
                 onClick={() => setSelectedRequest(selectedRequest?.id === request.id ? null : request)}
               >
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
                     <div className="flex items-center gap-4 mb-3">
-                      <FiUser className="w-5 h-5 text-blue-400" />
-                      <span className="font-semibold text-white">@{request.requested_user.username || 'Unknown'}</span>
+                      <FiUser className="w-5 h-5 text-info-fg" />
+                      <span className="font-semibold text-ink">@{request.requested_user.username || 'Unknown'}</span>
                       <Badge variant="warning">Pending</Badge>
                     </div>
 
                     <div className="grid grid-cols-2 gap-4 mt-4 text-sm">
                       <div>
-                        <p className="text-gray-400">Issue Number</p>
-                        <p className="text-white font-mono">#{request.issue_id}</p>
+                        <p className="text-muted">Issue Number</p>
+                        <p className="text-ink font-mono">#{request.issue_id}</p>
                       </div>
                       <div>
-                        <p className="text-gray-400">Repository</p>
-                        <p className="text-white">
+                        <p className="text-muted">Repository</p>
+                        <p className="text-ink">
                           <FiFolder className="inline mr-1" />
                           {request.repository.name || request.repository_id}
                         </p>
                       </div>
                       <div>
-                        <p className="text-gray-400">Requested By</p>
-                        <p className="text-white">@{request.requested_by.username || 'Unknown'}</p>
+                        <p className="text-muted">Requested By</p>
+                        <p className="text-ink">@{request.requested_by.username || 'Unknown'}</p>
                       </div>
                       <div>
-                        <p className="text-gray-400">Request Reason</p>
-                        <p className="text-white">{request.request_reason || 'No reason provided'}</p>
+                        <p className="text-muted">Request Reason</p>
+                        <p className="text-ink">{request.request_reason || 'No reason provided'}</p>
                       </div>
                     </div>
 
                     {request.request_reason && (
                       <div className="mt-4">
-                        <p className="text-gray-400 mb-2">Details:</p>
-                        <div className="bg-black/30 rounded p-3 text-gray-200">
+                        <p className="text-muted mb-2">Details:</p>
+                        <div className="bg-cream-deep rounded p-3 text-ink-soft">
                           {request.request_reason}
                         </div>
                       </div>
@@ -204,16 +204,16 @@ const IssueAccessRequests = () => {
                 </div>
 
                 {selectedRequest?.id === request.id && (
-                  <div className="mt-6 pt-6 border-t border-gray-700">
+                  <div className="mt-6 pt-6 border-t border-border">
                     <div className="mb-4">
-                      <label className="block text-sm font-medium text-gray-300 mb-2">
+                      <label className="block text-sm font-medium text-ink-soft mb-2">
                         Review Comment (Optional)
                       </label>
                       <textarea
                         value={reviewComment}
                         onChange={(e) => setReviewComment(e.target.value)}
                         placeholder="Enter your comment..."
-                        className="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded text-white placeholder-gray-500 focus:outline-none focus:border-orange-500"
+                        className="w-full px-3 py-2 bg-surface border border-border rounded text-ink placeholder:text-muted focus:outline-none focus:border-ink"
                         rows="3"
                       />
                     </div>

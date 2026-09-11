@@ -347,8 +347,8 @@ const UsersManagement = () => {
     return (
       <div className="p-6">
         <div className="flex items-center justify-center h-64">
-          <FiUser className="w-8 h-8 animate-pulse text-blue-400" />
-          <span className="ml-2 text-gray-300">Loading users...</span>
+          <FiUser className="w-8 h-8 animate-pulse text-info-fg" />
+          <span className="ml-2 text-ink-soft">Loading users...</span>
         </div>
       </div>
     )
@@ -358,8 +358,8 @@ const UsersManagement = () => {
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-white mb-2">Users & Permissions</h1>
-          <p className="text-white/70">
+          <h1 className="text-3xl font-bold text-ink mb-2">Users & Permissions</h1>
+          <p className="text-ink-soft">
             {selectedUser
               ? `Profile for @${selectedUser.username}`
               : 'Click a username to open activity, history, and permissions'}
@@ -392,8 +392,8 @@ const UsersManagement = () => {
       </div>
 
       {error && (
-        <GlassCard className="p-4 border-red-500/30 bg-red-500/10">
-          <div className="flex items-center space-x-2 text-red-400">
+        <GlassCard className="p-4 border-danger-fg/20 bg-danger-bg">
+          <div className="flex items-center space-x-2 text-danger-fg">
             <FiWifiOff className="w-5 h-5" />
             <span>{error}</span>
           </div>
@@ -404,20 +404,20 @@ const UsersManagement = () => {
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <GlassCard className="p-4">
-              <p className="text-xs text-white/50 uppercase tracking-wide">Total</p>
-              <p className="text-2xl font-semibold text-white mt-1">{engagementSummary.total}</p>
+              <p className="text-xs text-muted uppercase tracking-wide">Total</p>
+              <p className="text-2xl font-semibold text-ink mt-1">{engagementSummary.total}</p>
             </GlassCard>
-            <GlassCard className="p-4 border-green-500/20">
-              <p className="text-xs text-green-300/80 uppercase tracking-wide">Active (7d)</p>
-              <p className="text-2xl font-semibold text-green-300 mt-1">{engagementSummary.active}</p>
+            <GlassCard className="p-4 border-success-fg/20">
+              <p className="text-xs text-success-fg/80 uppercase tracking-wide">Active (7d)</p>
+              <p className="text-2xl font-semibold text-success-fg mt-1">{engagementSummary.active}</p>
             </GlassCard>
-            <GlassCard className="p-4 border-yellow-500/20">
-              <p className="text-xs text-yellow-200/80 uppercase tracking-wide">Idle</p>
-              <p className="text-2xl font-semibold text-yellow-200 mt-1">{engagementSummary.idle}</p>
+            <GlassCard className="p-4 border-warning-fg/20">
+              <p className="text-xs text-warning-fg/80 uppercase tracking-wide">Idle</p>
+              <p className="text-2xl font-semibold text-warning-fg mt-1">{engagementSummary.idle}</p>
             </GlassCard>
-            <GlassCard className="p-4 border-red-500/20">
-              <p className="text-xs text-red-300/80 uppercase tracking-wide">Never used</p>
-              <p className="text-2xl font-semibold text-red-300 mt-1">{engagementSummary.never_used}</p>
+            <GlassCard className="p-4 border-danger-fg/20">
+              <p className="text-xs text-danger-fg/80 uppercase tracking-wide">Never used</p>
+              <p className="text-2xl font-semibold text-danger-fg mt-1">{engagementSummary.never_used}</p>
             </GlassCard>
           </div>
 
@@ -437,7 +437,7 @@ const UsersManagement = () => {
                 {f.label}
               </Button>
             ))}
-            <span className="text-sm text-white/50 ml-2">
+            <span className="text-sm text-muted ml-2">
               Showing {filteredUsers.length} user{filteredUsers.length === 1 ? '' : 's'}
             </span>
           </div>
@@ -446,7 +446,7 @@ const UsersManagement = () => {
             <div className="overflow-x-auto">
               <table className="w-full text-left">
                 <thead>
-                  <tr className="border-b border-white/10 text-xs uppercase tracking-wide text-white/50">
+                  <tr className="border-b border-border text-xs uppercase tracking-wide text-muted">
                     <th className="px-4 py-3 font-medium">User</th>
                     <th className="px-4 py-3 font-medium">Status</th>
                     <th className="px-4 py-3 font-medium">Last login</th>
@@ -464,7 +464,7 @@ const UsersManagement = () => {
                     return (
                       <tr
                         key={user.id}
-                        className="border-b border-white/5 hover:bg-white/5 transition-colors"
+                        className="border-b border-white/5 hover:bg-cream-mid transition-colors"
                       >
                         <td className="px-4 py-3">
                           <button
@@ -473,16 +473,16 @@ const UsersManagement = () => {
                             className="text-left group"
                           >
                             <div className="flex items-center gap-3">
-                              <div className="w-9 h-9 rounded-full bg-gradient-to-br from-blue-400 to-blue-600 flex items-center justify-center shrink-0">
-                                <span className="text-white text-sm font-semibold">
+                              <div className="w-9 h-9 rounded-full bg-gradient-to-br from-glow to-accent flex items-center justify-center shrink-0">
+                                <span className="text-ink text-sm font-semibold">
                                   {(user.full_name || user.username || '?').charAt(0).toUpperCase()}
                                 </span>
                               </div>
                               <div>
-                                <p className="text-white font-medium group-hover:text-blue-300 transition-colors">
+                                <p className="text-ink font-medium group-hover:text-info-fg transition-colors">
                                   {user.full_name || user.username}
                                 </p>
-                                <p className="text-xs text-blue-300/90 group-hover:underline">@{user.username}</p>
+                                <p className="text-xs text-info-fg/90 group-hover:underline">@{user.username}</p>
                               </div>
                             </div>
                           </button>
@@ -490,15 +490,15 @@ const UsersManagement = () => {
                         <td className="px-4 py-3">
                           <Badge variant={rowStatus.variant}>{rowStatus.label}</Badge>
                         </td>
-                        <td className="px-4 py-3 text-sm text-white/70">{formatRelativeTime(user.last_login_at)}</td>
-                        <td className="px-4 py-3 text-sm text-white/70">{formatRelativeTime(user.last_work_at)}</td>
-                        <td className="px-4 py-3 text-sm text-white/70">
+                        <td className="px-4 py-3 text-sm text-ink-soft">{formatRelativeTime(user.last_login_at)}</td>
+                        <td className="px-4 py-3 text-sm text-ink-soft">{formatRelativeTime(user.last_work_at)}</td>
+                        <td className="px-4 py-3 text-sm text-ink-soft">
                           {user.commits_7d ?? 0} / {user.commits_30d ?? 0}
                         </td>
                         <td className="px-4 py-3">
                           <Badge variant={rowScore.variant}>{rowScore.label}</Badge>
                         </td>
-                        <td className="px-4 py-3 text-sm text-white/70 capitalize">
+                        <td className="px-4 py-3 text-sm text-ink-soft capitalize">
                           {(user.role || 'developer').replace('_', ' ')}
                         </td>
                         <td className="px-4 py-3 text-right">
@@ -514,7 +514,7 @@ const UsersManagement = () => {
                             <Button
                               size="sm"
                               variant="ghost"
-                              className="text-red-400 hover:text-red-300"
+                              className="text-danger-fg hover:text-danger-fg"
                               onClick={() => handleDeleteUser(user.username)}
                               title="Delete user"
                             >
@@ -529,7 +529,7 @@ const UsersManagement = () => {
               </table>
             </div>
             {filteredUsers.length === 0 && (
-              <div className="p-8 text-center text-white/60">No users match this filter.</div>
+              <div className="p-8 text-center text-muted">No users match this filter.</div>
             )}
           </GlassCard>
         </>
@@ -539,17 +539,17 @@ const UsersManagement = () => {
         <GlassCard className="p-0 overflow-hidden min-h-[560px]">
           <div className="flex flex-col lg:flex-row min-h-[560px]">
             {/* Left tabs */}
-            <aside className="lg:w-56 shrink-0 border-b lg:border-b-0 lg:border-r border-white/10 bg-black/20">
-              <div className="p-4 border-b border-white/10">
+            <aside className="lg:w-56 shrink-0 border-b lg:border-b-0 lg:border-r border-border bg-cream-mid">
+              <div className="p-4 border-b border-border">
                 <div className="flex items-center gap-3">
-                  <div className="w-11 h-11 rounded-full bg-gradient-to-br from-blue-400 to-blue-600 flex items-center justify-center">
-                    <span className="text-white font-semibold">
+                  <div className="w-11 h-11 rounded-full bg-gradient-to-br from-glow to-accent flex items-center justify-center">
+                    <span className="text-ink font-semibold">
                       {(profile?.full_name || profile?.username || '?').charAt(0).toUpperCase()}
                     </span>
                   </div>
                   <div className="min-w-0">
-                    <p className="text-white font-semibold truncate">{profile?.full_name || profile?.username}</p>
-                    <p className="text-xs text-white/50 truncate">@{profile?.username}</p>
+                    <p className="text-ink font-semibold truncate">{profile?.full_name || profile?.username}</p>
+                    <p className="text-xs text-muted truncate">@{profile?.username}</p>
                   </div>
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
@@ -568,8 +568,8 @@ const UsersManagement = () => {
                       onClick={() => setDetailTab(tab.id)}
                       className={`w-full flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm transition-colors ${
                         active
-                          ? 'bg-blue-500/20 text-blue-200 border border-blue-400/30'
-                          : 'text-white/70 hover:bg-white/5 hover:text-white'
+                          ? 'bg-info-fg/20 text-info-fg border border-info-fg/30'
+                          : 'text-ink-soft hover:bg-cream-mid hover:text-ink'
                       }`}
                     >
                       <Icon className="w-4 h-4 shrink-0" />
@@ -583,7 +583,7 @@ const UsersManagement = () => {
             {/* Right content */}
             <div className="flex-1 p-6">
               {detailLoading && (
-                <div className="flex items-center justify-center h-64 text-white/60">
+                <div className="flex items-center justify-center h-64 text-muted">
                   <FiActivity className="w-6 h-6 animate-pulse mr-2" />
                   Loading profile...
                 </div>
@@ -592,42 +592,42 @@ const UsersManagement = () => {
               {!detailLoading && detailTab === 'overview' && profile && (
                 <div className="space-y-6">
                   <div>
-                    <h2 className="text-xl font-bold text-white">Overview</h2>
-                    <p className="text-sm text-white/60 mt-1">Engagement and performance snapshot</p>
+                    <h2 className="text-xl font-bold text-ink">Overview</h2>
+                    <p className="text-sm text-muted mt-1">Engagement and performance snapshot</p>
                   </div>
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                    <div className="rounded-xl bg-white/5 border border-white/10 p-4">
-                      <div className="flex items-center gap-2 text-white/50 text-xs uppercase"><FiLogIn /> Last login</div>
-                      <p className="text-white text-lg font-semibold mt-2">{formatRelativeTime(profile.last_login_at)}</p>
-                      <p className="text-xs text-white/40 mt-1">{formatDateTime(profile.last_login_at)}</p>
+                    <div className="rounded-xl bg-cream-mid/70 border border-border p-4">
+                      <div className="flex items-center gap-2 text-muted text-xs uppercase"><FiLogIn /> Last login</div>
+                      <p className="text-ink text-lg font-semibold mt-2">{formatRelativeTime(profile.last_login_at)}</p>
+                      <p className="text-xs text-muted mt-1">{formatDateTime(profile.last_login_at)}</p>
                     </div>
-                    <div className="rounded-xl bg-white/5 border border-white/10 p-4">
-                      <div className="flex items-center gap-2 text-white/50 text-xs uppercase"><FiClock /> Last work</div>
-                      <p className="text-white text-lg font-semibold mt-2">{formatRelativeTime(profile.last_work_at)}</p>
-                      <p className="text-xs text-white/40 mt-1">{formatDateTime(profile.last_work_at)}</p>
+                    <div className="rounded-xl bg-cream-mid/70 border border-border p-4">
+                      <div className="flex items-center gap-2 text-muted text-xs uppercase"><FiClock /> Last work</div>
+                      <p className="text-ink text-lg font-semibold mt-2">{formatRelativeTime(profile.last_work_at)}</p>
+                      <p className="text-xs text-muted mt-1">{formatDateTime(profile.last_work_at)}</p>
                     </div>
-                    <div className="rounded-xl bg-white/5 border border-white/10 p-4">
-                      <div className="flex items-center gap-2 text-white/50 text-xs uppercase"><FiGitCommit /> Commits</div>
-                      <p className="text-white text-lg font-semibold mt-2">
-                        {profile.commits_7d ?? 0} <span className="text-white/40 text-sm">/ 7d</span>
+                    <div className="rounded-xl bg-cream-mid/70 border border-border p-4">
+                      <div className="flex items-center gap-2 text-muted text-xs uppercase"><FiGitCommit /> Commits</div>
+                      <p className="text-ink text-lg font-semibold mt-2">
+                        {profile.commits_7d ?? 0} <span className="text-muted text-sm">/ 7d</span>
                         {' · '}
-                        {profile.commits_30d ?? 0} <span className="text-white/40 text-sm">/ 30d</span>
+                        {profile.commits_30d ?? 0} <span className="text-muted text-sm">/ 30d</span>
                       </p>
                     </div>
-                    <div className="rounded-xl bg-white/5 border border-white/10 p-4">
-                      <div className="flex items-center gap-2 text-white/50 text-xs uppercase"><FiActivity /> Pending waits</div>
-                      <p className="text-white text-lg font-semibold mt-2">{profile.pending_waits ?? 0}</p>
+                    <div className="rounded-xl bg-cream-mid/70 border border-border p-4">
+                      <div className="flex items-center gap-2 text-muted text-xs uppercase"><FiActivity /> Pending waits</div>
+                      <p className="text-ink text-lg font-semibold mt-2">{profile.pending_waits ?? 0}</p>
                     </div>
-                    <div className="rounded-xl bg-white/5 border border-white/10 p-4">
-                      <div className="flex items-center gap-2 text-white/50 text-xs uppercase"><FiFolder /> Repos owned</div>
-                      <p className="text-white text-lg font-semibold mt-2">{profile.repos_owned ?? 0}</p>
+                    <div className="rounded-xl bg-cream-mid/70 border border-border p-4">
+                      <div className="flex items-center gap-2 text-muted text-xs uppercase"><FiFolder /> Repos owned</div>
+                      <p className="text-ink text-lg font-semibold mt-2">{profile.repos_owned ?? 0}</p>
                     </div>
-                    <div className="rounded-xl bg-white/5 border border-white/10 p-4">
-                      <div className="flex items-center gap-2 text-white/50 text-xs uppercase"><FiTrendingUp /> Activity score</div>
+                    <div className="rounded-xl bg-cream-mid/70 border border-border p-4">
+                      <div className="flex items-center gap-2 text-muted text-xs uppercase"><FiTrendingUp /> Activity score</div>
                       <div className="mt-2"><Badge variant={sc.variant}>{sc.label}</Badge></div>
                     </div>
                   </div>
-                  <div className="rounded-xl bg-white/5 border border-white/10 p-4 space-y-2 text-sm text-white/70">
+                  <div className="rounded-xl bg-cream-mid/70 border border-border p-4 space-y-2 text-sm text-ink-soft">
                     {profile.email && (
                       <div className="flex items-center gap-2"><FiMail className="w-4 h-4" />{profile.email}</div>
                     )}
@@ -652,11 +652,11 @@ const UsersManagement = () => {
               {!detailLoading && detailTab === 'activity' && (
                 <div className="space-y-4">
                   <div>
-                    <h2 className="text-xl font-bold text-white">User Activity</h2>
-                    <p className="text-sm text-white/60 mt-1">System actions recorded for this user</p>
+                    <h2 className="text-xl font-bold text-ink">User Activity</h2>
+                    <p className="text-sm text-muted mt-1">System actions recorded for this user</p>
                   </div>
                   {(userDetail?.activity || []).length === 0 ? (
-                    <div className="text-center py-16 text-white/50">
+                    <div className="text-center py-16 text-muted">
                       <FiActivity className="w-10 h-10 mx-auto mb-3 opacity-40" />
                       No activity recorded yet.
                     </div>
@@ -665,19 +665,19 @@ const UsersManagement = () => {
                       {(userDetail?.activity || []).map((item) => (
                         <div
                           key={`act-${item.id}`}
-                          className="rounded-xl border border-white/10 bg-white/5 px-4 py-3"
+                          className="rounded-xl border border-border bg-cream-mid/70 px-4 py-3"
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div>
-                              <p className="text-white font-medium text-sm">
+                              <p className="text-ink font-medium text-sm">
                                 {(item.type || 'activity').replace(/_/g, ' ')}
                               </p>
-                              <p className="text-white/60 text-sm mt-1">{item.description || '—'}</p>
+                              <p className="text-muted text-sm mt-1">{item.description || '—'}</p>
                               {item.repository && (
-                                <p className="text-xs text-blue-300/80 mt-1">Repo: {item.repository}</p>
+                                <p className="text-xs text-info-fg/80 mt-1">Repo: {item.repository}</p>
                               )}
                             </div>
-                            <span className="text-xs text-white/40 whitespace-nowrap">
+                            <span className="text-xs text-muted whitespace-nowrap">
                               {formatRelativeTime(item.created_at)}
                             </span>
                           </div>
@@ -691,13 +691,13 @@ const UsersManagement = () => {
               {!detailLoading && detailTab === 'history' && (
                 <div className="space-y-4">
                   <div>
-                    <h2 className="text-xl font-bold text-white">User History</h2>
-                    <p className="text-sm text-white/60 mt-1">
+                    <h2 className="text-xl font-bold text-ink">User History</h2>
+                    <p className="text-sm text-muted mt-1">
                       Commits, repository creation, requests, and related events
                     </p>
                   </div>
                   {(userDetail?.history || []).length === 0 ? (
-                    <div className="text-center py-16 text-white/50">
+                    <div className="text-center py-16 text-muted">
                       <FiList className="w-10 h-10 mx-auto mb-3 opacity-40" />
                       No history found for this user.
                     </div>
@@ -706,7 +706,7 @@ const UsersManagement = () => {
                       {(userDetail?.history || []).map((item, idx) => (
                         <div
                           key={`hist-${idx}-${item.kind}-${item.created_at}`}
-                          className="rounded-xl border border-white/10 bg-white/5 px-4 py-3"
+                          className="rounded-xl border border-border bg-cream-mid/70 px-4 py-3"
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div>
@@ -714,17 +714,17 @@ const UsersManagement = () => {
                                 <Badge variant="info">{(item.kind || 'event').replace(/_/g, ' ')}</Badge>
                                 {item.status && <Badge variant="default">{item.status}</Badge>}
                               </div>
-                              <p className="text-white font-medium text-sm mt-2">{item.title}</p>
+                              <p className="text-ink font-medium text-sm mt-2">{item.title}</p>
                               {item.detail && (
-                                <p className="text-white/60 text-sm mt-1">{item.detail}</p>
+                                <p className="text-muted text-sm mt-1">{item.detail}</p>
                               )}
                               {item.repository && (
-                                <p className="text-xs text-blue-300/80 mt-1">Repo: {item.repository}</p>
+                                <p className="text-xs text-info-fg/80 mt-1">Repo: {item.repository}</p>
                               )}
                             </div>
                             <div className="text-right shrink-0">
-                              <p className="text-xs text-white/40">{formatRelativeTime(item.created_at)}</p>
-                              <p className="text-[11px] text-white/30 mt-1">{formatDateTime(item.created_at)}</p>
+                              <p className="text-xs text-muted">{formatRelativeTime(item.created_at)}</p>
+                              <p className="text-[11px] text-muted mt-1">{formatDateTime(item.created_at)}</p>
                             </div>
                           </div>
                         </div>
@@ -738,8 +738,8 @@ const UsersManagement = () => {
                 <div className="space-y-4">
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <h2 className="text-xl font-bold text-white">Permissions</h2>
-                      <p className="text-sm text-white/60 mt-1">Repository access for this user</p>
+                      <h2 className="text-xl font-bold text-ink">Permissions</h2>
+                      <p className="text-sm text-muted mt-1">Repository access for this user</p>
                     </div>
                     <Button
                       size="sm"
@@ -762,11 +762,11 @@ const UsersManagement = () => {
                       {(userDetail?.permissions || []).map((perm, index) => (
                         <div
                           key={index}
-                          className="p-4 rounded-xl bg-white/10 border border-white/10"
+                          className="p-4 rounded-xl bg-cream-mid border border-border"
                         >
                           <div className="flex items-start justify-between mb-3">
                             <div className="flex-1">
-                              <h4 className="font-medium text-white text-sm mb-1">
+                              <h4 className="font-medium text-ink text-sm mb-1">
                                 {perm.repository_name}
                               </h4>
                               <Badge variant={getPermissionBadgeVariant(perm.permission_level)}>
@@ -778,7 +778,7 @@ const UsersManagement = () => {
                                 variant="ghost"
                                 size="sm"
                                 onClick={() => handleEditPermission(perm)}
-                                className="text-blue-400 hover:text-blue-300"
+                                className="text-info-fg hover:text-info-fg"
                                 title="Edit permission"
                               >
                                 <FiEdit3 className="w-4 h-4" />
@@ -787,14 +787,14 @@ const UsersManagement = () => {
                                 variant="ghost"
                                 size="sm"
                                 onClick={() => handleRevokePermission(selectedUser.username, perm.repository_id)}
-                                className="text-red-400 hover:text-red-300"
+                                className="text-danger-fg hover:text-danger-fg"
                                 title="Revoke permission"
                               >
                                 <FiTrash2 className="w-4 h-4" />
                               </Button>
                             </div>
                           </div>
-                          <div className="space-y-1 text-xs text-white/70">
+                          <div className="space-y-1 text-xs text-ink-soft">
                             {perm.granted_by && <p>Granted by: {perm.granted_by}</p>}
                             {perm.granted_at && (
                               <p>Date: {new Date(perm.granted_at).toLocaleDateString()}</p>
@@ -804,7 +804,7 @@ const UsersManagement = () => {
                       ))}
                     </div>
                   ) : (
-                    <div className="text-center py-16 text-white/50">
+                    <div className="text-center py-16 text-muted">
                       <FiShield className="w-10 h-10 mx-auto mb-3 opacity-40" />
                       No permissions granted yet
                     </div>
@@ -818,61 +818,61 @@ const UsersManagement = () => {
 
       {/* Add User Modal */}
       {showAddUserModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <GlassCard className="max-w-md w-full p-6">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-bold text-white">Add New User</h2>
+              <h2 className="text-xl font-bold text-ink">Add New User</h2>
               <Button variant="ghost" size="sm" onClick={() => setShowAddUserModal(false)}>
                 <FiX className="w-5 h-5" />
               </Button>
             </div>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-white/70 mb-2">Username *</label>
+                <label className="block text-sm font-medium text-ink-soft mb-2">Username *</label>
                 <input
                   type="text"
                   value={newUser.username}
                   onChange={(e) => setNewUser({ ...newUser, username: e.target.value })}
                   placeholder="johndoe"
-                  className="w-full px-3 py-2 bg-gray-800/50 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:border-blue-500"
+                  className="w-full px-3 py-2 bg-cream-mid border border-border rounded-md text-ink placeholder:text-muted focus:outline-none focus:border-ink"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-white/70 mb-2">Email</label>
+                <label className="block text-sm font-medium text-ink-soft mb-2">Email</label>
                 <input
                   type="email"
                   value={newUser.email}
                   onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
                   placeholder="john@example.com"
-                  className="w-full px-3 py-2 bg-gray-800/50 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:border-blue-500"
+                  className="w-full px-3 py-2 bg-cream-mid border border-border rounded-md text-ink placeholder:text-muted focus:outline-none focus:border-ink"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-white/70 mb-2">Password *</label>
+                <label className="block text-sm font-medium text-ink-soft mb-2">Password *</label>
                 <input
                   type="password"
                   value={newUser.password}
                   onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
                   placeholder="At least 8 characters"
-                  className="w-full px-3 py-2 bg-gray-800/50 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:border-blue-500"
+                  className="w-full px-3 py-2 bg-cream-mid border border-border rounded-md text-ink placeholder:text-muted focus:outline-none focus:border-ink"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-white/70 mb-2">Full Name</label>
+                <label className="block text-sm font-medium text-ink-soft mb-2">Full Name</label>
                 <input
                   type="text"
                   value={newUser.full_name}
                   onChange={(e) => setNewUser({ ...newUser, full_name: e.target.value })}
                   placeholder="John Doe"
-                  className="w-full px-3 py-2 bg-gray-800/50 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:border-blue-500"
+                  className="w-full px-3 py-2 bg-cream-mid border border-border rounded-md text-ink placeholder:text-muted focus:outline-none focus:border-ink"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-white/70 mb-2">Role *</label>
+                <label className="block text-sm font-medium text-ink-soft mb-2">Role *</label>
                 <select
                   value={newUser.role}
                   onChange={(e) => setNewUser({ ...newUser, role: e.target.value, team_lead_id: null })}
-                  className="w-full px-3 py-2 bg-gray-800/50 border border-gray-600 rounded-md text-white focus:outline-none focus:border-blue-500"
+                  className="w-full px-3 py-2 bg-cream-mid border border-border rounded-md text-ink focus:outline-none focus:border-ink"
                 >
                   <option value="developer">Developer</option>
                   <option value="team_lead">Team Lead</option>
@@ -880,11 +880,11 @@ const UsersManagement = () => {
               </div>
               {newUser.role === 'developer' && (
                 <div>
-                  <label className="block text-sm font-medium text-white/70 mb-2">Assign Team Lead *</label>
+                  <label className="block text-sm font-medium text-ink-soft mb-2">Assign Team Lead *</label>
                   <select
                     value={newUser.team_lead_id || ''}
                     onChange={(e) => setNewUser({ ...newUser, team_lead_id: parseInt(e.target.value) || null })}
-                    className="w-full px-3 py-2 bg-gray-800/50 border border-gray-600 rounded-md text-white focus:outline-none focus:border-blue-500"
+                    className="w-full px-3 py-2 bg-cream-mid border border-border rounded-md text-ink focus:outline-none focus:border-ink"
                   >
                     <option value="">Select a team lead</option>
                     {users.filter((user) => user.role === 'team_lead').map((user) => (
@@ -916,21 +916,21 @@ const UsersManagement = () => {
 
       {/* Grant Permission Modal */}
       {showPermissionModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <GlassCard className="max-w-md w-full p-6">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-bold text-white">Grant Repository Permission</h2>
+              <h2 className="text-xl font-bold text-ink">Grant Repository Permission</h2>
               <Button variant="ghost" size="sm" onClick={() => setShowPermissionModal(false)}>
                 <FiX className="w-5 h-5" />
               </Button>
             </div>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-white/70 mb-2">Username *</label>
+                <label className="block text-sm font-medium text-ink-soft mb-2">Username *</label>
                 <select
                   value={permissionForm.username}
                   onChange={(e) => setPermissionForm({ ...permissionForm, username: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-800/50 border border-gray-600 rounded-md text-white focus:outline-none focus:border-blue-500"
+                  className="w-full px-3 py-2 bg-cream-mid border border-border rounded-md text-ink focus:outline-none focus:border-ink"
                 >
                   <option value="">Select a user</option>
                   {users.map((user) => (
@@ -939,11 +939,11 @@ const UsersManagement = () => {
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium text-white/70 mb-2">Repository *</label>
+                <label className="block text-sm font-medium text-ink-soft mb-2">Repository *</label>
                 <select
                   value={permissionForm.repo_id}
                   onChange={(e) => setPermissionForm({ ...permissionForm, repo_id: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-800/50 border border-gray-600 rounded-md text-white focus:outline-none focus:border-blue-500"
+                  className="w-full px-3 py-2 bg-cream-mid border border-border rounded-md text-ink focus:outline-none focus:border-ink"
                 >
                   <option value="">Select a repository</option>
                   {repositories.map((repo) => (
@@ -952,11 +952,11 @@ const UsersManagement = () => {
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium text-white/70 mb-2">Permission Level *</label>
+                <label className="block text-sm font-medium text-ink-soft mb-2">Permission Level *</label>
                 <select
                   value={permissionForm.permission_level}
                   onChange={(e) => setPermissionForm({ ...permissionForm, permission_level: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-800/50 border border-gray-600 rounded-md text-white focus:outline-none focus:border-blue-500"
+                  className="w-full px-3 py-2 bg-cream-mid border border-border rounded-md text-ink focus:outline-none focus:border-ink"
                 >
                   <option value="read">Read - View only</option>
                   <option value="write">Write - Can push changes (requires approval)</option>
@@ -985,39 +985,39 @@ const UsersManagement = () => {
 
       {/* Edit Permission Modal */}
       {showEditPermissionModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <GlassCard className="max-w-md w-full p-6">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-bold text-white">Edit Permission</h2>
+              <h2 className="text-xl font-bold text-ink">Edit Permission</h2>
               <Button variant="ghost" size="sm" onClick={() => setShowEditPermissionModal(false)}>
                 <FiX className="w-5 h-5" />
               </Button>
             </div>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-white/70 mb-2">User</label>
+                <label className="block text-sm font-medium text-ink-soft mb-2">User</label>
                 <input
                   type="text"
                   value={editPermissionForm.username}
                   disabled
-                  className="w-full px-3 py-2 bg-gray-800/50 border border-gray-600 rounded-md text-white/50 cursor-not-allowed"
+                  className="w-full px-3 py-2 bg-cream-mid border border-border rounded-md text-muted cursor-not-allowed"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-white/70 mb-2">Repository</label>
+                <label className="block text-sm font-medium text-ink-soft mb-2">Repository</label>
                 <input
                   type="text"
                   value={repositories.find((r) => r.id === editPermissionForm.repo_id)?.name || ''}
                   disabled
-                  className="w-full px-3 py-2 bg-gray-800/50 border border-gray-600 rounded-md text-white/50 cursor-not-allowed"
+                  className="w-full px-3 py-2 bg-cream-mid border border-border rounded-md text-muted cursor-not-allowed"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-white/70 mb-2">Permission Level *</label>
+                <label className="block text-sm font-medium text-ink-soft mb-2">Permission Level *</label>
                 <select
                   value={editPermissionForm.permission_level}
                   onChange={(e) => setEditPermissionForm({ ...editPermissionForm, permission_level: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-800/50 border border-gray-600 rounded-md text-white focus:outline-none focus:border-blue-500"
+                  className="w-full px-3 py-2 bg-cream-mid border border-border rounded-md text-ink focus:outline-none focus:border-ink"
                 >
                   <option value="read">Read - View only</option>
                   <option value="write">Write - Can push changes (requires approval)</option>

@@ -170,11 +170,12 @@ class FoxNestAPI {
     })
   }
 
-  async listRepositories(username, repoName = null) {
-    const params = new URLSearchParams({ username })
+  async listRepositories(username = null, repoName = null) {
+    const params = new URLSearchParams()
+    if (username) params.append('username', username)
     if (repoName) params.append('repo_name', repoName)
-    
-    return this.request(`/repository/list?${params}`)
+    const query = params.toString()
+    return this.request(`/repository/list${query ? `?${query}` : ''}`)
   }
 
   async listAllRepositories() {
@@ -183,6 +184,10 @@ class FoxNestAPI {
 
   async getRepository(repoId) {
     return this.request(`/repository/${repoId}`)
+  }
+
+  async getRepositoryContributors(repoId) {
+    return this.request(`/repository/${repoId}/contributors`)
   }
 
   async getCommits(repoId, full = false, branch = null) {
@@ -227,6 +232,100 @@ class FoxNestAPI {
     return this.request(`/repository/${repoId}/pull-requests/${prId}/merge`, {
       method: 'POST',
       body: expectedHeadCommitId ? { expected_head_commit_id: expectedHeadCommitId } : {},
+    })
+  }
+
+  // Activity feed. Implemented server-side and populated for a long time, but no
+  // screen ever called it.
+  async getActivities(limit = 20) {
+    return this.request(`/activities?limit=${limit}`)
+  }
+
+  // Merge conflict resolution. A conflicted merge returns code MERGE_CONFLICT with a
+  // resolve_url; startMergeConflictSession() parks the three sides of each conflicted
+  // file so they can be reconciled by hand.
+  async startMergeConflictSession(repoId, prId) {
+    return this.request(`/repository/${repoId}/pull-requests/${prId}/conflicts`, {
+      method: 'POST',
+      body: {},
+    })
+  }
+
+  async getMergeConflicts(repoId, prId, sessionId) {
+    return this.request(`/repository/${repoId}/pull-requests/${prId}/conflicts/${sessionId}`)
+  }
+
+  async resolveMergeConflicts(repoId, prId, sessionId, payload) {
+    return this.request(
+      `/repository/${repoId}/pull-requests/${prId}/conflicts/${sessionId}/resolve`,
+      { method: 'POST', body: payload, timeout: 60000 }
+    )
+  }
+
+  async abortMergeConflicts(repoId, prId, sessionId, expectedHeadCommitId = null) {
+    return this.request(
+      `/repository/${repoId}/pull-requests/${prId}/conflicts/${sessionId}/abort`,
+      {
+        method: 'POST',
+        body: expectedHeadCommitId ? { expected_head_commit_id: expectedHeadCommitId } : {},
+      }
+    )
+  }
+
+  // Branch protection and the operations it governs. The panel speaks camelCase; the
+  // API speaks snake_case, so the mapping lives here rather than in the component.
+  async getBranchPolicy(repoId) {
+    return this.request(`/repository/${repoId}/branch-policy`)
+  }
+
+  async updateBranchPolicy(repoId, policy) {
+    return this.request(`/repository/${repoId}/branch-policy`, {
+      method: 'PUT',
+      body: policy,
+    })
+  }
+
+  async createBranch(repoId, { name, fromBranch, fromCommit } = {}) {
+    return this.request(`/repository/${repoId}/branches`, {
+      method: 'POST',
+      body: { name, from_branch: fromBranch || null, from_commit: fromCommit || null },
+    })
+  }
+
+  async mergeBranches(repoId, { sourceBranch, targetBranch, expectedHeadCommitId, dryRun } = {}) {
+    return this.request(`/repository/${repoId}/branches/merge`, {
+      method: 'POST',
+      body: {
+        source_branch: sourceBranch,
+        target_branch: targetBranch,
+        expected_head_commit_id: expectedHeadCommitId || null,
+        dry_run: !!dryRun,
+      },
+      timeout: 60000,
+    })
+  }
+
+  async publishBranch(repoId, { sourceBranch, targetBranch, expectedHeadCommitId } = {}) {
+    return this.request(`/repository/${repoId}/branches/publish`, {
+      method: 'POST',
+      body: {
+        source_branch: sourceBranch,
+        target_branch: targetBranch,
+        expected_head_commit_id: expectedHeadCommitId || null,
+      },
+    })
+  }
+
+  async copyFilesFromBranch(repoId, { sourceBranch, targetBranch, paths, expectedHeadCommitId } = {}) {
+    return this.request(`/repository/${repoId}/branches/copy-files`, {
+      method: 'POST',
+      body: {
+        source_branch: sourceBranch,
+        target_branch: targetBranch,
+        paths: paths || [],
+        expected_head_commit_id: expectedHeadCommitId || null,
+      },
+      timeout: 60000,
     })
   }
 
@@ -673,6 +772,263 @@ class FoxNestAPI {
       console.error('Error downloading instruction manual:', error)
       throw error
     }
+  }
+
+  // --- Personal access tokens ------------------------------------------------
+  // The plaintext comes back only from createAccessToken, and only once; there
+  // is deliberately no endpoint that can read an existing token's value.
+
+  async listAccessTokens({ includeRevoked = false } = {}) {
+    const suffix = includeRevoked ? '?include_revoked=true' : ''
+    return this.request(`/tokens${suffix}`)
+  }
+
+  async createAccessToken({ name, scopes = null, expiresInDays = null }) {
+    const body = { name }
+    if (scopes && scopes.length) body.scopes = scopes
+    if (expiresInDays) body.expires_in_days = Number(expiresInDays)
+    return this.request('/tokens', { method: 'POST', body })
+  }
+
+  async revokeAccessToken(tokenId) {
+    return this.request(`/tokens/${tokenId}`, { method: 'DELETE' })
+  }
+
+  // --- Webhooks --------------------------------------------------------------
+  // Omitting repositoryId addresses the server-wide hooks, which is a different
+  // set from any repository's own — not "all of them".
+
+  async listWebhooks(repositoryId = null) {
+    const suffix = repositoryId ? `?repository_id=${encodeURIComponent(repositoryId)}` : ''
+    return this.request(`/webhooks${suffix}`)
+  }
+
+  async createWebhook(payload) {
+    return this.request('/webhooks', { method: 'POST', body: payload })
+  }
+
+  async updateWebhook(webhookId, payload) {
+    return this.request(`/webhooks/${webhookId}`, { method: 'PUT', body: payload })
+  }
+
+  async deleteWebhook(webhookId) {
+    return this.request(`/webhooks/${webhookId}`, { method: 'DELETE' })
+  }
+
+  async pingWebhook(webhookId) {
+    // A ping waits for the receiver, so it needs more than the 10s default.
+    return this.request(`/webhooks/${webhookId}/ping`, { method: 'POST', timeout: 60000 })
+  }
+
+  async listWebhookDeliveries(webhookId, limit = 30) {
+    return this.request(`/webhooks/${webhookId}/deliveries?limit=${limit}`)
+  }
+
+  // --- Commit status checks --------------------------------------------------
+
+  async reportCommitStatus(repoId, commitId, payload) {
+    return this.request(`/repository/${repoId}/commits/${commitId}/statuses`, {
+      method: 'POST',
+      body: payload,
+    })
+  }
+
+  async getCommitStatuses(repoId, commitId, { history = false } = {}) {
+    const suffix = history ? '?history=true' : ''
+    return this.request(`/repository/${repoId}/commits/${commitId}/statuses${suffix}`)
+  }
+
+  async getRequiredChecks(repoId) {
+    return this.request(`/repository/${repoId}/required-checks`)
+  }
+
+  // --- Server-side hooks (pre-receive push policy) ---------------------------
+
+  async listServerHooks(repositoryId = null) {
+    const suffix = repositoryId ? `?repository_id=${encodeURIComponent(repositoryId)}` : ''
+    return this.request(`/server-hooks${suffix}`)
+  }
+
+  async createServerHook(payload) {
+    return this.request('/server-hooks', { method: 'POST', body: payload })
+  }
+
+  async updateServerHook(hookId, payload) {
+    return this.request(`/server-hooks/${hookId}`, { method: 'PUT', body: payload })
+  }
+
+  async deleteServerHook(hookId) {
+    return this.request(`/server-hooks/${hookId}`, { method: 'DELETE' })
+  }
+
+  async testServerHook(hookId, { message = '', paths = [] } = {}) {
+    return this.request(`/server-hooks/${hookId}/test`, {
+      method: 'POST',
+      body: { message, paths },
+    })
+  }
+
+  // --- SSH keys --------------------------------------------------------------
+  // A public key is public, so it is safe to list in full. The challenge/verify
+  // pair is used by the CLI, not the browser: signing needs the private key.
+
+  async listSSHKeys() {
+    return this.request('/ssh-keys')
+  }
+
+  async addSSHKey({ title, publicKey }) {
+    return this.request('/ssh-keys', {
+      method: 'POST',
+      body: { title, public_key: publicKey },
+    })
+  }
+
+  async deleteSSHKey(keyId) {
+    return this.request(`/ssh-keys/${keyId}`, { method: 'DELETE' })
+  }
+
+  // --- Security operations (admin) -------------------------------------------
+
+  async getLockouts() {
+    return this.request('/admin/security/lockouts')
+  }
+
+  async unlockAccount(username) {
+    return this.request('/admin/security/unlock', { method: 'POST', body: { username } })
+  }
+
+  async getSchemaHealth() {
+    return this.request('/admin/schema')
+  }
+
+  async listBackups(limit = 25) {
+    return this.request(`/admin/backups?limit=${limit}`)
+  }
+
+  async createBackup(label = null) {
+    // Copying the blob store takes minutes on a real repository, and the caller
+    // waits because a backup nobody checked the result of is not a backup.
+    return this.request('/admin/backups', {
+      method: 'POST',
+      body: label ? { label } : {},
+      timeout: 600000,
+    })
+  }
+
+  async verifyBackup(backupId) {
+    return this.request(`/admin/backups/${backupId}/verify`, {
+      method: 'POST',
+      timeout: 300000,
+    })
+  }
+
+  // --- Search ----------------------------------------------------------------
+  // Code search is scoped to one repository: a store-wide content scan would
+  // read gigabytes per query. Repository and commit search are global.
+
+  async searchRepositories({ q = '', owner = null, archived = null, limit = 50 } = {}) {
+    const p = new URLSearchParams()
+    if (q) p.append('q', q)
+    if (owner) p.append('owner', owner)
+    if (archived !== null && archived !== undefined) p.append('archived', String(archived))
+    p.append('limit', String(limit))
+    return this.request(`/search/repositories?${p}`)
+  }
+
+  async searchCommits({ q = '', repositoryId = null, author = null, limit = 50 } = {}) {
+    const p = new URLSearchParams()
+    if (q) p.append('q', q)
+    if (repositoryId) p.append('repository_id', repositoryId)
+    if (author) p.append('author', author)
+    p.append('limit', String(limit))
+    return this.request(`/search/commits?${p}`)
+  }
+
+  // --- Branch mutation -------------------------------------------------------
+  // The four operations the server has always supported and no screen exposed.
+
+  async renameBranch(repoId, branchName, newName) {
+    return this.request(`/repository/${repoId}/branches/${encodeURIComponent(branchName)}/rename`, {
+      method: 'PUT',
+      body: { new_name: newName },
+    })
+  }
+
+  async deleteBranch(repoId, branchName) {
+    return this.request(`/repository/${repoId}/branches/${encodeURIComponent(branchName)}`, {
+      method: 'DELETE',
+    })
+  }
+
+  async setDefaultBranch(repoId, branchName) {
+    return this.request(`/repository/${repoId}/branches/${encodeURIComponent(branchName)}/default`, {
+      method: 'PUT',
+    })
+  }
+
+  async moveBranchHead(repoId, branchName, commitId) {
+    return this.request(`/repository/${repoId}/branches/${encodeURIComponent(branchName)}/head`, {
+      method: 'PUT',
+      // The server's BranchHeadUpdateRequest field is head_commit_id, not commit_id.
+      body: { head_commit_id: commitId },
+    })
+  }
+
+  // --- Tags and releases -----------------------------------------------------
+
+  async listTags(repoId) {
+    return this.request(`/repository/${repoId}/tags`)
+  }
+
+  async createTag(repoId, { name, commitId = null, message = null }) {
+    const body = { name }
+    if (commitId) body.commit_id = commitId
+    if (message) body.message = message
+    return this.request(`/repository/${repoId}/tags`, { method: 'POST', body })
+  }
+
+  async deleteTag(repoId, tagName) {
+    return this.request(`/repository/${repoId}/tags/${encodeURIComponent(tagName)}`, {
+      method: 'DELETE',
+    })
+  }
+
+  async listReleases(repoId) {
+    return this.request(`/repository/${repoId}/releases`)
+  }
+
+  async createRelease(repoId, { version, title = null, notes = null, tag = null }) {
+    const body = { version }
+    if (title) body.title = title
+    if (notes) body.notes = notes
+    if (tag) body.tag = tag
+    return this.request(`/repository/${repoId}/releases`, { method: 'POST', body })
+  }
+
+  // --- Generated documentation ----------------------------------------------
+
+  async getDocsStatus(repoId) {
+    return this.request(`/repository/${repoId}/docs-status`)
+  }
+
+  async generateProjectDocs(repoId, payload = {}) {
+    // The LLM pipeline takes minutes, not seconds.
+    return this.request(`/repository/${repoId}/generate-project-docs`, {
+      method: 'POST',
+      body: payload,
+      timeout: 300000,
+    })
+  }
+
+  async searchCode({ repositoryId, q, branch = null, path = null, regex = false, caseSensitive = false, limit = 200 } = {}) {
+    const p = new URLSearchParams({ repository_id: repositoryId, q })
+    if (branch) p.append('branch', branch)
+    if (path) p.append('path', path)
+    if (regex) p.append('regex', 'true')
+    if (caseSensitive) p.append('case_sensitive', 'true')
+    p.append('limit', String(limit))
+    // Scanning real blobs takes longer than a metadata query.
+    return this.request(`/search/code?${p}`, { timeout: 60000 })
   }
 }
 

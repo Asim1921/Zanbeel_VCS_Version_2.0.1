@@ -85,3 +85,17 @@ temp/
 .coverage
 htmlcov/
 .cache/
+
+# Filesystem blob store (file contents; never commit these)
+server/blobstore/
+blobstore/
+
+# ===== Backups (database snapshot + blob copies; never commit) =====
+# A backup contains database.sqlite3 -- password hashes, access tokens and every
+# repository -- plus multi-hundred-megabyte blobs that GitHub rejects outright.
+server/backups/
+backups/
+
+# ===== Build artifacts =====
+# The packaged extension is rebuilt from source with `npm run package`.
+*.vsix

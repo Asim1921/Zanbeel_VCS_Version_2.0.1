@@ -3,6 +3,7 @@ import { FiGitBranch, FiGitCommit, FiLoader, FiPlus, FiRefreshCw, FiX } from 're
 import GlassCard from './ui/GlassCard'
 import Button from './ui/Button'
 import Badge from './ui/Badge'
+import MergeConflictResolverModal from './MergeConflictResolverModal'
 import api from '../utils/api'
 
 const PullRequestsModal = ({ repo, onClose }) => {
@@ -13,6 +14,8 @@ const PullRequestsModal = ({ repo, onClose }) => {
   const [mergingId, setMergingId] = useState(null)
   const [error, setError] = useState(null)
   const [mergeConflict, setMergeConflict] = useState(null)
+  const [resolverSession, setResolverSession] = useState(null)
+  const [openingResolver, setOpeningResolver] = useState(false)
 
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
@@ -109,6 +112,26 @@ const PullRequestsModal = ({ repo, onClose }) => {
     }
   }
 
+  // A conflicted merge is no longer a dead end: park the three sides of each
+  // conflicted file and hand them to the resolver.
+  const handleResolveConflicts = async () => {
+    if (!mergeConflict) return
+    try {
+      setOpeningResolver(true)
+      setError(null)
+      const bundle = await api.startMergeConflictSession(repo.id, mergeConflict.prId)
+      setResolverSession({
+        prId: mergeConflict.prId,
+        sessionId: bundle?.session?.id,
+        expectedHead: branchHeadByName[mergeConflict.target] || null,
+      })
+    } catch (err) {
+      setError(err.message || 'Could not open the conflict resolver')
+    } finally {
+      setOpeningResolver(false)
+    }
+  }
+
   const handleClosePr = async (prId) => {
     try {
       setError(null)
@@ -126,15 +149,15 @@ const PullRequestsModal = ({ repo, onClose }) => {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 backdrop-blur-sm p-4">
       <div className="absolute inset-0" onClick={onClose} />
       <div className="relative w-full max-w-5xl">
         <GlassCard className="p-6" hover={false}>
           <div className="flex items-start justify-between gap-4 mb-5">
             <div>
-              <p className="text-xs uppercase tracking-[0.16em] text-white/50">Pull Requests</p>
-              <h2 className="text-xl font-semibold text-white">{repo?.name}</h2>
-              <p className="text-sm text-white/60">Merge branches with conflict-aware feedback.</p>
+              <p className="text-xs uppercase tracking-[0.16em] text-muted">Pull Requests</p>
+              <h2 className="text-xl font-semibold text-ink">{repo?.name}</h2>
+              <p className="text-sm text-muted">Merge branches with conflict-aware feedback.</p>
             </div>
             <div className="flex items-center gap-2">
               <Button variant="ghost" size="sm" onClick={loadData}>
@@ -149,52 +172,63 @@ const PullRequestsModal = ({ repo, onClose }) => {
           </div>
 
           {error && (
-            <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+            <div className="mb-4 rounded-lg border border-danger-fg/20 bg-danger-bg px-3 py-2 text-sm text-danger-fg">
               {error}
             </div>
           )}
 
           {mergeConflict && (
-            <div className="mb-4 rounded-xl border border-orange-400/40 bg-orange-500/10 p-4">
-              <p className="text-orange-200 font-semibold mb-1">Merge conflict detected (PR #{mergeConflict.prId})</p>
-              <p className="text-orange-100/90 text-sm mb-2">
+            <div className="mb-4 rounded-xl border border-warning-fg/40 bg-warning-bg p-4">
+              <p className="text-warning-fg font-semibold mb-1">Merge conflict detected (PR #{mergeConflict.prId})</p>
+              <p className="text-warning-fg/90 text-sm mb-2">
                 {mergeConflict.source} → {mergeConflict.target}: {mergeConflict.message}
               </p>
-              <div className="max-h-28 overflow-auto rounded-lg border border-orange-400/30 bg-black/20 p-2">
+              <div className="max-h-28 overflow-auto rounded-lg border border-warning-fg/30 bg-cream-mid p-2">
                 {(mergeConflict.conflicts || []).map((path) => (
-                  <p key={path} className="text-xs text-orange-100 font-mono py-0.5">{path}</p>
+                  <p key={path} className="text-xs text-warning-fg font-mono py-0.5">{path}</p>
                 ))}
               </div>
-              <p className="text-xs text-orange-100/80 mt-2">Resolve these file conflicts on branches, push fixes, then retry merge.</p>
+              <div className="flex items-center gap-3 mt-3">
+                <Button
+                  onClick={handleResolveConflicts}
+                  disabled={openingResolver}
+                  className="text-sm"
+                >
+                  {openingResolver ? 'Opening…' : 'Resolve conflicts'}
+                </Button>
+                <p className="text-xs text-warning-fg/80">
+                  Or fix them on the branches, push, and merge again.
+                </p>
+              </div>
             </div>
           )}
 
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-            <div className="xl:col-span-1 rounded-xl border border-white/10 bg-white/5 p-4">
-              <h3 className="text-white font-medium mb-3 flex items-center gap-2"><FiPlus className="w-4 h-4" />New Pull Request</h3>
+            <div className="xl:col-span-1 rounded-xl border border-border bg-cream-mid/70 p-4">
+              <h3 className="text-ink font-medium mb-3 flex items-center gap-2"><FiPlus className="w-4 h-4" />New Pull Request</h3>
               <div className="space-y-3">
                 <input
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
                   placeholder="PR title"
-                  className="w-full bg-white/10 border border-white/20 rounded px-3 py-2 text-sm text-white placeholder:text-white/40"
+                  className="w-full bg-cream-mid border border-border rounded px-3 py-2 text-sm text-ink placeholder:text-muted"
                 />
                 <textarea
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   placeholder="Description (optional)"
-                  className="w-full min-h-20 bg-white/10 border border-white/20 rounded px-3 py-2 text-sm text-white placeholder:text-white/40"
+                  className="w-full min-h-20 bg-cream-mid border border-border rounded px-3 py-2 text-sm text-ink placeholder:text-muted"
                 />
                 <div>
-                  <label className="text-xs text-white/60">Source branch</label>
-                  <select value={sourceBranch} onChange={(e) => setSourceBranch(e.target.value)} className="w-full mt-1 bg-white/10 border border-white/20 rounded px-3 py-2 text-sm text-white">
-                    {branches.map((b) => <option className="bg-slate-100 text-slate-900" key={`src-${b.name}`} value={b.name}>{b.name}</option>)}
+                  <label className="text-xs text-muted">Source branch</label>
+                  <select value={sourceBranch} onChange={(e) => setSourceBranch(e.target.value)} className="w-full mt-1 bg-cream-mid border border-border rounded px-3 py-2 text-sm text-ink">
+                    {branches.map((b) => <option className="bg-surface text-ink" key={`src-${b.name}`} value={b.name}>{b.name}</option>)}
                   </select>
                 </div>
                 <div>
-                  <label className="text-xs text-white/60">Target branch</label>
-                  <select value={targetBranch} onChange={(e) => setTargetBranch(e.target.value)} className="w-full mt-1 bg-white/10 border border-white/20 rounded px-3 py-2 text-sm text-white">
-                    {branches.map((b) => <option className="bg-slate-100 text-slate-900" key={`tgt-${b.name}`} value={b.name}>{b.name}</option>)}
+                  <label className="text-xs text-muted">Target branch</label>
+                  <select value={targetBranch} onChange={(e) => setTargetBranch(e.target.value)} className="w-full mt-1 bg-cream-mid border border-border rounded px-3 py-2 text-sm text-ink">
+                    {branches.map((b) => <option className="bg-surface text-ink" key={`tgt-${b.name}`} value={b.name}>{b.name}</option>)}
                   </select>
                 </div>
                 <Button variant="primary" size="sm" className="w-full" onClick={handleCreatePr} disabled={submitting || !title.trim() || !sourceBranch || !targetBranch || sourceBranch === targetBranch}>
@@ -203,26 +237,26 @@ const PullRequestsModal = ({ repo, onClose }) => {
               </div>
             </div>
 
-            <div className="xl:col-span-2 rounded-xl border border-white/10 bg-white/5 p-4 max-h-[64vh] overflow-auto">
-              <h3 className="text-white font-medium mb-3">Open and historical pull requests</h3>
+            <div className="xl:col-span-2 rounded-xl border border-border bg-cream-mid/70 p-4 max-h-[64vh] overflow-auto">
+              <h3 className="text-ink font-medium mb-3">Open and historical pull requests</h3>
 
               {loading ? (
-                <div className="py-10 text-white/70 flex items-center justify-center"><FiLoader className="w-5 h-5 animate-spin mr-2" />Loading pull requests...</div>
+                <div className="py-10 text-ink-soft flex items-center justify-center"><FiLoader className="w-5 h-5 animate-spin mr-2" />Loading pull requests...</div>
               ) : pullRequests.length === 0 ? (
-                <p className="text-white/50 text-sm">No pull requests yet.</p>
+                <p className="text-muted text-sm">No pull requests yet.</p>
               ) : (
                 <div className="space-y-3">
                   {pullRequests.map((pr) => (
-                    <div key={pr.id} className="rounded-lg border border-white/10 bg-white/5 p-3">
+                    <div key={pr.id} className="rounded-lg border border-border bg-cream-mid/70 p-3">
                       <div className="flex items-start justify-between gap-3">
                         <div>
-                          <p className="text-white font-medium">#{pr.id} {pr.title}</p>
-                          <p className="text-white/60 text-xs mt-1 flex items-center gap-1">
+                          <p className="text-ink font-medium">#{pr.id} {pr.title}</p>
+                          <p className="text-muted text-xs mt-1 flex items-center gap-1">
                             <FiGitBranch className="w-3.5 h-3.5" />
                             {pr.source_branch} → {pr.target_branch}
                           </p>
-                          {pr.description && <p className="text-white/70 text-sm mt-2">{pr.description}</p>}
-                          <p className="text-white/45 text-xs mt-2 inline-flex items-center gap-1">
+                          {pr.description && <p className="text-ink-soft text-sm mt-2">{pr.description}</p>}
+                          <p className="text-muted text-xs mt-2 inline-flex items-center gap-1">
                             <FiGitCommit className="w-3.5 h-3.5" />
                             Created by {pr.created_by || 'unknown'}
                           </p>
@@ -231,10 +265,10 @@ const PullRequestsModal = ({ repo, onClose }) => {
                           {statusBadge(pr.status)}
                           {pr.status === 'open' && (
                             <>
-                              <Button variant="ghost" size="sm" className="text-blue-200 border border-blue-400/30" disabled={mergingId === pr.id} onClick={() => handleMergePr(pr)}>
+                              <Button variant="ghost" size="sm" className="text-info-fg border border-info-fg/30" disabled={mergingId === pr.id} onClick={() => handleMergePr(pr)}>
                                 {mergingId === pr.id ? <><FiLoader className="w-4 h-4 mr-1 animate-spin" />Merging</> : 'Merge'}
                               </Button>
-                              <Button variant="ghost" size="sm" className="text-white/80 border border-white/20" onClick={() => handleClosePr(pr.id)}>
+                              <Button variant="ghost" size="sm" className="text-ink-soft border border-border" onClick={() => handleClosePr(pr.id)}>
                                 Close
                               </Button>
                             </>
@@ -249,6 +283,21 @@ const PullRequestsModal = ({ repo, onClose }) => {
           </div>
         </GlassCard>
       </div>
+
+      {resolverSession && (
+        <MergeConflictResolverModal
+          repoId={repo.id}
+          prId={resolverSession.prId}
+          sessionId={resolverSession.sessionId}
+          expectedHeadCommitId={resolverSession.expectedHead}
+          onClose={() => setResolverSession(null)}
+          onResolved={async () => {
+            setResolverSession(null)
+            setMergeConflict(null)
+            await loadData()
+          }}
+        />
+      )}
     </div>
   )
 }

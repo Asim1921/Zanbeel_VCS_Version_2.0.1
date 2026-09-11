@@ -26,6 +26,12 @@ def default_branch_policy() -> Dict[str, Any]:
         "copy_files_min_scope": "write",
         "default_branch_push_min_scope": "manage",
         "protected_branches": [],
+        # Current approvals a pull request needs before it can merge. 0 keeps the gate
+        # off, so upgrading does not silently start blocking existing workflows.
+        "required_approvals": 0,
+        # Status check contexts that must be green before a merge, e.g.
+        # ["ci/unit-tests"]. Empty for the same reason as above.
+        "required_status_checks": [],
     }
 
 

@@ -150,7 +150,10 @@ class IssueTrackingApiTests(unittest.TestCase):
                 },
                 'branch': 'main',
                 'pusher': 'issue_admin'
-            }
+            },
+            # Push now requires authentication; this call was the only one in the file
+            # without it, and previously succeeded only because the endpoint was open.
+            headers=self._auth_headers(),
         )
         self.assertEqual(push.status_code, 200)
         # Update cached main head for subsequent tests.

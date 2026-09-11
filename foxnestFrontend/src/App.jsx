@@ -1,4 +1,4 @@
-import React,{ useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import Layout from './components/layout/Layout'
 import Dashboard from './pages/Dashboard'
 import UsersManagement from './pages/UsersManagement'
@@ -9,6 +9,11 @@ import PendingRepositories from './pages/PendingRepositories'
 import PendingUserRegistrations from './pages/PendingUserRegistrations'
 import PasswordReset from './pages/PasswordReset'
 import Login from './pages/Login'
+import Settings from './pages/Settings'
+import Search from './pages/Search'
+import Activity from './pages/Activity'
+import Operations from './pages/Operations'
+import BrandLogo from './components/ui/BrandLogo'
 import api from './utils/api'
 import { clearSessionUser, getSessionToken, setSessionUser } from './utils/session'
 
@@ -50,8 +55,21 @@ function App() {
 
   useEffect(() => {
     const allowedTabs = isAdmin
-      ? ['dashboard', 'users-management', 'repositories', 'pending-approvals', 'pending-repositories', 'pending-user-registrations', 'password-reset', 'archive']
-      : ['dashboard', 'repositories']
+      ? [
+          'dashboard',
+          'users-management',
+          'repositories',
+          'pending-approvals',
+          'pending-repositories',
+          'pending-user-registrations',
+          'password-reset',
+          'archive',
+          'settings',
+          'search',
+          'activity',
+          'operations',
+        ]
+      : ['dashboard', 'repositories', 'settings', 'search']
 
     if (!allowedTabs.includes(activeTab)) {
       setActiveTab('dashboard')
@@ -71,8 +89,12 @@ function App() {
 
   if (authLoading) {
     return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center text-white">
-        Checking session...
+      <div className="app-canvas flex min-h-screen items-center justify-center">
+        <div className="rounded-2xl border border-border bg-surface px-8 py-7 text-center shadow-[0_1px_0_rgba(255,255,255,0.03)_inset,0_8px_24px_rgba(0,0,0,0.5)]">
+          <BrandLogo size={48} className="mx-auto mb-3 justify-center" />
+          <p className="text-xl font-semibold tracking-tight text-ink">Zanbeel</p>
+          <p className="mt-2 text-sm text-muted">Checking session…</p>
+        </div>
       </div>
     )
   }
@@ -84,44 +106,50 @@ function App() {
   const renderContent = () => {
     switch (activeTab) {
       case 'dashboard':
-        return <Dashboard />
+        return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
       case 'users-management':
-        if (!isAdmin) return <Dashboard />
+        if (!isAdmin) return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
         return <UsersManagement />
       case 'repositories':
         return <Repositories />
+      case 'settings':
+        return <Settings isAdmin={isAdmin} />
+      case 'search':
+        return <Search setActiveTab={setActiveTab} />
+      case 'activity':
+        if (!isAdmin) return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
+        return <Activity />
+      case 'operations':
+        if (!isAdmin) return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
+        return <Operations />
       case 'pending-approvals':
-        if (!isAdmin) return <Dashboard />
+        if (!isAdmin) return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
         return <PendingApprovals />
       case 'pending-repositories':
-        if (!isAdmin) return <Dashboard />
+        if (!isAdmin) return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
         return <PendingRepositories />
       case 'pending-user-registrations':
-        if (!isAdmin) return <Dashboard />
+        if (!isAdmin) return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
         return <PendingUserRegistrations />
       case 'password-reset':
-        if (!isAdmin) return <Dashboard />
+        if (!isAdmin) return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
         return <PasswordReset />
       case 'archive':
-        if (!isAdmin) return <Dashboard />
+        if (!isAdmin) return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
         return <Archive />
       default:
-        return <Dashboard />
+        return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
     }
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-gray-900 to-slate-800">
-      {/* Professional gradient background with subtle animated elements */}
-      <div className="absolute inset-0 overflow-hidden">
-        <div className="absolute -inset-10 opacity-30">
-          <div className="absolute top-0 -left-4 w-72 h-72 bg-blue-900 rounded-full mix-blend-multiply filter blur-xl opacity-50 animate-blob"></div>
-          <div className="absolute top-0 -right-4 w-72 h-72 bg-slate-700 rounded-full mix-blend-multiply filter blur-xl opacity-50 animate-blob animation-delay-2000"></div>
-          <div className="absolute -bottom-8 left-20 w-72 h-72 bg-gray-800 rounded-full mix-blend-multiply filter blur-xl opacity-50 animate-blob animation-delay-4000"></div>
-        </div>
-      </div>
-
-      <Layout activeTab={activeTab} setActiveTab={setActiveTab} currentUser={currentUser} onLogout={handleLogout}>
+    <div className="app-canvas relative min-h-screen">
+      <Layout
+        activeTab={activeTab}
+        setActiveTab={setActiveTab}
+        currentUser={currentUser}
+        onLogout={handleLogout}
+      >
         {renderContent()}
       </Layout>
     </div>

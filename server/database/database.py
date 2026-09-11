@@ -7,21 +7,31 @@ import os
 load_dotenv()
 
 # Database URL - you can configure this in .env file
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://foxnest_user:foxnest_password@localhost/foxnest_db")
-
-# For SQLite fallback (development)
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./foxnest.db")
 SQLITE_URL = "sqlite:///./foxnest.db"
 
-# Try PostgreSQL first, fallback to SQLite
+# Echo every SQL statement. Off unless explicitly asked for: with it on, each request
+# writes its full query text (and bound parameters, which include password hashes) to
+# the journal, which costs real throughput and buries anything worth reading.
+SQL_ECHO = os.getenv("FOXNEST_SQL_ECHO", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_sqlite_url(url: str) -> bool:
+    return (url or "").strip().lower().startswith("sqlite:")
+
 try:
-    engine = create_engine(DATABASE_URL, echo=True)
+    engine = create_engine(DATABASE_URL, echo=SQL_ECHO)
     # Test connection
-    engine.connect()
-    print(f"Connected to PostgreSQL: {DATABASE_URL}")
+    engine.connect().close()
+    backend = "SQLite" if _is_sqlite_url(DATABASE_URL) else "PostgreSQL"
+    print(f"Connected to {backend}: {DATABASE_URL}")
 except Exception as e:
+    if _is_sqlite_url(DATABASE_URL):
+        raise
     print(f"PostgreSQL connection failed: {e}")
     print("Falling back to SQLite")
-    engine = create_engine(SQLITE_URL, echo=True)
+    engine = create_engine(SQLITE_URL, echo=SQL_ECHO)
+    print(f"Connected to SQLite: {SQLITE_URL}")
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

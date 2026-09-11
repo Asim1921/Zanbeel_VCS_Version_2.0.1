@@ -68,33 +68,21 @@ export const useRepositories = (username = null) => {
 export const useUsers = () => {
   return useApiData(
     async () => {
-      // Since there's no users endpoint yet, we'll simulate it
-      const usernames = ['john_doe', 'jane_smith', 'mike_wilson', 'sarah_connor']
-      const users = []
-
-      for (const username of usernames) {
-        try {
-          const userStats = await api.getUserStats(username)
-          
-          users.push({
-            id: users.length + 1,
-            name: username.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase()),
-            email: `${username}@example.com`,
-            username: username,
-            avatar: username.split('_').map(n => n[0].toUpperCase()).join(''),
-            role: 'Developer',
-            joinDate: '2023-01-15', // Default date
-            totalCommits: userStats.totalCommits,
-            activeRepos: userStats.activeRepos,
-            lastActive: '2 hours ago', // You'd calculate this from recent activity
-            repositories: userStats.repositories
-          })
-        } catch (error) {
-          console.error(`Error fetching user data for ${username}:`, error)
-        }
-      }
-
-      return users
+      const response = await api.getUsers()
+      const users = response?.users || []
+      return users.map((user, index) => ({
+        id: user.id ?? index + 1,
+        name: user.full_name || user.username,
+        email: user.email || '',
+        username: user.username,
+        avatar: (user.username || '?').slice(0, 2).toUpperCase(),
+        role: user.role || 'developer',
+        joinDate: user.created_at || '',
+        totalCommits: user.total_commits ?? 0,
+        activeRepos: user.active_repos ?? 0,
+        lastActive: user.last_active || '',
+        repositories: user.repositories || []
+      }))
     },
     []
   )
@@ -167,3 +155,7 @@ export const useServerHealth = () => {
     []
   )
 }
+
+/** Recent platform activity. Cheap enough to poll while a dashboard is open. */
+export const useActivities = (limit = 12) =>
+  useApiData(() => api.getActivities(limit), [limit])

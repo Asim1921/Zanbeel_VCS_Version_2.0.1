@@ -168,46 +168,46 @@ const BranchActionsPanel = ({
   if (!repo?.id) return null
 
   return (
-    <div className="mb-4 rounded-lg border border-white/10 bg-white/5 overflow-hidden">
+    <div className="mb-4 rounded-lg border border-border bg-cream-mid/70 overflow-hidden">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-white/5 transition-colors"
+        className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-cream-mid transition-colors"
       >
-        <span className="text-sm font-medium text-white flex items-center gap-2">
+        <span className="text-sm font-medium text-ink flex items-center gap-2">
           <FiGitBranch className="w-4 h-4" />
           Branch actions
-          <span className="text-white/40 font-normal">(scope: {yourScope})</span>
+          <span className="text-muted font-normal">(scope: {yourScope})</span>
         </span>
-        <span className="text-white/50 text-xs">{expanded ? 'Hide' : 'Show'}</span>
+        <span className="text-muted text-xs">{expanded ? 'Hide' : 'Show'}</span>
       </button>
 
       {expanded && (
-        <div className="px-4 pb-4 space-y-5 border-t border-white/10 pt-4">
+        <div className="px-4 pb-4 space-y-5 border-t border-border pt-4">
           {error && (
-            <p className="text-sm text-red-300 bg-red-500/10 border border-red-400/20 rounded p-2">{error}</p>
+            <p className="text-sm text-danger-fg bg-danger-bg border border-danger-fg/20 rounded p-2">{error}</p>
           )}
           {message && (
-            <p className="text-sm text-green-300 bg-green-500/10 border border-green-400/20 rounded p-2">{message}</p>
+            <p className="text-sm text-success-fg bg-success-bg border border-success-fg/20 rounded p-2">{message}</p>
           )}
 
           <section>
-            <h4 className="text-xs uppercase tracking-wider text-white/50 mb-2">Create branch from branch</h4>
+            <h4 className="text-xs uppercase tracking-wider text-muted mb-2">Create branch from branch</h4>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               <input
-                className="px-3 py-2 bg-white/10 border border-white/20 rounded text-white text-sm"
+                className="px-3 py-2 bg-cream-mid border border-border rounded text-ink text-sm"
                 placeholder="New branch name"
                 value={newBranchName}
                 onChange={(e) => setNewBranchName(e.target.value)}
               />
               <select
-                className="px-3 py-2 bg-white/10 border border-white/20 rounded text-white text-sm"
+                className="px-3 py-2 bg-cream-mid border border-border rounded text-ink text-sm"
                 value={fromBranch}
                 onChange={(e) => setFromBranch(e.target.value)}
               >
                 <option value="">From current tip</option>
                 {branchNames.map((n) => (
-                  <option key={n} value={n} className="bg-slate-100 text-slate-900">{n}</option>
+                  <option key={n} value={n} className="bg-surface text-ink">{n}</option>
                 ))}
               </select>
               <Button size="sm" onClick={handleCreateBranch} disabled={busy}>
@@ -217,28 +217,28 @@ const BranchActionsPanel = ({
           </section>
 
           <section>
-            <h4 className="text-xs uppercase tracking-wider text-white/50 mb-2 flex items-center gap-1">
+            <h4 className="text-xs uppercase tracking-wider text-muted mb-2 flex items-center gap-1">
               <FiGitMerge className="w-3.5 h-3.5" /> Merge into branch
             </h4>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               <select
-                className="px-3 py-2 bg-white/10 border border-white/20 rounded text-white text-sm"
+                className="px-3 py-2 bg-cream-mid border border-border rounded text-ink text-sm"
                 value={mergeSource}
                 onChange={(e) => setMergeSource(e.target.value)}
               >
                 <option value="">Source</option>
                 {branchNames.map((n) => (
-                  <option key={n} value={n} className="bg-slate-100 text-slate-900">{n}</option>
+                  <option key={n} value={n} className="bg-surface text-ink">{n}</option>
                 ))}
               </select>
               <select
-                className="px-3 py-2 bg-white/10 border border-white/20 rounded text-white text-sm"
+                className="px-3 py-2 bg-cream-mid border border-border rounded text-ink text-sm"
                 value={mergeTarget}
                 onChange={(e) => setMergeTarget(e.target.value)}
               >
                 <option value="">Target</option>
                 {branchNames.map((n) => (
-                  <option key={n} value={n} className="bg-slate-100 text-slate-900">{n}</option>
+                  <option key={n} value={n} className="bg-surface text-ink">{n}</option>
                 ))}
               </select>
               <Button size="sm" onClick={handleMerge} disabled={busy}>Merge</Button>
@@ -246,29 +246,29 @@ const BranchActionsPanel = ({
           </section>
 
           <section>
-            <h4 className="text-xs uppercase tracking-wider text-white/50 mb-2 flex items-center gap-1">
+            <h4 className="text-xs uppercase tracking-wider text-muted mb-2 flex items-center gap-1">
               <FiUploadCloud className="w-3.5 h-3.5" /> Push branch → branch (fast-forward)
             </h4>
-            <p className="text-xs text-white/40 mb-2">Like git push origin SRC:DST when target can fast-forward.</p>
+            <p className="text-xs text-muted mb-2">Like git push origin SRC:DST when target can fast-forward.</p>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               <select
-                className="px-3 py-2 bg-white/10 border border-white/20 rounded text-white text-sm"
+                className="px-3 py-2 bg-cream-mid border border-border rounded text-ink text-sm"
                 value={publishSource}
                 onChange={(e) => setPublishSource(e.target.value)}
               >
                 <option value="">Source (local history)</option>
                 {branchNames.map((n) => (
-                  <option key={n} value={n} className="bg-slate-100 text-slate-900">{n}</option>
+                  <option key={n} value={n} className="bg-surface text-ink">{n}</option>
                 ))}
               </select>
               <select
-                className="px-3 py-2 bg-white/10 border border-white/20 rounded text-white text-sm"
+                className="px-3 py-2 bg-cream-mid border border-border rounded text-ink text-sm"
                 value={publishTarget}
                 onChange={(e) => setPublishTarget(e.target.value)}
               >
                 <option value="">Target on server</option>
                 {branchNames.map((n) => (
-                  <option key={n} value={n} className="bg-slate-100 text-slate-900">{n}</option>
+                  <option key={n} value={n} className="bg-surface text-ink">{n}</option>
                 ))}
               </select>
               <Button size="sm" onClick={handlePublish} disabled={busy}>Publish</Button>
@@ -276,34 +276,34 @@ const BranchActionsPanel = ({
           </section>
 
           <section>
-            <h4 className="text-xs uppercase tracking-wider text-white/50 mb-2 flex items-center gap-1">
+            <h4 className="text-xs uppercase tracking-wider text-muted mb-2 flex items-center gap-1">
               <FiCopy className="w-3.5 h-3.5" /> Checkout files from branch (server)
             </h4>
-            <p className="text-xs text-white/40 mb-2">Copies paths from source onto target branch (new commit). CLI: fox checkout-files</p>
+            <p className="text-xs text-muted mb-2">Copies paths from source onto target branch (new commit). CLI: fox checkout-files</p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
               <select
-                className="px-3 py-2 bg-white/10 border border-white/20 rounded text-white text-sm"
+                className="px-3 py-2 bg-cream-mid border border-border rounded text-ink text-sm"
                 value={copySource}
                 onChange={(e) => setCopySource(e.target.value)}
               >
                 <option value="">From branch</option>
                 {branchNames.map((n) => (
-                  <option key={n} value={n} className="bg-slate-100 text-slate-900">{n}</option>
+                  <option key={n} value={n} className="bg-surface text-ink">{n}</option>
                 ))}
               </select>
               <select
-                className="px-3 py-2 bg-white/10 border border-white/20 rounded text-white text-sm"
+                className="px-3 py-2 bg-cream-mid border border-border rounded text-ink text-sm"
                 value={copyTarget}
                 onChange={(e) => setCopyTarget(e.target.value)}
               >
                 <option value="">Onto branch</option>
                 {branchNames.map((n) => (
-                  <option key={n} value={n} className="bg-slate-100 text-slate-900">{n}</option>
+                  <option key={n} value={n} className="bg-surface text-ink">{n}</option>
                 ))}
               </select>
             </div>
             <textarea
-              className="w-full px-3 py-2 bg-white/10 border border-white/20 rounded text-white text-sm mb-2 min-h-[60px]"
+              className="w-full px-3 py-2 bg-cream-mid border border-border rounded text-ink text-sm mb-2 min-h-[60px]"
               placeholder="Paths (one per line or comma-separated)"
               value={copyPath}
               onChange={(e) => setCopyPath(e.target.value)}
@@ -313,7 +313,7 @@ const BranchActionsPanel = ({
 
           {canManage && policyDraft && (
             <section>
-              <h4 className="text-xs uppercase tracking-wider text-white/50 mb-2 flex items-center gap-1">
+              <h4 className="text-xs uppercase tracking-wider text-muted mb-2 flex items-center gap-1">
                 <FiSettings className="w-3.5 h-3.5" /> Branching rules
               </h4>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
@@ -325,22 +325,22 @@ const BranchActionsPanel = ({
                   ['copy_files_min_scope', 'Copy files'],
                   ['default_branch_push_min_scope', 'Protected / default push'],
                 ].map(([key, label]) => (
-                  <label key={key} className="flex flex-col gap-1 text-white/70">
+                  <label key={key} className="flex flex-col gap-1 text-ink-soft">
                     {label}
                     <select
-                      className="px-2 py-1.5 bg-white/10 border border-white/20 rounded text-white"
+                      className="px-2 py-1.5 bg-cream-mid border border-border rounded text-ink"
                       value={policyDraft[key] || 'write'}
                       onChange={(e) => setPolicyDraft({ ...policyDraft, [key]: e.target.value })}
                     >
                       {SCOPE_OPTIONS.map((s) => (
-                        <option key={s} value={s} className="bg-slate-100 text-slate-900">{s}</option>
+                        <option key={s} value={s} className="bg-surface text-ink">{s}</option>
                       ))}
                     </select>
                   </label>
                 ))}
               </div>
               <input
-                className="mt-2 w-full px-3 py-2 bg-white/10 border border-white/20 rounded text-white text-sm"
+                className="mt-2 w-full px-3 py-2 bg-cream-mid border border-border rounded text-ink text-sm"
                 placeholder="Extra protected branches (comma-separated)"
                 value={(policyDraft.protected_branches || []).join(', ')}
                 onChange={(e) => setPolicyDraft({
@@ -354,7 +354,7 @@ const BranchActionsPanel = ({
             </section>
           )}
 
-          <p className="text-xs text-white/40 flex items-center gap-1">
+          <p className="text-xs text-muted flex items-center gap-1">
             <FiRefreshCw className="w-3 h-3" />
             Local CLI: fox push SRC:DST · fox checkout-files --from BRANCH path
           </p>

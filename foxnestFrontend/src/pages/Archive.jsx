@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react'
-import { FiArchive, FiRefreshCw, FiTrash2, FiDownload, FiClock, FiFolder, FiGitCommit, FiUsers, FiLoader, FiEdit3, FiUpload, FiCheck, FiX, FiFileText, FiCode } from 'react-icons/fi'
+import { FiArchive, FiRefreshCw, FiTrash2, FiDownload, FiClock, FiFolder, FiGitCommit, FiUsers, FiLoader, FiEdit3, FiUpload, FiCheck, FiX, FiFileText, FiCode, FiAlertTriangle } from 'react-icons/fi'
 import GlassCard from '../components/ui/GlassCard'
 import Badge from '../components/ui/Badge'
+import PageHeader from '../components/ui/PageHeader'
 import Button from '../components/ui/Button'
 import CodeEditor from '../components/CodeEditor'
 import api from '../utils/api'
@@ -295,8 +296,8 @@ const Archive = () => {
     return (
       <div className="p-6">
         <div className="flex items-center justify-center h-64">
-          <FiLoader className="w-8 h-8 animate-spin text-blue-400" />
-          <span className="ml-2 text-gray-300">Loading repositories...</span>
+          <FiLoader className="w-8 h-8 animate-spin text-info-fg" />
+          <span className="ml-2 text-ink-soft">Loading repositories...</span>
         </div>
       </div>
     )
@@ -304,53 +305,38 @@ const Archive = () => {
 
   return (
     <div className="p-6 space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center space-x-3">
-          <FiArchive className="w-6 h-6 text-orange-400" />
-          <h1 className="text-2xl font-bold text-white">Archived Repositories</h1>
-          <Badge variant="secondary" className="text-orange-400 border-orange-400/30">
-            {displayRepositories.length}
-          </Badge>
-        </div>
-        <div className="flex items-center space-x-3">
+      <PageHeader
+        eyebrow={
+          displayRepositories.length
+            ? `${displayRepositories.length} archived`
+            : 'Nothing archived'
+        }
+        title="Archived Repositories"
+        subtitle="Projects taken out of circulation. Their history is intact and they can be restored."
+        actions={
           <Button
             variant="secondary"
             onClick={handleRefresh}
-            className="flex items-center space-x-2"
+            className="flex items-center gap-2"
           >
             <FiRefreshCw className="w-4 h-4" />
             <span>Refresh</span>
           </Button>
-        </div>
-      </div>
+        }
+      />
 
-      {/* Connection Status */}
       {error && (
-        <GlassCard className="p-4 border-red-500/30 bg-red-500/10">
-          <div className="flex items-center space-x-2 text-red-400">
-            <span>⚠️</span>
-            <span>{error}</span>
-            <span className="text-sm text-gray-400">(Showing fallback data)</span>
-          </div>
+        <GlassCard className="flex flex-wrap items-center gap-2 border-danger-fg/20 bg-danger-bg p-4 text-danger-fg">
+          <FiAlertTriangle className="h-4 w-4 shrink-0" />
+          <span className="min-w-0 break-words">{error}</span>
+          <span className="text-sm text-muted">(showing fallback data)</span>
         </GlassCard>
       )}
 
       {!currentUsername && (
-        <GlassCard className="p-4 border-yellow-500/30 bg-yellow-500/10">
-          <div className="text-yellow-300 text-sm">
-            Session username is not set. Set localStorage key <span className="font-semibold">foxnest_username</span> to enable owner actions.
-          </div>
-        </GlassCard>
-      )}
-
-      {/* Success indicator when connected */}
-      {!error && repositories.length > 0 && (
-        <GlassCard className="p-4 border-green-500/30 bg-green-500/10">
-          <div className="flex items-center space-x-2 text-green-400">
-            <span>✅</span>
-            <span>Connected to zanbeel Server - Showing live data</span>
-          </div>
+        <GlassCard className="border-warning-fg/20 bg-warning-bg p-4 text-sm text-warning-fg">
+          Session username is not set. Set localStorage key{' '}
+          <span className="font-semibold">foxnest_username</span> to enable owner actions.
         </GlassCard>
       )}
 
@@ -361,8 +347,8 @@ const Archive = () => {
             key={repo.id}
             className={`p-6 cursor-pointer transition-all duration-300 hover:scale-105 ${
               selectedRepo?.id === repo.id
-                ? 'border-orange-500/50 bg-orange-500/10'
-                : 'hover:border-orange-500/30'
+                ? 'border-warning-fg/50 bg-warning-bg'
+                : 'hover:border-warning-fg/20'
             }`}
             onClick={() => handleRepoClick(repo)}
           >
@@ -370,16 +356,16 @@ const Archive = () => {
               {/* Header */}
               <div className="flex items-start justify-between">
                 <div className="flex items-center space-x-2">
-                  <FiFolder className="w-5 h-5 text-orange-400" />
-                  <h3 className="text-lg font-semibold text-white truncate">
+                  <FiFolder className="w-5 h-5 text-muted" />
+                  <h3 className="text-lg font-semibold text-ink truncate">
                     {repo.name}
                   </h3>
                 </div>
-                <FiArchive className="w-4 h-4 text-orange-400 flex-shrink-0" />
+                <FiArchive className="w-4 h-4 text-muted flex-shrink-0" />
               </div>
 
               {/* Description */}
-              <p className="text-gray-300 text-sm line-clamp-2">
+              <p className="text-ink-soft text-sm line-clamp-2">
                 {repo.description}
               </p>
 
@@ -389,11 +375,11 @@ const Archive = () => {
                   className="w-3 h-3 rounded-full"
                   style={{ backgroundColor: repo.languageColor }}
                 />
-                <span className="text-sm text-gray-400">{repo.language}</span>
+                <span className="text-sm text-muted">{repo.language}</span>
               </div>
 
               {/* Stats */}
-              <div className="flex items-center space-x-4 text-sm text-gray-400">
+              <div className="flex items-center space-x-4 text-sm text-muted">
                 <div className="flex items-center space-x-1">
                   <FiGitCommit className="w-4 h-4" />
                   <span>{repo.commits}</span>
@@ -409,25 +395,16 @@ const Archive = () => {
               </div>
 
               {/* Archive Info */}
-              <div className="pt-2 border-t border-gray-700">
-                <div className="text-xs text-gray-500 space-y-1">
+              <div className="pt-2 border-t border-border">
+                <div className="text-xs text-muted space-y-1">
                   <div>Archived: {repo.archivedDate}</div>
                   <div>By: {repo.archivedBy}</div>
-                  <div className="text-orange-400">{repo.reason}</div>
+                  <div className="text-muted">{repo.reason}</div>
                   {repo.g1_coordinator && (
-                    <div className="text-blue-400">Team Lead: {repo.g1_coordinator}</div>
+                    <div className="text-info-fg">Team Lead: {repo.g1_coordinator}</div>
                   )}
-                  <div className="flex items-center space-x-2">
-                    <span>Tested:</span>
-                    <Badge 
-                      variant={repo.tested ? "success" : "secondary"}
-                      className={`text-xs ${repo.tested ? 'bg-green-600/20 text-green-400' : 'bg-gray-600/20 text-gray-400'}`}
-                    >
-                      {repo.tested ? 'Yes' : 'No'}
-                    </Badge>
-                  </div>
                   {repo.has_instruction_manual && (
-                    <div className="text-purple-400">📄 Manual Available</div>
+                    <div className="text-ink-soft">Manual available</div>
                   )}
                 </div>
               </div>
@@ -438,7 +415,7 @@ const Archive = () => {
                   <Badge
                     key={index}
                     variant="secondary"
-                    className="text-xs bg-gray-700/50 text-gray-300"
+                    className="text-xs bg-cream-deep text-ink-soft"
                   >
                     {tag}
                   </Badge>
@@ -455,7 +432,7 @@ const Archive = () => {
                     className="flex items-center space-x-1"
                     title="Open in Editor"
                   >
-                    <FiCode className="w-3 h-3 text-blue-400" />
+                    <FiCode className="w-3 h-3 text-info-fg" />
                     <span>Open Editor</span>
                   </Button>
                   {canWriteRepo(repo) && (
@@ -504,13 +481,13 @@ const Archive = () => {
                         e.stopPropagation()
                         handleDelete(repo.id)
                       }}
-                      className="flex items-center space-x-1 bg-red-600/20 text-red-400 hover:bg-red-600/30"
+                      className="flex items-center space-x-1 bg-danger-fg/20 text-danger-fg hover:bg-danger-fg/30"
                     >
                       <FiTrash2 className="w-3 h-3" />
                       <span>Delete</span>
                     </Button>
                   ) : (
-                    <div className="text-xs text-white/50 px-2 py-1">Read-only (not owner)</div>
+                    <div className="text-xs text-muted px-2 py-1">Read-only (not owner)</div>
                   )}
                 </div>
               )}
@@ -522,9 +499,9 @@ const Archive = () => {
       {/* Empty State */}
       {displayRepositories.length === 0 && !loading && (
         <div className="text-center py-12">
-          <FiArchive className="w-16 h-16 text-gray-600 mx-auto mb-4" />
-          <h3 className="text-xl font-semibold text-gray-400 mb-2">No Archived Repositories</h3>
-          <p className="text-gray-500">
+          <FiArchive className="w-16 h-16 text-muted mx-auto mb-4" />
+          <h3 className="text-xl font-semibold text-muted mb-2">No Archived Repositories</h3>
+          <p className="text-muted">
             Archived repositories will appear here when you archive projects that are no longer active.
           </p>
         </div>
@@ -532,15 +509,15 @@ const Archive = () => {
 
       {/* Repository Details Modal/Panel */}
       {selectedRepo && (
-        <GlassCard className="p-6 border-orange-500/30">
+        <GlassCard className="p-6 border-warning-fg/20">
           <div className="space-y-4">
             <div className="flex items-center justify-between">
-              <h2 className="text-xl font-bold text-white">{selectedRepo.name}</h2>
+              <h2 className="text-xl font-bold text-ink">{selectedRepo.name}</h2>
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => setSelectedRepo(null)}
-                className="text-gray-400 hover:text-white"
+                className="text-muted hover:text-ink"
               >
                 ✕
               </Button>
@@ -549,50 +526,50 @@ const Archive = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               {/* Repository Info */}
               <div className="space-y-3">
-                <h3 className="text-lg font-semibold text-orange-400">Repository Details</h3>
+                <h3 className="text-lg font-semibold text-warning-fg">Repository Details</h3>
                 <div className="space-y-2 text-sm">
                   <div className="flex justify-between">
-                    <span className="text-gray-400">Owner:</span>
-                    <span className="text-white">{selectedRepo.owner}</span>
+                    <span className="text-muted">Owner:</span>
+                    <span className="text-ink">{selectedRepo.owner}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-400">Language:</span>
-                    <span className="text-white">{selectedRepo.language}</span>
+                    <span className="text-muted">Language:</span>
+                    <span className="text-ink">{selectedRepo.language}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-400">Size:</span>
-                    <span className="text-white">{selectedRepo.size}</span>
+                    <span className="text-muted">Size:</span>
+                    <span className="text-ink">{selectedRepo.size}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-400">Commits:</span>
-                    <span className="text-white">{selectedRepo.commits}</span>
+                    <span className="text-muted">Commits:</span>
+                    <span className="text-ink">{selectedRepo.commits}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-400">Contributors:</span>
-                    <span className="text-white">{selectedRepo.contributors}</span>
+                    <span className="text-muted">Contributors:</span>
+                    <span className="text-ink">{selectedRepo.contributors}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-400">Last Update:</span>
-                    <span className="text-white">{selectedRepo.lastUpdate}</span>
+                    <span className="text-muted">Last Update:</span>
+                    <span className="text-ink">{selectedRepo.lastUpdate}</span>
                   </div>
                 </div>
               </div>
 
               {/* Archive Info */}
               <div className="space-y-3">
-                <h3 className="text-lg font-semibold text-orange-400">Archive Information</h3>
+                <h3 className="text-lg font-semibold text-warning-fg">Archive Information</h3>
                 <div className="space-y-2 text-sm">
                   <div className="flex justify-between">
-                    <span className="text-gray-400">Archived Date:</span>
-                    <span className="text-white">{selectedRepo.archivedDate}</span>
+                    <span className="text-muted">Archived Date:</span>
+                    <span className="text-ink">{selectedRepo.archivedDate}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-400">Archived By:</span>
-                    <span className="text-white">{selectedRepo.archivedBy}</span>
+                    <span className="text-muted">Archived By:</span>
+                    <span className="text-ink">{selectedRepo.archivedBy}</span>
                   </div>
                   <div className="mt-3">
-                    <span className="text-gray-400 block mb-1">Reason:</span>
-                    <span className="text-orange-400 text-sm">{selectedRepo.reason}</span>
+                    <span className="text-muted block mb-1">Reason:</span>
+                    <span className="text-warning-fg text-sm">{selectedRepo.reason}</span>
                   </div>
                 </div>
               </div>
@@ -602,7 +579,7 @@ const Archive = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               {/* G1 Coordinator */}
               <div className="space-y-3">
-                <h3 className="text-lg font-semibold text-blue-400">Team Lead</h3>
+                <h3 className="text-lg font-semibold text-info-fg">Team Lead</h3>
                 {editingRepo === selectedRepo.id ? (
                   <div className="space-y-2">
                     <input
@@ -610,13 +587,13 @@ const Archive = () => {
                       value={editForm.g1_coordinator}
                       onChange={(e) => setEditForm({...editForm, g1_coordinator: e.target.value})}
                       placeholder="Enter Team Lead name"
-                      className="w-full px-3 py-2 bg-gray-800/50 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:border-blue-500"
+                      className="w-full px-3 py-2 bg-cream-mid border border-border rounded-md text-ink placeholder:text-muted focus:outline-none focus:border-ink"
                     />
                     <div className="flex items-center space-x-2">
                       <Button
                         size="sm"
                         onClick={handleSaveEdit}
-                        className="flex items-center space-x-1 bg-green-600/20 text-green-400 hover:bg-green-600/30"
+                        className="flex items-center space-x-1 bg-success-bg text-success-fg hover:bg-success-fg/30"
                       >
                         <FiCheck className="w-3 h-3" />
                         <span>Save</span>
@@ -635,11 +612,11 @@ const Archive = () => {
                 ) : (
                   <div className="space-y-2">
                     <div className="flex justify-between">
-                      <span className="text-gray-400">Name:</span>
-                      <span className="text-white">{selectedRepo.g1_coordinator || 'Not assigned'}</span>
+                      <span className="text-muted">Name:</span>
+                      <span className="text-ink">{selectedRepo.g1_coordinator || 'Not assigned'}</span>
                     </div>
                     {!canWriteRepo(selectedRepo) && (
-                      <div className="text-xs text-white/50">Only owner/admin can edit.</div>
+                      <div className="text-xs text-muted">Only owner/admin can edit.</div>
                     )}
                   </div>
                 )}
@@ -647,7 +624,7 @@ const Archive = () => {
 
               {/* Testing Status */}
               <div className="space-y-3">
-                <h3 className="text-lg font-semibold text-green-400">Testing Status</h3>
+                <h3 className="text-lg font-semibold text-success-fg">Testing Status</h3>
                 {editingRepo === selectedRepo.id ? (
                   <div className="space-y-2">
                     <label className="flex items-center space-x-2">
@@ -655,18 +632,18 @@ const Archive = () => {
                         type="checkbox"
                         checked={editForm.tested}
                         onChange={(e) => setEditForm({...editForm, tested: e.target.checked})}
-                        className="rounded bg-gray-800 border-gray-600 text-green-600 focus:ring-green-500"
+                        className="rounded bg-cream-deep border-border text-success-fg focus:ring-success-fg/30"
                       />
-                      <span className="text-gray-300">Mark as tested</span>
+                      <span className="text-ink-soft">Mark as tested</span>
                     </label>
                   </div>
                 ) : (
                   <div className="space-y-2">
                     <div className="flex justify-between">
-                      <span className="text-gray-400">Status:</span>
+                      <span className="text-muted">Status:</span>
                       <Badge 
                         variant={selectedRepo.tested ? "success" : "secondary"}
-                        className={`${selectedRepo.tested ? 'bg-green-600/20 text-green-400' : 'bg-gray-600/20 text-gray-400'}`}
+                        className={`${selectedRepo.tested ? 'bg-success-bg text-success-fg' : 'bg-cream-deep text-muted'}`}
                       >
                         {selectedRepo.tested ? 'Tested' : 'Not tested'}
                       </Badge>
@@ -678,13 +655,13 @@ const Archive = () => {
 
             {/* Instruction Manual Section */}
             <div className="space-y-3">
-              <h3 className="text-lg font-semibold text-purple-400">Instruction Manual</h3>
+              <h3 className="text-lg font-semibold text-ink">Instruction Manual</h3>
               <div className="space-y-2">
                 {selectedRepo.has_instruction_manual ? (
-                  <div className="flex items-center justify-between p-3 bg-gray-800/30 rounded-md border border-gray-600">
+                  <div className="flex items-center justify-between p-3 bg-cream-mid rounded-md border border-border">
                     <div className="flex items-center space-x-2">
-                      <FiFileText className="w-4 h-4 text-purple-400" />
-                      <span className="text-gray-300">{selectedRepo.instruction_manual_filename}</span>
+                      <FiFileText className="w-4 h-4 text-ink" />
+                      <span className="text-ink-soft">{selectedRepo.instruction_manual_filename}</span>
                     </div>
                     <div className="flex items-center space-x-2">
                       <Button
@@ -720,8 +697,8 @@ const Archive = () => {
                     </div>
                   </div>
                 ) : (
-                  <div className="flex items-center justify-between p-3 bg-gray-800/30 rounded-md border border-gray-600 border-dashed">
-                    <span className="text-gray-400">No instruction manual uploaded</span>
+                  <div className="flex items-center justify-between p-3 bg-cream-mid rounded-md border border-border border-dashed">
+                    <span className="text-muted">No instruction manual uploaded</span>
                     {canWriteRepo(selectedRepo) && (
                     <label className="cursor-pointer">
                       <Button
@@ -750,19 +727,19 @@ const Archive = () => {
 
             {/* Description */}
             <div className="space-y-2">
-              <h3 className="text-lg font-semibold text-orange-400">Description</h3>
-              <p className="text-gray-300">{selectedRepo.description}</p>
+              <h3 className="text-lg font-semibold text-warning-fg">Description</h3>
+              <p className="text-ink-soft">{selectedRepo.description}</p>
             </div>
 
             {/* Tags */}
             <div className="space-y-2">
-              <h3 className="text-lg font-semibold text-orange-400">Tags</h3>
+              <h3 className="text-lg font-semibold text-warning-fg">Tags</h3>
               <div className="flex flex-wrap gap-2">
                 {selectedRepo.tags?.map((tag, index) => (
                   <Badge
                     key={index}
                     variant="secondary"
-                    className="bg-gray-700/50 text-gray-300"
+                    className="bg-cream-deep text-ink-soft"
                   >
                     {tag}
                   </Badge>
@@ -775,22 +752,22 @@ const Archive = () => {
 
       {/* Delete Confirmation Modal */}
       {deleteModal.isOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 backdrop-blur-sm">
           <GlassCard className="p-6 max-w-md w-full mx-4">
             <div className="mb-4">
-              <h3 className="text-xl font-bold text-white mb-2 flex items-center">
-                <FiTrash2 className="w-6 h-6 text-red-400 mr-2" />
+              <h3 className="text-xl font-bold text-ink mb-2 flex items-center">
+                <FiTrash2 className="w-6 h-6 text-danger-fg mr-2" />
                 Delete Archived Repository
               </h3>
-              <p className="text-white/70">
+              <p className="text-ink-soft">
                 Are you sure you want to permanently delete this archived repository?
               </p>
             </div>
 
-            <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 mb-6">
-              <p className="text-white font-semibold mb-1">{deleteModal.repo?.name}</p>
-              <p className="text-white/70 text-sm mb-3">{deleteModal.repo?.description}</p>
-              <div className="flex items-center space-x-4 text-xs text-white/60">
+            <div className="bg-danger-bg border border-danger-fg/20 rounded-lg p-4 mb-6">
+              <p className="text-ink font-semibold mb-1">{deleteModal.repo?.name}</p>
+              <p className="text-ink-soft text-sm mb-3">{deleteModal.repo?.description}</p>
+              <div className="flex items-center space-x-4 text-xs text-muted">
                 <span className="flex items-center">
                   <FiGitCommit className="w-3 h-3 mr-1" />
                   {deleteModal.repo?.commits} commits
@@ -806,8 +783,8 @@ const Archive = () => {
               </div>
             </div>
 
-            <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 mb-6">
-              <p className="text-yellow-200 text-sm font-medium flex items-start">
+            <div className="bg-warning-bg border border-warning-fg/20 rounded-lg p-3 mb-6">
+              <p className="text-warning-fg text-sm font-medium flex items-start">
                 <span className="mr-2">⚠️</span>
                 <span>
                   This action cannot be undone. All commits, files, and related data will be permanently deleted.
@@ -826,7 +803,7 @@ const Archive = () => {
               </Button>
               <Button
                 variant="danger"
-                className="flex-1 bg-red-600/20 text-red-400 hover:bg-red-600/30"
+                className="flex-1 bg-danger-fg/20 text-danger-fg hover:bg-danger-fg/30"
                 onClick={handleDeleteConfirm}
                 disabled={deleting}
               >

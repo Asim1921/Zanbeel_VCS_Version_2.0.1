@@ -215,17 +215,17 @@ const CodeEditor = ({ repoId, repoName, onClose }) => {
       entries.push(
         <div key={folderPath}>
           <div
-            className="flex items-center px-2 py-1.5 hover:bg-white/5 cursor-pointer rounded group"
+            className="flex items-center px-2 py-1.5 hover:bg-cream-mid cursor-pointer rounded group"
             style={{ paddingLeft: `${level * 12 + 8}px` }}
             onClick={() => toggleFolder(folderPath)}
           >
             {isExpanded ? (
-              <FiChevronDown className="w-4 h-4 text-white/50 mr-1" />
+              <FiChevronDown className="w-4 h-4 text-muted mr-1" />
             ) : (
-              <FiChevronRight className="w-4 h-4 text-white/50 mr-1" />
+              <FiChevronRight className="w-4 h-4 text-muted mr-1" />
             )}
-            <FiFolder className={`w-4 h-4 mr-2 ${isExpanded ? 'text-blue-400' : 'text-blue-300'}`} />
-            <span className="text-sm text-white/80 group-hover:text-white">
+            <FiFolder className={`w-4 h-4 mr-2 ${isExpanded ? 'text-info-fg' : 'text-info-fg'}`} />
+            <span className="text-sm text-ink-soft group-hover:text-ink">
               {key}
             </span>
           </div>
@@ -249,8 +249,8 @@ const CodeEditor = ({ repoId, repoName, onClose }) => {
             key={filePath}
             className={`flex items-center px-2 py-1.5 cursor-pointer rounded group transition-colors ${
               isSelected 
-                ? 'bg-blue-500/20 text-white' 
-                : 'hover:bg-white/5 text-white/70 hover:text-white'
+                ? 'bg-info-fg/20 text-ink' 
+                : 'hover:bg-cream-mid text-ink-soft hover:text-ink'
             }`}
             style={{ paddingLeft: `${level * 12 + 32}px` }}
             onClick={() => handleSelectFile(filePath)}
@@ -295,11 +295,11 @@ const CodeEditor = ({ repoId, repoName, onClose }) => {
 
   if (loading) {
     return (
-      <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center">
+      <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm z-50 flex items-center justify-center">
         <GlassCard className="p-8">
           <div className="flex items-center space-x-3">
-            <FiCode className="w-6 h-6 animate-pulse text-blue-400" />
-            <span className="text-white">Loading repository files...</span>
+            <FiCode className="w-6 h-6 animate-pulse text-info-fg" />
+            <span className="text-ink">Loading repository files...</span>
           </div>
         </GlassCard>
       </div>
@@ -309,15 +309,15 @@ const CodeEditor = ({ repoId, repoName, onClose }) => {
   const tree = buildFileTree()
 
   return (
-    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="w-full h-full max-w-7xl max-h-[90vh] bg-gray-900 rounded-lg overflow-hidden shadow-2xl border border-white/10">
+    <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <div className="w-full h-full max-w-7xl max-h-[90vh] bg-surface rounded-lg overflow-hidden shadow-2xl border border-border">
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 bg-gray-800/50 border-b border-white/10">
+        <div className="flex items-center justify-between px-4 py-3 bg-cream-mid border-b border-border">
           <div className="flex items-center space-x-3">
-            <FiCode className="w-5 h-5 text-blue-400" />
+            <FiCode className="w-5 h-5 text-info-fg" />
             <div>
-              <h2 className="text-lg font-semibold text-white">{repoName}</h2>
-              <p className="text-xs text-white/50">Repository File Explorer</p>
+              <h2 className="text-lg font-semibold text-ink">{repoName}</h2>
+              <p className="text-xs text-muted">Repository File Explorer</p>
             </div>
           </div>
           <div className="flex items-center space-x-2">
@@ -334,7 +334,7 @@ const CodeEditor = ({ repoId, repoName, onClose }) => {
             )}
             <button
               onClick={onClose}
-              className="p-2 hover:bg-white/10 rounded-lg transition-colors text-white/70 hover:text-white"
+              className="p-2 hover:bg-cream-mid rounded-lg transition-colors text-ink-soft hover:text-ink"
             >
               <FiX className="w-5 h-5" />
             </button>
@@ -344,23 +344,23 @@ const CodeEditor = ({ repoId, repoName, onClose }) => {
         {error ? (
           <div className="flex items-center justify-center h-full">
             <div className="text-center">
-              <p className="text-red-400 mb-2">⚠️ {error}</p>
+              <p className="text-danger-fg mb-2">⚠️ {error}</p>
               <Button onClick={fetchRepositoryFiles}>Retry</Button>
             </div>
           </div>
         ) : Object.keys(files).length === 0 ? (
           <div className="flex items-center justify-center h-full">
             <div className="text-center">
-              <FiFolder className="w-16 h-16 text-white/30 mx-auto mb-4" />
-              <p className="text-white/50">This repository is empty</p>
+              <FiFolder className="w-16 h-16 text-muted mx-auto mb-4" />
+              <p className="text-muted">This repository is empty</p>
             </div>
           </div>
         ) : (
           <div className="flex h-[calc(100%-60px)]">
             {/* File Tree Sidebar */}
-            <div className="w-64 bg-gray-800/30 border-r border-white/10 overflow-y-auto">
+            <div className="w-64 bg-cream-mid border-r border-border overflow-y-auto">
               <div className="p-3">
-                <div className="text-xs font-semibold text-white/50 mb-2 uppercase tracking-wider">
+                <div className="text-xs font-semibold text-muted mb-2 uppercase tracking-wider">
                   Explorer
                 </div>
                 <div className="space-y-0.5">
@@ -370,16 +370,16 @@ const CodeEditor = ({ repoId, repoName, onClose }) => {
             </div>
 
             {/* Code Viewer */}
-            <div className="flex-1 flex flex-col bg-gray-900">
+            <div className="flex-1 flex flex-col bg-surface">
               {selectedFile ? (
                 <>
                   {/* File Header */}
-                  <div className="px-4 py-2 bg-gray-800/30 border-b border-white/10 flex items-center justify-between">
+                  <div className="px-4 py-2 bg-cream-mid border-b border-border flex items-center justify-between">
                     <div className="flex items-center space-x-2">
                       <span>{getFileIcon(selectedFile)}</span>
-                      <span className="text-sm text-white">{selectedFile}</span>
+                      <span className="text-sm text-ink">{selectedFile}</span>
                     </div>
-                    <div className="flex items-center space-x-4 text-xs text-white/50">
+                    <div className="flex items-center space-x-4 text-xs text-muted">
                       {files[selectedFile]?.size && (
                         <span>{(files[selectedFile].size / 1024).toFixed(2)} KB</span>
                       )}
@@ -388,19 +388,19 @@ const CodeEditor = ({ repoId, repoName, onClose }) => {
                   </div>
 
                   {/* File Content */}
-                  <div className="flex-1 overflow-auto p-4 bg-gray-950">
+                  <div className="flex-1 overflow-auto p-4 bg-cream">
                     {loadingFile === selectedFile || (files[selectedFile]?.content === undefined && files[selectedFile]?.is_binary !== true) ? (
                       <div className="flex items-center justify-center h-full">
                         <div className="text-center">
-                          <FiCode className="w-6 h-6 animate-pulse text-blue-400 mx-auto mb-3" />
-                          <p className="text-white/50">Loading file...</p>
+                          <FiCode className="w-6 h-6 animate-pulse text-info-fg mx-auto mb-3" />
+                          <p className="text-muted">Loading file...</p>
                         </div>
                       </div>
                     ) : files[selectedFile]?.is_binary ? (
                       <div className="flex items-center justify-center h-full">
                         <div className="text-center">
-                          <FiFile className="w-16 h-16 text-white/30 mx-auto mb-4" />
-                          <p className="text-white/50 mb-2">Binary file cannot be displayed</p>
+                          <FiFile className="w-16 h-16 text-muted mx-auto mb-4" />
+                          <p className="text-muted mb-2">Binary file cannot be displayed</p>
                           <Button size="sm" onClick={downloadFile}>
                             <FiDownload className="w-4 h-4 mr-2" />
                             Download File
@@ -408,7 +408,7 @@ const CodeEditor = ({ repoId, repoName, onClose }) => {
                         </div>
                       </div>
                     ) : (
-                      <pre className="text-sm text-white/90 font-mono whitespace-pre-wrap">
+                      <pre className="text-sm text-ink font-mono whitespace-pre-wrap">
                         <code>{files[selectedFile]?.content}</code>
                       </pre>
                     )}
@@ -417,8 +417,8 @@ const CodeEditor = ({ repoId, repoName, onClose }) => {
               ) : (
                 <div className="flex items-center justify-center h-full">
                   <div className="text-center">
-                    <FiFile className="w-16 h-16 text-white/30 mx-auto mb-4" />
-                    <p className="text-white/50">Select a file to view its contents</p>
+                    <FiFile className="w-16 h-16 text-muted mx-auto mb-4" />
+                    <p className="text-muted">Select a file to view its contents</p>
                   </div>
                 </div>
               )}

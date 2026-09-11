@@ -1,15 +1,46 @@
-import { FiGitCommit, FiUsers, FiFolder, FiArchive, FiTrendingUp, FiActivity, FiWifi, FiWifiOff } from 'react-icons/fi'
+import { FiGitCommit, FiUsers, FiFolder, FiArchive, FiTrendingUp, FiActivity, FiWifi, FiWifiOff, FiArrowUpRight } from 'react-icons/fi'
 import GlassCard from '../components/ui/GlassCard'
 import Badge from '../components/ui/Badge'
-import { useDashboardStats, useRepositories, useServerHealth } from '../hooks/useApi'
+import PageHeader from '../components/ui/PageHeader'
+import { BentoGrid, BentoGridItem } from '../components/aceternity/BentoGrid'
+import SpotlightCard from '../components/react-bits/SpotlightCard'
+import StatTile from '../components/aceternity/StatTile'
+import ActivityFeed from '../components/ActivityFeed'
+import FadeContent from '../components/react-bits/FadeContent'
+import { useActivities, useDashboardStats, useRepositories, useServerHealth } from '../hooks/useApi'
 import { API_SERVER_URL } from '../config'
 import { getSessionUser } from '../utils/session'
-import React from 'react'
+import React, { useMemo } from 'react'
+import { cn } from '../lib/utils'
 
-const Dashboard = () => {
+const iconMap = { FiUsers, FiFolder, FiGitCommit, FiArchive }
+
+/** Map dashboard stats → app tabs */
+function resolveStatTarget(stat, isAdmin) {
+  const key = (stat.icon || '').toLowerCase()
+  const name = (stat.name || '').toLowerCase()
+
+  if (key.includes('users') || name.includes('user') || name.includes('account')) {
+    return isAdmin ? 'users-management' : null
+  }
+  if (key.includes('archive') || name.includes('archiv')) {
+    return isAdmin ? 'archive' : 'repositories'
+  }
+  if (key.includes('commit') || name.includes('commit')) {
+    return 'repositories'
+  }
+  if (key.includes('folder') || name.includes('repositor')) {
+    return 'repositories'
+  }
+  return 'repositories'
+}
+
+const Dashboard = ({ setActiveTab, isAdmin: isAdminProp }) => {
   const sessionUser = getSessionUser()
-  const isPrivileged = sessionUser.isAdmin
-  const welcomeTitle = isPrivileged ? 'Admin Overview' : `Welcome, ${sessionUser.username || 'Developer'}`
+  const isPrivileged = typeof isAdminProp === 'boolean' ? isAdminProp : sessionUser.isAdmin
+  const welcomeTitle = isPrivileged
+    ? 'Admin Overview'
+    : `Welcome, ${sessionUser.username || 'Developer'}`
   const welcomeSubtitle = isPrivileged
     ? 'Monitor users, repositories, and activity across the entire platform.'
     : 'Track your repositories and development activity in one place.'
@@ -17,27 +48,32 @@ const Dashboard = () => {
   const { data: dashboardData, loading: dashboardLoading, error: dashboardError } = useDashboardStats()
   const { data: repositories, loading: reposLoading } = useRepositories()
   const { data: serverHealth } = useServerHealth()
+  const { data: activityData, loading: activityLoading } = useActivities(10)
 
-  // Loading state
+  const stats = useMemo(() => dashboardData?.stats || [], [dashboardData])
+  const topRepositories = repositories?.slice(0, 3) || []
+  const activities = activityData?.activities || []
+
+  const goTo = (tab) => {
+    if (!tab || typeof setActiveTab !== 'function') return
+    setActiveTab(tab)
+  }
+
   if (dashboardLoading) {
     return (
       <div className="space-y-6">
-        <div className="mb-8 relative overflow-hidden rounded-2xl">
-          <div className="absolute inset-0 bg-gradient-to-r from-purple-600/30 via-pink-600/30 to-purple-600/30 backdrop-blur-xl"></div>
-          <div className="absolute inset-0 bg-gradient-to-b from-white/10 to-white/5"></div>
-          <div className="relative border border-white/20 rounded-2xl p-12 text-center animate-pulse">
-            <h1 className="text-5xl font-bold text-white/50 mb-4">Loading...</h1>
-            <p className="text-white/40 text-lg">Connecting to your development hub...</p>
-          </div>
+        <div className="animate-pulse rounded-2xl border border-border bg-surface p-12 text-center">
+          <div className="mx-auto h-8 w-48 rounded bg-cream-deep" />
+          <div className="mx-auto mt-4 h-4 w-72 rounded bg-cream-mid" />
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
           {[...Array(4)].map((_, i) => (
-            <GlassCard key={i} className="p-6 animate-pulse">
+            <GlassCard key={i} className="animate-pulse p-6" hover={false}>
               <div className="flex items-center">
-                <div className="w-12 h-12 bg-white/20 rounded-xl mr-4"></div>
-                <div className="flex-1">
-                  <div className="h-4 bg-white/20 rounded mb-2"></div>
-                  <div className="h-6 bg-white/20 rounded"></div>
+                <div className="mr-4 h-12 w-12 rounded-xl bg-cream-deep" />
+                <div className="flex-1 space-y-2">
+                  <div className="h-4 rounded bg-cream-mid" />
+                  <div className="h-6 rounded bg-cream-deep" />
                 </div>
               </div>
             </GlassCard>
@@ -47,181 +83,187 @@ const Dashboard = () => {
     )
   }
 
-  // Error state
   if (dashboardError) {
     return (
-      <div className="space-y-6">
-        <div className="mb-8 relative overflow-hidden rounded-2xl">
-          <div className="absolute inset-0 bg-gradient-to-r from-red-600/30 via-orange-600/30 to-red-600/30 backdrop-blur-xl"></div>
-          <div className="absolute inset-0 bg-gradient-to-b from-white/10 to-white/5"></div>
-          <div className="relative border border-white/20 rounded-2xl p-12 text-center">
-            <h1 className="text-5xl font-bold bg-gradient-to-r from-red-300 to-orange-300 bg-clip-text text-transparent mb-4">
-              Connection Error
-            </h1>
-            <div className="flex items-center justify-center space-x-2">
-              <FiWifiOff className="w-6 h-6 text-red-400" />
-              <p className="text-red-300 text-lg">Unable to connect to server: {dashboardError}</p>
-            </div>
-          </div>
+      <GlassCard className="p-12 text-center" hover={false}>
+        <h1 className="text-3xl font-semibold text-ink">Connection error</h1>
+        <div className="mt-4 flex items-center justify-center gap-2 text-danger-fg">
+          <FiWifiOff className="h-5 w-5" />
+          <p>Unable to connect to server: {dashboardError}</p>
         </div>
-      </div>
+      </GlassCard>
     )
   }
 
-  const stats = dashboardData?.stats || []
-  const iconMap = {
-    FiUsers,
-    FiFolder,
-    FiGitCommit,
-    FiArchive
-  }
-
-  // Get top repositories (first 3)
-  const topRepositories = repositories?.slice(0, 3) || []
-
   return (
-    <div className="space-y-6">
-      {/* Welcome Section with Gradient Background */}
-      <div className="mb-8 relative overflow-hidden rounded-2xl">
-        <div className="absolute inset-0 bg-gradient-to-r from-purple-600/30 via-pink-600/30 to-purple-600/30 backdrop-blur-xl"></div>
-        <div className="absolute inset-0 bg-gradient-to-b from-white/10 to-white/5"></div>
-        <div className="relative border border-white/20 rounded-2xl p-12 text-center">
-          <div className="mb-4">
-            <h1 className="text-5xl font-bold bg-gradient-to-r from-purple-300 via-pink-300 to-purple-300 bg-clip-text text-transparent mb-4">
-              {welcomeTitle}
-            </h1>
-            <p className="text-white/80 text-lg max-w-2xl mx-auto">
-              {welcomeSubtitle}
-            </p>
-          </div>
+    <FadeContent className="space-y-6">
+      <PageHeader
+        title={welcomeTitle}
+        subtitle={welcomeSubtitle}
+        actions={
+          serverHealth?.status === 'connected' ? (
+            <Badge variant="success">Connected</Badge>
+          ) : (
+            <Badge variant="danger">Server offline</Badge>
+          )
+        }
+      />
 
-          {/* Server Status - Centered */}
-          <div className="flex items-center justify-center space-x-2 mt-6">
-            {serverHealth?.status === 'connected' ? (
-              <>
-                <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-                <Badge variant="success">Connected to Server</Badge>
-              </>
-            ) : (
-              <>
-                <div className="w-2 h-2 bg-red-400 rounded-full animate-pulse"></div>
-                <Badge variant="danger">Server Offline</Badge>
-              </>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Stats Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      <BentoGrid>
         {stats.map((stat) => {
           const Icon = iconMap[stat.icon] || FiFolder
+          const target = resolveStatTarget(stat, isPrivileged)
+          const clickable = Boolean(target)
+
           return (
-            <GlassCard key={stat.name} className="p-6">
-              <div className="flex items-center">
-                <div className={`flex-shrink-0 p-3 rounded-xl bg-gradient-to-r ${stat.color}`}>
-                  <Icon className="w-6 h-6 text-white" />
-                </div>
-                <div className="ml-4 flex-1">
-                  <p className="text-sm font-medium text-white/70">{stat.name}</p>
-                  <div className="flex items-baseline">
-                    <p className="text-2xl font-semibold text-white">{stat.value}</p>
-                    {stat.change !== '+0' && (
-                      <span className="ml-2 text-sm font-medium text-green-400">
-                        {stat.change}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </GlassCard>
+            <BentoGridItem
+              key={stat.name}
+              className={cn(
+                clickable &&
+                  'cursor-pointer transition-all duration-200 hover:-translate-y-0.5 hover:border-border-strong hover:shadow-[0_1px_0_rgba(255,255,255,0.05)_inset,0_18px_44px_rgba(0,0,0,0.6)] focus-within:ring-2 focus-within:ring-brand/30'
+              )}
+            >
+              <button
+                type="button"
+                disabled={!clickable}
+                onClick={() => goTo(target)}
+                className={cn(
+                  'relative w-full text-left outline-none',
+                  !clickable && 'cursor-default'
+                )}
+                aria-label={
+                  clickable ? `Open ${stat.name}` : undefined
+                }
+              >
+                <StatTile
+                  label={stat.name}
+                  value={stat.value}
+                  icon={Icon}
+                  tone="accent"
+                  hint={
+                    stat.change && stat.change !== '+0'
+                      ? `${stat.change} since last period`
+                      : undefined
+                  }
+                  className="border-0 bg-transparent p-0 hover:border-0"
+                />
+              </button>
+            </BentoGridItem>
           )
         })}
-      </div>
+      </BentoGrid>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Server Status Card */}
-        <GlassCard className="p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-white flex items-center">
-              <FiActivity className="w-5 h-5 mr-2" />
-              Server Status
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <SpotlightCard className="p-6">
+          <div className="mb-4 flex items-center justify-between">
+            <h3 className="flex items-center text-lg font-semibold tracking-tight text-ink">
+              <FiActivity className="mr-2 h-5 w-5 text-muted" />
+              Server status
             </h3>
             <Badge variant={serverHealth?.status === 'connected' ? 'success' : 'danger'}>
               {serverHealth?.status === 'connected' ? 'Online' : 'Offline'}
             </Badge>
           </div>
           <div className="space-y-4">
-            <div className="flex items-center space-x-3 p-3 rounded-xl bg-white/5">
+            <div className="flex items-center gap-3 rounded-xl border border-border bg-white/[0.03] p-3">
               {serverHealth?.status === 'connected' ? (
-                <FiWifi className="w-8 h-8 text-green-400" />
+                <FiWifi className="h-8 w-8 text-success-fg" />
               ) : (
-                <FiWifiOff className="w-8 h-8 text-red-400" />
+                <FiWifiOff className="h-8 w-8 text-danger-fg" />
               )}
               <div className="flex-1">
-                <p className="text-sm text-white">
-                  {serverHealth?.status === 'connected' ? 'Connected to zanbeel Server' : 'Unable to connect to server'}
+                <p className="text-sm text-ink">
+                  {serverHealth?.status === 'connected'
+                    ? 'Connected to Zanbeel server'
+                    : 'Unable to connect to server'}
                 </p>
-                <p className="text-xs text-white/50 mt-1">{serverHealth?.message}</p>
+                <p className="mt-1 text-xs text-muted">{serverHealth?.message}</p>
               </div>
             </div>
             {serverHealth?.status !== 'connected' && (
-              <div className="text-sm text-orange-300 bg-orange-500/10 p-3 rounded-lg border border-orange-400/20">
-                <strong>Note:</strong> Please ensure the zanbeel server is running on {API_SERVER_URL}
+              <div className="rounded-xl border border-warning-fg/25 bg-warning-fg/10 p-3 text-sm text-warning-fg">
+                <strong>Note:</strong> Ensure the Zanbeel server is running on {API_SERVER_URL}
               </div>
             )}
-          </div>
-        </GlassCard>
 
-        {/* Top Repositories */}
-        <GlassCard className="p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-white flex items-center">
-              <FiTrendingUp className="w-5 h-5 mr-2" />
-              Top Repositories
-            </h3>
-            {reposLoading && <Badge variant="info">Loading...</Badge>}
+            {/* This panel used to end here, leaving half a card of empty space.
+                The activity feed has existed server-side all along with no screen
+                calling it, so it belongs here. */}
+            <div className="border-t border-border pt-4">
+              <h4 className="mb-3 font-mono text-[10.5px] uppercase tracking-[0.16em] text-muted">
+                Recent activity
+              </h4>
+              <ActivityFeed
+                activities={activities}
+                loading={activityLoading}
+                emptyHint="No activity recorded yet."
+              />
+            </div>
           </div>
-          <div className="space-y-4">
+        </SpotlightCard>
+
+        <SpotlightCard className="p-6">
+          <div className="mb-4 flex items-center justify-between">
+            <h3 className="flex items-center text-lg font-semibold tracking-tight text-ink">
+              <FiTrendingUp className="mr-2 h-5 w-5 text-muted" />
+              Top repositories
+            </h3>
+            <div className="flex items-center gap-2">
+              {reposLoading && <Badge variant="info">Loading…</Badge>}
+              <button
+                type="button"
+                onClick={() => goTo('repositories')}
+                className="text-xs font-medium text-ink-soft underline-offset-2 hover:text-ink hover:underline"
+              >
+                View all
+              </button>
+            </div>
+          </div>
+          <div className="space-y-3">
             {topRepositories.length > 0 ? (
               topRepositories.map((repo, index) => (
-                <div key={index} className="p-4 rounded-xl bg-white/5 hover:bg-white/10 transition-colors cursor-pointer">
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1">
-                      <h4 className="font-medium text-white mb-1">{repo.name}</h4>
-                      <p className="text-sm text-white/70 mb-2">{repo.description}</p>
-                      <div className="flex items-center space-x-4 text-xs text-white/50">
-                        <span className="flex items-center">
-                          <div className="w-2 h-2 bg-blue-400 rounded-full mr-1"></div>
-                          {repo.language}
-                        </span>
+                <button
+                  key={index}
+                  type="button"
+                  onClick={() => goTo('repositories')}
+                  className="w-full rounded-xl border border-border bg-white/[0.03] p-4 text-left transition hover:border-border-strong hover:bg-white/[0.06]"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <h4 className="mb-1 font-medium text-ink">{repo.name}</h4>
+                      <p className="mb-2 line-clamp-2 text-sm text-muted">{repo.description}</p>
+                      <div className="flex flex-wrap items-center gap-3 text-xs text-muted">
+                        <span>{repo.language}</span>
                         <span>{repo.commits} commits</span>
                         <span>{repo.contributors} contributors</span>
                       </div>
                     </div>
                     <div className="text-right">
                       <Badge variant="success">Active</Badge>
-                      <p className="text-xs text-white/50 mt-1">{repo.lastUpdate}</p>
+                      <p className="mt-1 text-xs text-muted">{repo.lastUpdate}</p>
                     </div>
                   </div>
-                </div>
+                </button>
               ))
             ) : (
-              <div className="text-center py-8 text-white/70">
-                <FiFolder className="w-12 h-12 mx-auto mb-4 opacity-50" />
+              <button
+                type="button"
+                onClick={() => goTo('repositories')}
+                className="w-full py-8 text-center text-muted transition hover:text-ink"
+              >
+                <FiFolder className="mx-auto mb-3 h-10 w-10 opacity-50" />
                 <p>No repositories found</p>
-                <p className="text-sm text-white/50 mt-1">
-                  {serverHealth?.status !== 'connected' 
-                    ? 'Connect to server to view repositories' 
-                    : 'Create your first repository to get started'
-                  }
+                <p className="mt-1 text-sm">
+                  {serverHealth?.status !== 'connected'
+                    ? 'Connect to server to view repositories'
+                    : 'Create your first repository to get started'}
                 </p>
-              </div>
+              </button>
             )}
           </div>
-        </GlassCard>
+        </SpotlightCard>
       </div>
-    </div>
+    </FadeContent>
   )
 }
 
