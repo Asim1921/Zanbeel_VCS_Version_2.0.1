@@ -26,6 +26,7 @@ from database.models import (
 
 from app.services.commit_graph import _find_merge_base, _get_commit_tree
 from app.services.merge import _merge_trees, _merge_text, _try_decode_text
+from app.services.signing import sign_commit
 
 
 class ConflictError(Exception):
@@ -289,6 +290,7 @@ def resolve(
     )
 
     BranchCRUD.update_branch_head(db, session.repository_id, session.target_branch, commit.id)
+    sign_commit(db, commit, actor.username, actor.id)
 
     pr = db.query(PullRequest).filter(PullRequest.id == session.pull_request_id).first()
     if pr and pr.status == "open":

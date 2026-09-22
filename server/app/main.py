@@ -20,6 +20,7 @@ from app.db.migrations import (
     ensure_commit_statuses_table,
     ensure_fork_columns,
     ensure_merge_conflict_tables,
+    ensure_password_reset_otp_table,
     ensure_pull_request_comments_table,
     ensure_pull_request_reviews_table,
     ensure_repositories_branch_policy_column,
@@ -67,6 +68,7 @@ async def startup_event():
     ensure_user_permissions_issue_id_column()
     ensure_versioning_schema()
     ensure_commit_signatures_table()
+    ensure_password_reset_otp_table()
     ensure_merge_conflict_tables()
     ensure_pull_request_reviews_table()
     ensure_pull_request_comments_table()

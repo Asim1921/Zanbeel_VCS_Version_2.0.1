@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { FiChevronLeft, FiLoader, FiRefreshCw, FiSave, FiX } from 'react-icons/fi'
 import GlassCard from './ui/GlassCard'
 import Button from './ui/Button'
+import { ModalOverlay } from './ui/Modal'
 import api from '../utils/api'
 
 const decodeB64 = (b64) => {
@@ -114,9 +115,8 @@ const MergeConflictResolverModal = ({ repo, prId, sessionId, expectedHeadCommitI
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 backdrop-blur-sm p-4">
-      <div className="absolute inset-0" onClick={onClose} />
-      <div className="relative w-full max-w-6xl">
+    <ModalOverlay onClose={onClose}>
+      <div className="relative max-h-[90vh] w-full max-w-6xl overflow-y-auto">
         <GlassCard className="p-6" hover={false}>
           <div className="flex items-start justify-between gap-4 mb-5">
             <div>
@@ -220,7 +220,7 @@ const MergeConflictResolverModal = ({ repo, prId, sessionId, expectedHeadCommitI
           )}
         </GlassCard>
       </div>
-    </div>
+    </ModalOverlay>
   )
 }
 

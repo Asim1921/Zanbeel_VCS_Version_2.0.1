@@ -108,6 +108,23 @@ BLOB_DIR = Path(
 )
 
 
+# SMTP, used to deliver password-reset one-time codes. Credentials come from the
+# environment only -- never hard-code them, since .env is gitignored and source is not.
+# With SMTP_HOST unset the reset endpoints refuse rather than pretending to send mail.
+SMTP_HOST = (os.getenv("SMTP_HOST") or "").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT") or "587")
+SMTP_USERNAME = (os.getenv("SMTP_USERNAME") or "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD") or ""
+SMTP_FROM = (os.getenv("SMTP_FROM") or SMTP_USERNAME or "").strip()
+SMTP_FROM_NAME = (os.getenv("SMTP_FROM_NAME") or "Zanbeel").strip()
+SMTP_USE_TLS = (os.getenv("SMTP_USE_TLS", "1").strip().lower() not in {"0", "false", "no", "off"})
+
+# One-time code policy. Six digits is only 10^6 possibilities, so a short lifetime and a
+# hard attempt cap are what actually make it safe to guess against.
+OTP_TTL_SECONDS = int(os.getenv("FOXNEST_OTP_TTL_SECONDS") or "600")
+OTP_MAX_ATTEMPTS = int(os.getenv("FOXNEST_OTP_MAX_ATTEMPTS") or "5")
+
+
 # CORS: reflect configured origins only. Never pair Access-Control-Allow-Origin: * with credentials.
 CORS_ORIGINS = [
     origin.strip()

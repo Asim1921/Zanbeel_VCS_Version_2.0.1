@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { FiLock, FiUser, FiEye, FiEyeOff } from 'react-icons/fi'
+import { FiLock, FiUser, FiEye, FiEyeOff, FiMail } from 'react-icons/fi'
 import Button from '../components/ui/Button'
 import GlassCard from '../components/ui/GlassCard'
 import BackgroundBeams from '../components/aceternity/BackgroundBeams'
@@ -20,9 +20,12 @@ const labelClass = 'mb-2 block text-[13px] font-medium text-ink-soft'
 const Login = ({ onLoginSuccess }) => {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
-  const [setupKey, setSetupKey] = useState('')
   const [newPassword, setNewPassword] = useState('')
-  const [bootstrapMode, setBootstrapMode] = useState(false)
+  const [forgotMode, setForgotMode] = useState(false)
+  const [forgotEmail, setForgotEmail] = useState('')
+  const [otp, setOtp] = useState('')
+  // Only after a code has been sent is there anything to verify against.
+  const [otpSent, setOtpSent] = useState(false)
   const [registerMode, setRegisterMode] = useState(false)
   const [registrationForm, setRegistrationForm] = useState({
     username: '',
@@ -59,25 +62,54 @@ const Login = ({ onLoginSuccess }) => {
     }
   }
 
-  const handleBootstrap = async (event) => {
-    event.preventDefault()
+  const handleSendResetCode = async (event) => {
+    if (event) event.preventDefault()
     setError('')
     setSuccessMessage('')
-    if (!username.trim() || !newPassword || !setupKey) {
-      setError('Username, new password and setup key are required')
+    if (!forgotEmail.trim()) {
+      setError('Enter the email address on your account')
       return
     }
     try {
       setLoading(true)
-      const response = await api.bootstrapPassword(username.trim(), newPassword, setupKey)
-      if (response.success) {
-        setSuccessMessage('Password initialized. You can now sign in.')
-        setBootstrapMode(false)
-        setPassword('')
-        setNewPassword('')
-      } else setError('Password setup failed')
+      const response = await api.forgotPassword(forgotEmail.trim())
+      // The reply is deliberately the same whether or not the address is registered,
+      // so there is nothing here to branch on.
+      setOtpSent(true)
+      setSuccessMessage(response.message || 'If that email has an account, a code has been sent.')
     } catch (err) {
-      setError(err.message || 'Unable to initialize password')
+      setError(err.message || 'Unable to send a reset code')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleResetWithOtp = async (event) => {
+    event.preventDefault()
+    setError('')
+    setSuccessMessage('')
+    if (!/^\d{6}$/.test(otp.trim())) {
+      setError('Enter the 6-digit code from the email')
+      return
+    }
+    if (newPassword.length < 8) {
+      setError('New password must be at least 8 characters')
+      return
+    }
+    try {
+      setLoading(true)
+      const response = await api.resetPasswordWithOtp(forgotEmail.trim(), otp.trim(), newPassword)
+      if (response.success) {
+        setSuccessMessage(response.message || 'Password updated. You can now sign in.')
+        setForgotMode(false)
+        setOtpSent(false)
+        setForgotEmail('')
+        setOtp('')
+        setNewPassword('')
+        setPassword('')
+      } else setError('Password reset failed')
+    } catch (err) {
+      setError(err.message || 'Unable to reset password')
     } finally {
       setLoading(false)
     }
@@ -126,8 +158,8 @@ const Login = ({ onLoginSuccess }) => {
 
   const modeTitle = registerMode
     ? 'Request access'
-    : bootstrapMode
-      ? 'Initialize password'
+    : forgotMode
+      ? 'Reset password'
       : 'Welcome back'
 
   return (
@@ -167,30 +199,38 @@ const Login = ({ onLoginSuccess }) => {
         <GlassCard className="panel-float-lg hairline-top p-8" hover={false}>
           <form
             onSubmit={
-              registerMode ? handleRegisterRequest : bootstrapMode ? handleBootstrap : handleSubmit
+              registerMode
+                ? handleRegisterRequest
+                : forgotMode
+                  ? (otpSent ? handleResetWithOtp : handleSendResetCode)
+                  : handleSubmit
             }
             className="space-y-4"
           >
-            <div>
-              <label className={labelClass}>Username</label>
-              <div className={fieldClass}>
-                <FiUser className="text-muted" />
-                <input
-                  type="text"
-                  value={registerMode ? registrationForm.username : username}
-                  onChange={(e) => {
-                    if (registerMode) {
-                      setRegistrationForm({ ...registrationForm, username: e.target.value })
-                    } else setUsername(e.target.value)
-                  }}
-                  className={inputClass}
-                  placeholder="Enter username"
-                  autoComplete="username"
-                />
+            {/* Resetting is keyed on the email alone -- asking for a username as well
+                would only be another thing to get wrong. */}
+            {!forgotMode && (
+              <div>
+                <label className={labelClass}>Username</label>
+                <div className={fieldClass}>
+                  <FiUser className="text-muted" />
+                  <input
+                    type="text"
+                    value={registerMode ? registrationForm.username : username}
+                    onChange={(e) => {
+                      if (registerMode) {
+                        setRegistrationForm({ ...registrationForm, username: e.target.value })
+                      } else setUsername(e.target.value)
+                    }}
+                    className={inputClass}
+                    placeholder="Enter username"
+                    autoComplete="username"
+                  />
+                </div>
               </div>
-            </div>
+            )}
 
-            {!bootstrapMode && !registerMode && (
+            {!forgotMode && !registerMode && (
               <>
                 <div>
                   <label className={labelClass}>Password</label>
@@ -219,8 +259,11 @@ const Login = ({ onLoginSuccess }) => {
                   type="button"
                   className="w-full rounded-xl border border-border bg-white/[0.04] py-2 text-sm font-medium text-ink-soft transition hover:border-border-strong hover:bg-white/[0.07] hover:text-ink"
                   onClick={() => {
-                    setBootstrapMode(true)
+                    setForgotMode(true)
                     setRegisterMode(false)
+                    setOtpSent(false)
+                    setOtp('')
+                    setNewPassword('')
                     setError('')
                     setSuccessMessage('')
                   }}
@@ -311,49 +354,91 @@ const Login = ({ onLoginSuccess }) => {
               </>
             )}
 
-            {bootstrapMode && (
+            {forgotMode && (
               <>
                 <div>
-                  <label className={labelClass}>New password</label>
+                  <label className={labelClass}>Email address</label>
                   <div className={fieldClass}>
-                    <FiLock className="text-muted" />
+                    <FiMail className="text-muted" />
                     <input
-                      type={showNewPassword ? 'text' : 'password'}
-                      value={newPassword}
-                      onChange={(e) => setNewPassword(e.target.value)}
+                      type="email"
+                      value={forgotEmail}
+                      onChange={(e) => {
+                        setForgotEmail(e.target.value)
+                        // A code belongs to one address; changing it voids the step.
+                        setOtpSent(false)
+                        setOtp('')
+                      }}
                       className={inputClass}
-                      placeholder="Minimum 8 characters"
+                      placeholder="name@company.com"
+                      autoComplete="email"
+                      autoFocus
                     />
+                  </div>
+                  {!otpSent && (
+                    <p className="mt-2 text-[12.5px] leading-relaxed text-muted">
+                      We'll email a 6-digit code to this address if it has an account.
+                    </p>
+                  )}
+                </div>
+
+                {otpSent && (
+                  <>
+                    <div>
+                      <label className={labelClass}>6-digit code</label>
+                      <div className={fieldClass}>
+                        <FiLock className="text-muted" />
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          autoComplete="one-time-code"
+                          maxLength={6}
+                          value={otp}
+                          onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
+                          className={`${inputClass} tracking-[0.4em]`}
+                          placeholder="000000"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className={labelClass}>New password</label>
+                      <div className={fieldClass}>
+                        <FiLock className="text-muted" />
+                        <input
+                          type={showNewPassword ? 'text' : 'password'}
+                          value={newPassword}
+                          onChange={(e) => setNewPassword(e.target.value)}
+                          className={inputClass}
+                          placeholder="Minimum 8 characters"
+                          autoComplete="new-password"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowNewPassword((v) => !v)}
+                          className="rounded-lg p-1.5 text-muted transition hover:bg-white/[0.07] hover:text-ink"
+                          aria-label={showNewPassword ? 'Hide password' : 'Show password'}
+                        >
+                          {showNewPassword ? <FiEyeOff className="h-4 w-4" /> : <FiEye className="h-4 w-4" />}
+                        </button>
+                      </div>
+                    </div>
                     <button
                       type="button"
-                      onClick={() => setShowNewPassword((v) => !v)}
-                      className="rounded-lg p-1.5 text-muted transition hover:bg-white/[0.07] hover:text-ink"
-                      aria-label={showNewPassword ? 'Hide password' : 'Show password'}
+                      className="w-full text-[13px] text-muted hover:text-ink"
+                      onClick={handleSendResetCode}
+                      disabled={loading}
                     >
-                      {showNewPassword ? <FiEyeOff className="h-4 w-4" /> : <FiEye className="h-4 w-4" />}
+                      Didn't get it? Send another code
                     </button>
-                  </div>
-                </div>
-                <div>
-                  <label className={labelClass}>Setup key</label>
-                  <div className={fieldClass}>
-                    <FiLock className="text-muted" />
-                    <input
-                      type="password"
-                      value={setupKey}
-                      onChange={(e) => setSetupKey(e.target.value)}
-                      className={inputClass}
-                      placeholder="Admin-provided setup key"
-                    />
-                  </div>
-                </div>
+                  </>
+                )}
               </>
             )}
 
             {error && <p className="text-sm text-danger-fg">{error}</p>}
             {successMessage && <p className="text-sm text-success-fg">{successMessage}</p>}
 
-            {!registerMode && !bootstrapMode ? (
+            {!registerMode && !forgotMode ? (
               <MovingBorder type="submit" disabled={loading} containerClassName="w-full" className="w-full">
                 {loading ? 'Please wait…' : 'Sign in'}
               </MovingBorder>
@@ -363,22 +448,26 @@ const Login = ({ onLoginSuccess }) => {
                   ? 'Please wait…'
                   : registerMode
                     ? 'Submit registration request'
-                    : 'Initialize password'}
+                    : otpSent
+                      ? 'Reset password'
+                      : 'Send reset code'}
               </Button>
             )}
 
-            {bootstrapMode && (
+            {forgotMode && (
               <button
                 type="button"
                 className="w-full text-sm text-muted hover:text-ink"
                 onClick={() => {
-                  setBootstrapMode(false)
+                  setForgotMode(false)
                   setRegisterMode(false)
+                  setOtpSent(false)
                   setError('')
                   setSuccessMessage('')
                   setPassword('')
                   setNewPassword('')
-                  setSetupKey('')
+                  setForgotEmail('')
+                  setOtp('')
                 }}
               >
                 Back to sign in
@@ -390,7 +479,7 @@ const Login = ({ onLoginSuccess }) => {
               className="w-full text-sm text-muted hover:text-ink"
               onClick={() => {
                 setRegisterMode(!registerMode)
-                setBootstrapMode(false)
+                setForgotMode(false)
                 setError('')
                 setSuccessMessage('')
               }}

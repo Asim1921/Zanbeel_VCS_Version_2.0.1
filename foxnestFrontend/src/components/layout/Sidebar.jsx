@@ -51,7 +51,7 @@ const Sidebar = ({ isOpen, setIsOpen, activeTab, setActiveTab, currentUser }) =>
   useEffect(() => {
     const mq = window.matchMedia('(min-width: 1024px)')
     const apply = (e) => {
-      if (!e.matches) setSidebarOpen(false)
+      if (!e.matches) setIsOpen(false)
     }
     mq.addEventListener('change', apply)
     return () => mq.removeEventListener('change', apply)

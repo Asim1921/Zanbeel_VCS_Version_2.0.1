@@ -41,6 +41,13 @@ PUBLIC = {
     # on first use whether verification passed or failed.
     ("POST", "/api/auth/ssh/challenge"):     "issues a one-time nonce; signing it is the authentication",
     ("POST", "/api/auth/ssh/verify"):        "exchanges a signed nonce for a session, like /auth/login",
+    # Someone who has forgotten their password cannot authenticate first, so these
+    # two cannot require a credential. Safe to expose: both answer identically for
+    # registered and unknown addresses so neither enumerates accounts, the code is
+    # emailed to the account holder rather than returned, and it is single-use with
+    # a 10-minute expiry and a hard cap on wrong guesses.
+    ("POST", "/api/auth/forgot-password"):   "emails a reset code; asking for login first would be circular",
+    ("POST", "/api/auth/reset-password"):    "redeems an emailed code, which is itself the authentication",
 }
 
 ROUTE_RE = re.compile(

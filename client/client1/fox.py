@@ -5,6 +5,7 @@ Optimized with Git-like compression, delta encoding, and pack files
 """
 
 import os
+import fnmatch
 import json
 import hashlib
 import shutil
@@ -1015,34 +1016,105 @@ class FoxClient:
         
         return modified_files
     
+    # Directories never worth walking into, even before .foxignore is consulted.
+    DEFAULT_IGNORE_DIRS = {
+        ".fox", ".git", ".svn", ".hg",
+        "venv", "env", ".venv",
+        "node_modules", "__pycache__", ".pytest_cache",
+        ".tox", "dist", "build",
+    }
+
+    def load_foxignore_rules(self):
+        """Parse .foxignore into (pattern, dir_only, negated, anchored) tuples.
+
+        Same shape as .gitignore. Returned in file order because a later '!' rule has
+        to be able to re-include something an earlier rule excluded.
+        """
+        rules = []
+        ignore_file = Path(".foxignore")
+        if not ignore_file.exists():
+            return rules
+        try:
+            text = ignore_file.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return rules
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            negated = line.startswith("!")
+            if negated:
+                line = line[1:].strip()
+            if not line:
+                continue
+            dir_only = line.endswith("/")
+            if dir_only:
+                line = line[:-1]
+            anchored = line.startswith("/")
+            if anchored:
+                line = line[1:]
+            if line:
+                rules.append((line, dir_only, negated, anchored))
+        return rules
+
+    @staticmethod
+    def _foxignore_match(rel_path, is_dir, rules):
+        """Whether rel_path (forward slashes, repo-relative) is ignored."""
+        name = rel_path.rsplit("/", 1)[-1]
+        ignored = False
+        for pattern, dir_only, negated, anchored in rules:
+            if dir_only and not is_dir:
+                # A 'build/' rule still has to cover everything under build/.
+                if not any(fnmatch.fnmatch(part, pattern)
+                           for part in rel_path.split("/")[:-1]):
+                    continue
+            if anchored:
+                hit = fnmatch.fnmatch(rel_path, pattern) or rel_path.startswith(pattern + "/")
+            else:
+                hit = (
+                    fnmatch.fnmatch(name, pattern)
+                    or fnmatch.fnmatch(rel_path, pattern)
+                    or any(fnmatch.fnmatch(part, pattern) for part in rel_path.split("/"))
+                )
+            if hit:
+                ignored = not negated
+        return ignored
+
     def get_all_files(self):
-        """Get all files in the working directory (excluding .fox directory and common ignore patterns)"""
+        """Every file the repository should track, honouring .foxignore.
+
+        Ignored directories are pruned before descending rather than filtered after.
+        On a tree with a multi-gigabyte build or backup directory that is the
+        difference between a fast add and one that walks millions of files it will
+        only discard. The server enforces .foxignore too; matching it here means the
+        client does not spend minutes hashing content the server will drop anyway.
+        """
+        rules = self.load_foxignore_rules()
         all_files = []
-        current_dir = Path(".")
-        
-        # Common directories to ignore
-        ignore_patterns = {
-            ".fox", ".git", ".svn", ".hg",
-            "venv", "env", ".venv", ".env",
-            "node_modules", "__pycache__", ".pytest_cache",
-            ".tox", ".coverage", "dist", "build",
-            ".DS_Store", "Thumbs.db"
-        }
-        
-        for file_path in current_dir.rglob("*"):
-            if file_path.is_file():
-                # Check if any part of the path contains ignored patterns
-                path_parts = file_path.parts
-                should_ignore = False
-                
-                for part in path_parts:
-                    if part in ignore_patterns or part.startswith('.'):
-                        should_ignore = True
-                        break
-                
-                if not should_ignore:
-                    all_files.append(file_path)
-        
+
+        for dirpath, dirnames, filenames in os.walk(".", topdown=True):
+            rel_dir = os.path.relpath(dirpath, ".").replace("\\", "/")
+            if rel_dir == ".":
+                rel_dir = ""
+
+            kept_dirs = []
+            for d in dirnames:
+                if d in self.DEFAULT_IGNORE_DIRS or d.startswith("."):
+                    continue
+                rel = f"{rel_dir}/{d}" if rel_dir else d
+                if rules and self._foxignore_match(rel, True, rules):
+                    continue
+                kept_dirs.append(d)
+            dirnames[:] = kept_dirs
+
+            for f in filenames:
+                if f.startswith("."):
+                    continue
+                rel = f"{rel_dir}/{f}" if rel_dir else f
+                if rules and self._foxignore_match(rel, False, rules):
+                    continue
+                all_files.append(Path(rel))
+
         return all_files
     
     def get_last_commit_files(self):
@@ -1793,7 +1865,44 @@ class FoxClient:
         print(f"Locally removed commit {cid[:12]}… branch {branch!r} now at {parent_id[:12]}…")
         return True
 
-    def checkout_branch(self, branch_name):
+    def _checkout_conflicts(self, target_commit):
+        """Working-tree changes that switching to `target_commit` would destroy.
+
+        Returns (modified, overwritten):
+          modified    -- tracked files edited since the current commit. Checkout either
+                         rewrites them from the target or deletes them outright, so the
+                         edits are gone either way.
+          overwritten -- files present on disk but not in the current commit, which the
+                         target commit would write over.
+        """
+        modified = []
+        overwritten = []
+
+        current_files = self.get_last_commit_files()
+        target_paths = {
+            info["path"]
+            for info in (target_commit.get("files") or {}).values()
+            if isinstance(info, dict)
+        }
+
+        for path, committed_hash in current_files.items():
+            candidate = Path(path)
+            if not candidate.exists():
+                continue
+            try:
+                if self.get_file_hash(candidate) != committed_hash:
+                    modified.append(path)
+            except Exception:
+                # Unreadable means we cannot prove it is safe, so treat it as at risk.
+                modified.append(path)
+
+        for path in sorted(target_paths - set(current_files)):
+            if Path(path).exists():
+                overwritten.append(path)
+
+        return sorted(modified), overwritten
+
+    def checkout_branch(self, branch_name, force=False):
         if not self.check_repository("checkout"):
             return False
         self.ensure_refs()
@@ -1803,9 +1912,43 @@ class FoxClient:
             return False
 
         target_commit = self._read_ref(branch_ref)
+
+        # A branch pointing at the commit already checked out needs no file writes, so
+        # uncommitted work carries over untouched -- this is what makes `checkout -b`
+        # usable mid-change, and rewriting identical content would only destroy edits.
+        if target_commit and target_commit == self.get_head_commit_id():
+            self.set_head_ref(branch_name)
+            print(f"Switched to branch {branch_name}")
+            return True
+
         if target_commit:
             commit = self.get_commit_by_id(target_commit)
             if commit:
+                # Switching branches rewrites and deletes files in place. Doing that over
+                # uncommitted work destroys it with no way back, so refuse by default and
+                # name what is at risk -- the same contract as git.
+                if not force:
+                    modified, overwritten = self._checkout_conflicts(commit)
+                    if modified or overwritten:
+                        print(f"Cannot switch to '{branch_name}': you have changes that would be lost.")
+                        if modified:
+                            print("\n  Uncommitted changes to tracked files:")
+                            for path in modified[:20]:
+                                print(f"    {path}")
+                            if len(modified) > 20:
+                                print(f"    ... and {len(modified) - 20} more")
+                        if overwritten:
+                            print(f"\n  Untracked files '{branch_name}' would overwrite:")
+                            for path in overwritten[:20]:
+                                print(f"    {path}")
+                            if len(overwritten) > 20:
+                                print(f"    ... and {len(overwritten) - 20} more")
+                        print("\nCommit them first:")
+                        print("    fox add --all && fox commit -m \"...\"")
+                        print("Or discard them and switch anyway:")
+                        print(f"    fox checkout {branch_name} --force")
+                        return False
+
                 # Remove files not in target commit
                 target_paths = {info["path"] for info in commit.get("files", {}).values() if isinstance(info, dict)}
                 current_paths = set(self.get_last_commit_files().keys())
@@ -3962,6 +4105,207 @@ class FoxClient:
 
         return True
     
+
+    # ---- history integrity: blame, cherry-pick, revert, rebase, verify ----
+
+    def _server_repo(self, command_name):
+        """(server_url, repo_id) for commands that must talk to a linked server."""
+        if not self.check_repository(command_name):
+            return None, None
+        config = self.load_config()
+        if not config or not config.get("repo_id"):
+            print("Fatal: No repo_id in .fox/config.json. Run 'fox push' or 'fox set repo-id ...' first.")
+            return None, None
+        if not self.get_origin_url():
+            print("Fatal: No origin set. Use 'fox set origin <url>' first.")
+            return None, None
+        return self._resolve_server_url(), config["repo_id"]
+
+    @staticmethod
+    def _server_payload(resp, label):
+        """Decode a server response, printing the server's own message on failure."""
+        try:
+            data = resp.json()
+        except Exception:
+            print(f"{label} failed ({resp.status_code}): invalid JSON from server")
+            return None
+        if resp.status_code != 200 or not data.get("success"):
+            detail = data.get("detail") or data.get("message") or data
+            print(f"{label} failed ({resp.status_code}): {detail}")
+            for path in (data.get("conflicts") or []):
+                print(f"  conflict: {path}")
+            return None
+        return data
+
+    def blame(self, path, branch=None, commit=None, as_json=False):
+        """Attribute each line of a file to the commit that last changed it."""
+        server_url, repo_id = self._server_repo("blame")
+        if not repo_id:
+            return False
+
+        norm = path.replace("\\", "/")
+        params = {"path": norm}
+        if commit:
+            params["commit"] = commit
+        elif branch:
+            params["branch"] = branch
+
+        url = f"{server_url}/api/repository/{repo_id}/blame?{urllib.parse.urlencode(params)}"
+        try:
+            resp = self._authed_get(url, timeout=120)
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {e}")
+            return False
+
+        data = self._server_payload(resp, "blame")
+        if data is None:
+            return False
+        if as_json:
+            print(json.dumps(data, indent=2))
+            return True
+        if data.get("binary"):
+            print(data.get("message", "Blame is not available for binary files."))
+            return True
+
+        meta = data.get("commits") or {}
+        lines = data.get("lines") or []
+        print("")
+        print(f"Blame: {norm}  ({data.get('line_count', len(lines))} lines)")
+        if data.get("truncated_history"):
+            print("  Note: history was deeper than the blame limit; oldest lines may be approximate.")
+        print("")
+        for row in lines:
+            cid = row.get("commit_id") or ""
+            info = meta.get(cid, {})
+            author = (info.get("author") or "unknown")[:14]
+            date = (info.get("date") or "")[:10]
+            print(f"  {cid[:8]:8}  {author:<14}  {date:<10}  {row.get('line'):>5}  {row.get('content', '')}")
+        print("")
+        return True
+
+    def _history_op(self, endpoint, label, payload, as_json=False):
+        """POST a cherry-pick / revert / rebase request and report the outcome."""
+        server_url, repo_id = self._server_repo(label)
+        if not repo_id:
+            return False
+
+        try:
+            resp = self._authed_post(
+                f"{server_url}/api/repository/{repo_id}/{endpoint}",
+                json=payload, timeout=180,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"{label} request failed: {e}")
+            return False
+
+        data = self._server_payload(resp, label)
+        if data is None:
+            return False
+        if as_json:
+            print(json.dumps(data, indent=2))
+            return True
+
+        status = data.get("status")
+        if status == "no-op":
+            print(f"{label}: nothing to do -- {data.get('reason', '')}")
+        elif status == "clean":
+            print(f"{label}: would apply cleanly (dry run, nothing written).")
+            if data.get("replayed") is not None:
+                print(f"  commits to replay: {data['replayed']}")
+        elif status == "rebased":
+            print(f"{label}: '{data.get('branch')}' rebased onto '{data.get('onto')}'.")
+            print(f"  replayed:      {data.get('replayed')} commit(s)")
+            print(f"  new head:      {str(data.get('new_head'))[:12]}")
+            print(f"  previous head: {str(data.get('previous_head'))[:12]}  (use this to recover)")
+        else:
+            print(f"{label}: {status} as {str(data.get('commit_id'))[:12]} on '{data.get('branch')}'.")
+            print(f"  source commit: {str(data.get('source_commit_id'))[:12]}")
+        print("  Run 'fox pull' to bring the new commit into your working copy.")
+        return True
+
+    def cherry_pick(self, commit_id, branch=None, mainline=None, message=None,
+                    dry_run=False, as_json=False):
+        """Replay one commit's change onto a branch as a new commit."""
+        return self._history_op("cherry-pick", "cherry-pick", {
+            "commit_id": commit_id,
+            "branch": branch or self.get_current_branch() or "main",
+            "mainline": mainline,
+            "message": message,
+            "dry_run": dry_run,
+        }, as_json=as_json)
+
+    def revert(self, commit_id, branch=None, mainline=None, message=None,
+               dry_run=False, as_json=False):
+        """Create a commit that undoes an earlier one, leaving the original in place."""
+        return self._history_op("revert", "revert", {
+            "commit_id": commit_id,
+            "branch": branch or self.get_current_branch() or "main",
+            "mainline": mainline,
+            "message": message,
+            "dry_run": dry_run,
+        }, as_json=as_json)
+
+    def rebase(self, onto, branch=None, dry_run=False, as_json=False):
+        """Replay a branch's own commits on top of another branch."""
+        return self._history_op("rebase", "rebase", {
+            "branch": branch or self.get_current_branch() or "main",
+            "onto": onto,
+            "dry_run": dry_run,
+        }, as_json=as_json)
+
+    def verify(self, commit_id=None, limit=500, as_json=False):
+        """Check commits against the signature the server recorded when it accepted them."""
+        server_url, repo_id = self._server_repo("verify")
+        if not repo_id:
+            return False
+
+        if commit_id:
+            url = f"{server_url}/api/repository/{repo_id}/commits/{commit_id}/verify"
+        else:
+            url = f"{server_url}/api/repository/{repo_id}/verify?limit={int(limit)}"
+        try:
+            resp = self._authed_get(url, timeout=180)
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {e}")
+            return False
+
+        data = self._server_payload(resp, "verify")
+        if data is None:
+            return False
+        if as_json:
+            print(json.dumps(data, indent=2))
+            if commit_id:
+                return data.get("status") in ("valid", "unsigned")
+            return not data.get("invalid")
+
+        if commit_id:
+            status = data.get("status")
+            print("")
+            print(f"Commit {str(data.get('commit_id'))[:12]}: {status}")
+            if data.get("pusher"):
+                print(f"  pushed by: {data['pusher']}  at {data.get('signed_at', '')}")
+            for field in (data.get("changed") or []):
+                print(f"  changed since signing: {field}")
+            if data.get("detail"):
+                print(f"  {data['detail']}")
+            print("")
+            # A tampered or unverifiable commit is a failure the shell should see.
+            return status in ("valid", "unsigned")
+
+        print("")
+        print(f"Repository {data.get('repository_id')}: {data.get('checked')} commit(s) checked")
+        print(f"  valid:        {data.get('valid', 0)}")
+        print(f"  invalid:      {data.get('invalid', 0)}")
+        print(f"  unsigned:     {data.get('unsigned', 0)}")
+        print(f"  unverifiable: {data.get('unverifiable', 0)}")
+        if data.get("truncated"):
+            print(f"  (only the most recent {data.get('checked')} commits were checked)")
+        for row in (data.get("tampered") or []):
+            print(f"  ! {str(row.get('commit_id'))[:12]} {row.get('status')}: "
+                  f"{', '.join(row.get('changed') or []) or row.get('detail', '')}")
+        print("")
+        return not data.get("invalid")
+
     def gc(self):
         """
         Garbage collection - optimize repository by packing loose objects
@@ -4021,13 +4365,18 @@ def print_extended_help():
     print("  status                  Show repository status")
     print("  log                     Show commit history")
     print("  branch                  List, create, or delete branches")
-    print("  checkout <branch>       Switch branches")
+    print("  checkout <branch>       Switch branches (refuses if it would discard changes)")
     print("  checkout-files          Restore specific paths from another branch/commit (HEAD unchanged)")
     print("  merge <branch>          Merge a branch into current")
     print("  compare <from> <to>     Diff files between two branches or commits (server)")
     print("  file-history <path>     List file revisions on server (--lines N-M for line slice history)")
     print("  delete-commit <id>      Remove current branch tip (unpushed = local; pushed = server+local)")
     print("  rollback <commit-id>    Roll back current branch to an ancestor commit (same branch)")
+    print("  blame <path>            Show which commit last changed each line of a file")
+    print("  cherry-pick <commit>    Replay one commit's change onto the current branch")
+    print("  revert <commit>         Create a commit that undoes an earlier one")
+    print("  rebase <onto>           Replay this branch's commits on top of another branch")
+    print("  verify [commit]         Verify commit signatures recorded by the server")
     print("  tag                     Manage tags")
     print("  release                 Manage releases (semantic versions)")
     print("  pr                      Manage pull requests")
@@ -4280,6 +4629,8 @@ def main():
     checkout_parser = subparsers.add_parser("checkout", help="Switch branches")
     checkout_parser.add_argument("branch", help="Branch name")
     checkout_parser.add_argument("-b", "--create", action="store_true", help="Create and switch to new branch")
+    checkout_parser.add_argument("-f", "--force", action="store_true",
+                                 help="Switch even though uncommitted changes will be lost")
 
     checkout_files_parser = subparsers.add_parser(
         "checkout-files",
@@ -4388,6 +4739,62 @@ def main():
         "commit_id",
         help="Ancestor commit id (or unique prefix). Branch tip moves forward with a rollback commit on the server.",
     )
+
+    # History integrity commands
+    blame_parser = subparsers.add_parser(
+        "blame", help="Show which commit last changed each line of a file"
+    )
+    blame_parser.add_argument("path", help="File path to blame")
+    blame_parser.add_argument("--branch", help="Blame the head of this branch (default: current)")
+    blame_parser.add_argument("--commit", help="Blame the file as of this commit id")
+    blame_parser.add_argument("--json", dest="blame_json", action="store_true",
+                              help="Print raw JSON")
+
+    cherry_pick_parser = subparsers.add_parser(
+        "cherry-pick", help="Replay one commit's change onto a branch as a new commit"
+    )
+    cherry_pick_parser.add_argument("commit_id", help="Commit id to replay")
+    cherry_pick_parser.add_argument("--branch", help="Target branch (default: current)")
+    cherry_pick_parser.add_argument("--mainline", type=int,
+                                    help="For a merge commit: which parent counts as 'before'")
+    cherry_pick_parser.add_argument("-m", "--message", help="Message for the new commit")
+    cherry_pick_parser.add_argument("--dry-run", dest="dry_run", action="store_true",
+                                    help="Report whether it would apply cleanly; write nothing")
+    cherry_pick_parser.add_argument("--json", dest="cherry_pick_json", action="store_true",
+                                    help="Print raw JSON")
+
+    revert_parser = subparsers.add_parser(
+        "revert", help="Create a commit that undoes an earlier one"
+    )
+    revert_parser.add_argument("commit_id", help="Commit id to undo")
+    revert_parser.add_argument("--branch", help="Target branch (default: current)")
+    revert_parser.add_argument("--mainline", type=int,
+                               help="For a merge commit: which parent counts as 'before'")
+    revert_parser.add_argument("-m", "--message", help="Message for the revert commit")
+    revert_parser.add_argument("--dry-run", dest="dry_run", action="store_true",
+                               help="Report whether it would apply cleanly; write nothing")
+    revert_parser.add_argument("--json", dest="revert_json", action="store_true",
+                               help="Print raw JSON")
+
+    rebase_parser = subparsers.add_parser(
+        "rebase", help="Replay this branch's commits on top of another branch"
+    )
+    rebase_parser.add_argument("onto", help="Branch to replay onto")
+    rebase_parser.add_argument("--branch", help="Branch to move (default: current)")
+    rebase_parser.add_argument("--dry-run", dest="dry_run", action="store_true",
+                               help="Simulate the whole sequence; write nothing")
+    rebase_parser.add_argument("--json", dest="rebase_json", action="store_true",
+                               help="Print raw JSON")
+
+    verify_parser = subparsers.add_parser(
+        "verify", help="Verify commit signatures recorded by the server"
+    )
+    verify_parser.add_argument("commit_id", nargs="?",
+                               help="Commit to verify (omit to verify the whole repository)")
+    verify_parser.add_argument("--limit", type=int, default=500,
+                               help="How many recent commits to check (default: 500)")
+    verify_parser.add_argument("--json", dest="verify_json", action="store_true",
+                               help="Print raw JSON")
 
     # Tag command
     tag_parser = subparsers.add_parser("tag", help="Manage tags")
@@ -4617,7 +5024,10 @@ def main():
         if getattr(args, "create", False):
             fox.create_branch(args.branch, checkout=True)
         else:
-            fox.checkout_branch(args.branch)
+            # Refusing is a failure the shell should see, so scripts stop rather than
+            # carrying on as though the branch had switched.
+            if not fox.checkout_branch(args.branch, force=getattr(args, "force", False)):
+                sys.exit(1)
 
     elif args.command == "checkout-files":
         if getattr(args, "checkout_files_server_commit", False):
@@ -4661,6 +5071,51 @@ def main():
 
     elif args.command == "rollback":
         fox.rollback(args.commit_id)
+
+    elif args.command == "blame":
+        fox.blame(
+            args.path,
+            branch=getattr(args, "branch", None),
+            commit=getattr(args, "commit", None),
+            as_json=getattr(args, "blame_json", False),
+        )
+
+    elif args.command == "cherry-pick":
+        fox.cherry_pick(
+            args.commit_id,
+            branch=getattr(args, "branch", None),
+            mainline=getattr(args, "mainline", None),
+            message=getattr(args, "message", None),
+            dry_run=getattr(args, "dry_run", False),
+            as_json=getattr(args, "cherry_pick_json", False),
+        )
+
+    elif args.command == "revert":
+        fox.revert(
+            args.commit_id,
+            branch=getattr(args, "branch", None),
+            mainline=getattr(args, "mainline", None),
+            message=getattr(args, "message", None),
+            dry_run=getattr(args, "dry_run", False),
+            as_json=getattr(args, "revert_json", False),
+        )
+
+    elif args.command == "rebase":
+        fox.rebase(
+            args.onto,
+            branch=getattr(args, "branch", None),
+            dry_run=getattr(args, "dry_run", False),
+            as_json=getattr(args, "rebase_json", False),
+        )
+
+    elif args.command == "verify":
+        # Exits non-zero when a signature does not check out, so CI can gate on it.
+        if not fox.verify(
+            commit_id=getattr(args, "commit_id", None),
+            limit=getattr(args, "limit", 500),
+            as_json=getattr(args, "verify_json", False),
+        ):
+            sys.exit(1)
 
     elif args.command == "tag":
         if getattr(args, "tag_command", None) == "list" or args.tag_command is None:

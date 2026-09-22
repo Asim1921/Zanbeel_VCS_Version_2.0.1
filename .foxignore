@@ -15,6 +15,11 @@
 # live database. Both are state this server produces, not code that describes it.
 server/blobstore/
 blobstore/
+# backups/ holds verified snapshots: a database copy plus a full blob tree whose
+# files are content-addressed and therefore extensionless, so no *.ext rule catches
+# them. 7 GB of server state that no source rule would exclude.
+server/backups/
+backups/
 *.db
 *.sqlite
 *.sqlite3

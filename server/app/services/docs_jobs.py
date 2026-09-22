@@ -19,6 +19,7 @@ from database.database import SessionLocal
 
 from app.config import DOCS_DIR
 from app.services.files import _is_vendor_path
+from app.services.signing import sign_commit
 import autodocs_v2
 import docs_generator
 import docx_utils
@@ -218,7 +219,9 @@ def _generate_repository_docs_sync(repo_id: str, lang_filter: Optional[str] = No
                 "timestamp": datetime.now().isoformat()
             }
 
-            CommitCRUD.create_commit_from_file_hashes(db, commit_data, file_entries)
+            docs_commit = CommitCRUD.create_commit_from_file_hashes(db, commit_data, file_entries)
+            # Generated on the owner's behalf, so the owner is recorded as the pusher.
+            sign_commit(db, docs_commit, repository.owner.username, repository.owner_id)
 
         ActivityCRUD.create_activity(
             db=db,
@@ -553,7 +556,9 @@ def _generate_project_documentation_internal(repo_id: str, llm_model: str, db: S
                 "timestamp": datetime.now().isoformat()
             }
 
-            CommitCRUD.create_commit_from_file_hashes(db, commit_data, file_entries)
+            docs_commit = CommitCRUD.create_commit_from_file_hashes(db, commit_data, file_entries)
+            # Generated on the owner's behalf, so the owner is recorded as the pusher.
+            sign_commit(db, docs_commit, repository.owner.username, repository.owner_id)
         else:
             return {
                 "success": False,

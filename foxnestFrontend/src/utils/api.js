@@ -110,6 +110,24 @@ class FoxNestAPI {
     })
   }
 
+  async forgotPassword(email) {
+    return this.request('/auth/forgot-password', {
+      method: 'POST',
+      body: { email }
+    })
+  }
+
+  async resetPasswordWithOtp(email, otp, newPassword) {
+    return this.request('/auth/reset-password', {
+      method: 'POST',
+      body: {
+        email,
+        otp,
+        new_password: newPassword
+      }
+    })
+  }
+
   async bootstrapPassword(username, newPassword, setupKey) {
     return this.request('/auth/bootstrap-password', {
       method: 'POST',
@@ -140,11 +158,19 @@ class FoxNestAPI {
     return this.request(`/admin/users/${encodeURIComponent(username)}/detail?limit=${limit}`)
   }
 
-  async resetPassword(username, newPassword) {
-    return this.request(`/admin/users/${username}/reset-password`, {
+  async requestPasswordResetOtp(username) {
+    return this.request(`/admin/users/${encodeURIComponent(username)}/reset-password/request-otp`, {
+      method: 'POST',
+      body: {}
+    })
+  }
+
+  async resetPassword(username, newPassword, otp) {
+    return this.request(`/admin/users/${encodeURIComponent(username)}/reset-password`, {
       method: 'POST',
       body: {
-        new_password: newPassword
+        new_password: newPassword,
+        otp
       }
     })
   }

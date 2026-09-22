@@ -282,7 +282,7 @@ class IssueAccessRequestApiTests(unittest.TestCase):
             
             # Get pending request for dev_user2
             requests = IssueAccessRequestCRUD.list_user_requests(
-                db, user_id=self.dev_user2.id, status='pending'
+                db, user_id=self.dev_user2_id, status='pending'
             )
             self.assertGreater(len(requests), 0)
             req = requests[0]

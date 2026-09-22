@@ -32,6 +32,7 @@ from app.services import webhooks as hook_service
 from app.services.commit_graph import _find_merge_base, _get_commit_tree
 from app.services.issues import _sync_issues_for_pr_created, _sync_issues_for_pr_merged
 from app.services.merge import _merge_trees
+from app.services.signing import sign_commit
 from app.services import codeowners, forks, merge_conflicts, pr_comments, pr_reviews
 
 
@@ -274,6 +275,7 @@ async def merge_pull_request(
 
     commit = CommitCRUD.create_commit_from_file_hashes(db, commit_data, file_entries)
     BranchCRUD.update_branch_head(db, repo_id, target_branch.name, commit.id)
+    sign_commit(db, commit, current_user.username, current_user.id)
     PullRequestCRUD.mark_merged(db, pr, merge_commit_id=commit.id, reviewer_id=current_user.id)
 
     hook_service.dispatch(db, hook_service.EVENT_PR_MERGED, repo_id, {

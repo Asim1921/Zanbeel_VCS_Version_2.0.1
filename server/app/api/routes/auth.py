@@ -1,5 +1,6 @@
 """Authentication, password management and self-service registration."""
 
+import logging
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -12,11 +13,14 @@ from database.models import User
 from app.config import PASSWORD_SETUP_KEY
 from app.core.dependencies import get_current_user
 from app.core.security import create_access_token, hash_password, verify_password
-from app.services import rate_limit
+from app.services import password_reset, rate_limit
 from app.schemas import (
-    BootstrapPasswordRequest, ChangePasswordRequest, LoginRequest, RegistrationRequest,
+    BootstrapPasswordRequest, ChangePasswordRequest, ForgotPasswordRequest, LoginRequest,
+    RegistrationRequest, ResetPasswordWithOtpRequest,
 )
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -125,6 +129,78 @@ async def bootstrap_password(request: BootstrapPasswordRequest, db: Session = De
     user.password_hash = hash_password(request.new_password)
     db.commit()
     return {"success": True, "message": f"Password initialized for {user.username}"}
+
+# Every outcome of a forgot-password request returns this, so the endpoint cannot be
+# used to discover which email addresses have accounts.
+_FORGOT_PASSWORD_REPLY = (
+    "If that email address has an account, a 6-digit code has been sent to it. "
+    "The code expires in 10 minutes."
+)
+
+
+@router.post("/api/auth/forgot-password")
+async def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    """Email a reset code to the address supplied, if it belongs to an account.
+
+    Unauthenticated by necessity -- someone who has forgotten their password cannot log
+    in first. The reply is identical whether or not the address is registered; anything
+    else turns this into a way to enumerate accounts.
+    """
+    user = password_reset.find_user_by_email(db, request.email)
+
+    if user and password_reset.smtp_configured():
+        if password_reset.seconds_until_resend_allowed(db, user) <= 0:
+            try:
+                password_reset.request_code(db, user, requested_by=None)
+            except password_reset.PasswordResetError as exc:
+                # Logged, not returned: the caller must not learn why nothing arrived.
+                logger.warning("forgot-password delivery failed for user_id=%s: %s",
+                               user.id, exc.message)
+
+    return {"success": True, "message": _FORGOT_PASSWORD_REPLY}
+
+
+@router.post("/api/auth/reset-password")
+async def reset_password_with_otp(
+    request: ResetPasswordWithOtpRequest,
+    db: Session = Depends(get_db),
+):
+    """Complete a self-service reset with the emailed code.
+
+    Failures are deliberately indistinguishable from one another: an unknown address,
+    a missing code and a wrong code all produce the same message, so this cannot be
+    used to probe for accounts either.
+    """
+    if not request.new_password or len(request.new_password) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+
+    generic = "That code is not correct, or it has expired. Request a new one."
+
+    user = password_reset.find_user_by_email(db, request.email)
+    if not user:
+        raise HTTPException(status_code=400, detail=generic)
+
+    try:
+        password_reset.verify_and_consume(db, user, request.otp)
+    except password_reset.PasswordResetError as exc:
+        # The attempt cap is worth surfacing verbatim: it is the one case where
+        # retrying is futile, and it reveals nothing that guessing had not already.
+        detail = exc.message if exc.status_code == 429 else generic
+        raise HTTPException(status_code=exc.status_code, detail=detail)
+
+    user.password_hash = hash_password(request.new_password)
+    user.updated_at = datetime.now()
+    db.commit()
+
+    # A user who was locked out by failed logins has just proved control of the
+    # mailbox; leaving the lock in place would block the sign-in they came here for.
+    rate_limit.unlock(db, user.username)
+
+    return {
+        "success": True,
+        "message": "Password updated. You can now sign in with your new password.",
+    }
+
 
 @router.post("/api/auth/register-request")
 async def register_request(request: RegistrationRequest, db: Session = Depends(get_db)):

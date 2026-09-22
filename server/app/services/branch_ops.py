@@ -31,6 +31,7 @@ from database.models import Repository, User
 from app.services.branches import _get_default_branch, _normalize_branch_name
 from app.services.commit_graph import _find_merge_base, _get_commit_tree, _is_ancestor
 from app.services.merge import _merge_trees
+from app.services.signing import sign_commit
 
 
 class BranchOpError(Exception):
@@ -165,6 +166,8 @@ def _write(db: Session, repo_id: str, target, tree: Dict[str, bytes], author: st
         entries,
     )
     BranchCRUD.update_branch_head(db, repo_id, target.name, commit.id)
+    # The user running the branch operation is both author and pusher here.
+    sign_commit(db, commit, author, commit.author_id)
     return commit
 
 

@@ -24,6 +24,7 @@ from app.services.branches import _get_default_branch, _resolve_branch
 from app.services.commit_graph import _get_commit_tree, _is_ancestor
 from app.services.history_ops import HistoryOpError, cherry_pick, rebase, revert
 from app.services.merge import _tree_to_commit_payload
+from app.services.signing import sign_commit
 
 
 router = APIRouter()
@@ -91,6 +92,7 @@ async def rollback_file(
 
     commit = CommitCRUD.create_commit(db, commit_data)
     BranchCRUD.update_branch_head(db, repo_id, rollback_branch.name, commit.id)
+    sign_commit(db, commit, current_user.username, current_user.id)
 
     logger.info(
         "rollback_file repo=%s branch=%s path=%s actor=%s target=%s new_commit=%s",
@@ -171,6 +173,7 @@ async def rollback_branch(
 
     commit = CommitCRUD.create_commit(db, commit_data)
     BranchCRUD.update_branch_head(db, repo_id, rollback_branch_obj.name, commit.id)
+    sign_commit(db, commit, current_user.username, current_user.id)
 
     logger.info(
         "rollback_branch repo=%s branch=%s actor=%s target=%s previous_head=%s new_commit=%s",

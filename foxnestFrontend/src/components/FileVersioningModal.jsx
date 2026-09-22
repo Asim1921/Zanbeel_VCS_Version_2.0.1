@@ -3,6 +3,7 @@ import { FiClock, FiGitCommit, FiLoader, FiRotateCcw, FiX } from 'react-icons/fi
 import GlassCard from './ui/GlassCard'
 import Button from './ui/Button'
 import Badge from './ui/Badge'
+import { ModalOverlay } from './ui/Modal'
 import api from '../utils/api'
 
 const FileVersioningModal = ({ repo, branch, filePath, onClose, onRollbackComplete }) => {
@@ -156,9 +157,8 @@ const FileVersioningModal = ({ repo, branch, filePath, onClose, onRollbackComple
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 backdrop-blur-sm p-4">
-      <div className="absolute inset-0" onClick={onClose} />
-      <div className="relative w-full max-w-7xl">
+    <ModalOverlay onClose={onClose}>
+      <div className="relative max-h-[90vh] w-full max-w-7xl overflow-y-auto">
         <GlassCard className="p-6" hover={false}>
           <div className="flex items-start justify-between gap-4 mb-5">
             <div>
@@ -327,7 +327,7 @@ const FileVersioningModal = ({ repo, branch, filePath, onClose, onRollbackComple
           )}
 
           {showConfirm && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 backdrop-blur-sm p-4">
+            <ModalOverlay onClose={() => !rollingBack && setShowConfirm(false)}>
               <GlassCard className="p-5 max-w-md w-full" hover={false}>
                 <h3 className="text-lg font-semibold text-ink mb-2">Confirm rollback</h3>
                 <p className="text-sm text-ink-soft mb-4">
@@ -355,11 +355,11 @@ const FileVersioningModal = ({ repo, branch, filePath, onClose, onRollbackComple
                   </Button>
                 </div>
               </GlassCard>
-            </div>
+            </ModalOverlay>
           )}
         </GlassCard>
       </div>
-    </div>
+    </ModalOverlay>
   )
 }
 
