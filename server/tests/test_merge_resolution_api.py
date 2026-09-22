@@ -150,12 +150,20 @@ class MergeResolutionApiTests(unittest.TestCase):
         self.assertEqual(merge_res.status_code, 409)
         merge_payload = merge_res.json()
         self.assertEqual(merge_payload.get('code'), 'MERGE_CONFLICT')
-        session_id = merge_payload.get('session_id')
+        self.assertIn('conflict.txt', merge_payload.get('conflicts', []))
+
+        # The 409 points at the resolver; opening a session is an explicit step.
+        opened = self.client.post(
+            f'/api/repository/{self.repo_id}/pull-requests/{pr_id}/conflicts',
+            headers=self._auth_headers()
+        )
+        self.assertEqual(opened.status_code, 200)
+        session_id = opened.json()['session']['id']
         self.assertTrue(session_id)
 
         # Fetch conflict bundle
         bundle = self.client.get(
-            f'/api/repository/{self.repo_id}/pull-requests/{pr_id}/merge-conflicts/{session_id}',
+            f'/api/repository/{self.repo_id}/pull-requests/{pr_id}/conflicts/{session_id}',
             headers=self._auth_headers()
         )
         self.assertEqual(bundle.status_code, 200)
@@ -166,7 +174,7 @@ class MergeResolutionApiTests(unittest.TestCase):
         # Resolve by choosing "ours" (main) explicitly
         resolved_content = base64.b64encode(b'hello main\n').decode('utf-8')
         resolve = self.client.post(
-            f'/api/repository/{self.repo_id}/pull-requests/{pr_id}/merge-resolve/{session_id}',
+            f'/api/repository/{self.repo_id}/pull-requests/{pr_id}/conflicts/{session_id}/resolve',
             headers=self._auth_headers(),
             json={
                 'expected_head_commit_id': self.main_id,

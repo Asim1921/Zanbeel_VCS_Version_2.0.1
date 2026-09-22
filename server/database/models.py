@@ -1098,3 +1098,30 @@ class BackupRecord(Base):
     created_at = Column(DateTime, server_default=func.now(), index=True)
 
     created_by = relationship("User", foreign_keys=[created_by_id])
+
+
+class PasswordResetOTP(Base):
+    """A pending one-time code for a password reset.
+
+    Only a hash of the code is stored, so reading this table does not let anyone
+    complete a reset. `attempts` is what makes a six-digit code safe to expose: without
+    a cap, the whole keyspace is walkable in minutes.
+    """
+
+    __tablename__ = "password_reset_otps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    username = Column(String(50), nullable=False, index=True)
+    email = Column(String(100), nullable=False)
+
+    code_hash = Column(String(64), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    attempts = Column(Integer, default=0)
+    consumed_at = Column(DateTime, nullable=True)
+
+    # Who asked for the reset -- an admin acting on someone else's account, usually.
+    requested_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), index=True)
+
+    user = relationship("User", foreign_keys=[user_id])

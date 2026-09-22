@@ -3,7 +3,7 @@ import { FiFolder, FiGitCommit, FiUsers, FiStar, FiEye, FiGitBranch, FiClock, Fi
 import GlassCard from '../components/ui/GlassCard'
 import Badge from '../components/ui/Badge'
 import Button from '../components/ui/Button'
-import Modal from '../components/ui/Modal'
+import Modal, { ModalOverlay } from '../components/ui/Modal'
 import CodeEditor from '../components/CodeEditor'
 import CommitHistoryModal from '../components/CommitHistoryModal'
 import FileVersioningModal from '../components/FileVersioningModal'
@@ -1243,75 +1243,69 @@ const Repositories = () => {
       <Modal
         open={!!selectedRepo}
         onClose={() => setSelectedRepo(null)}
-        panelClassName="max-w-5xl max-h-[90vh] overflow-y-auto p-6"
+        title={selectedRepo?.name || 'Repository'}
+        subtitle={
+          selectedRepo
+            ? `${selectedRepo.owner || 'Unknown owner'} · ${selectedRepo.visibility} · Updated ${selectedRepo.lastUpdate}`
+            : undefined
+        }
+        panelClassName="max-w-5xl"
       >
         {selectedRepo && (
           <>
-          <div className="flex items-center justify-between mb-6">
-            <h2 className="text-xl font-semibold text-ink flex items-center">
-              <FiFolder className="w-5 h-5 mr-2" />
-              {selectedRepo.name}
-            </h2>
-            <div className="flex items-center gap-2 flex-wrap">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={(e) => handleStarToggle(e, selectedRepo)}
-                disabled={starBusyId === selectedRepo.id || !hasAuthToken}
-                title={
-                  !hasAuthToken
-                    ? 'Sign in to star'
-                    : selectedRepo.starredByMe
-                      ? 'Remove your star'
-                      : 'Star repository'
-                }
-                className={selectedRepo.starredByMe ? 'text-warning-fg border border-warning-fg/40' : ''}
-              >
-                <FiStar className={`w-4 h-4 mr-2 ${selectedRepo.starredByMe ? 'fill-current' : ''}`} />
-                {selectedRepo.stars ?? 0}
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setPullRequestsModalRepo(selectedRepo)}
-                title="Open pull requests"
-              >
-                <FiGitPullRequest className="w-4 h-4 mr-2" />
-                Pull Requests
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setIssuesModalRepo(selectedRepo)}
-                title="Open issues"
-              >
-                <FiHash className="w-4 h-4 mr-2" />
-                Issues
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setAutomationRepo(selectedRepo)}
-                title="Branches, releases, docs, webhooks, checks and push rules"
-              >
-                <FiSettings className="w-4 h-4 mr-2" />
-                Manage
-              </Button>
-              <Button 
-                variant="ghost" 
-                size="sm"
-                onClick={() => setSelectedRepo(null)}
-              >
-                Close
-              </Button>
-            </div>
+          <div className="mb-5 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={(e) => handleStarToggle(e, selectedRepo)}
+              disabled={starBusyId === selectedRepo.id || !hasAuthToken}
+              title={
+                !hasAuthToken
+                  ? 'Sign in to star'
+                  : selectedRepo.starredByMe
+                    ? 'Remove your star'
+                    : 'Star repository'
+              }
+              className={`inline-flex items-center gap-2 rounded-full border px-3.5 py-1.5 text-[13px] transition-colors disabled:opacity-40 ${
+                selectedRepo.starredByMe
+                  ? 'border-warning-fg/40 bg-warning-fg/10 text-warning-fg'
+                  : 'border-border bg-white/[0.02] text-ink-soft hover:border-border-strong hover:text-ink'
+              }`}
+            >
+              <FiStar className={`h-3.5 w-3.5 ${selectedRepo.starredByMe ? 'fill-current' : ''}`} />
+              {selectedRepo.stars ?? 0} {selectedRepo.stars === 1 ? 'Star' : 'Stars'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setPullRequestsModalRepo(selectedRepo)}
+              className="inline-flex items-center gap-2 rounded-full border border-border bg-white/[0.02] px-3.5 py-1.5 text-[13px] text-ink-soft transition-colors hover:border-border-strong hover:text-ink"
+            >
+              <FiGitPullRequest className="h-3.5 w-3.5" />
+              Pull Requests
+            </button>
+            <button
+              type="button"
+              onClick={() => setIssuesModalRepo(selectedRepo)}
+              className="inline-flex items-center gap-2 rounded-full border border-border bg-white/[0.02] px-3.5 py-1.5 text-[13px] text-ink-soft transition-colors hover:border-border-strong hover:text-ink"
+            >
+              <FiHash className="h-3.5 w-3.5" />
+              Issues
+            </button>
+            <button
+              type="button"
+              onClick={() => setAutomationRepo(selectedRepo)}
+              title="Branches, releases, docs, webhooks, checks and push rules"
+              className="inline-flex items-center gap-2 rounded-full border border-border bg-white/[0.02] px-3.5 py-1.5 text-[13px] text-ink-soft transition-colors hover:border-border-strong hover:text-ink"
+            >
+              <FiSettings className="h-3.5 w-3.5" />
+              Manage
+            </button>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-2">
             {/* Repository Info */}
-            <div>
-              <h3 className="text-lg font-medium text-ink mb-4">Repository Information</h3>
-              <div className="space-y-3">
+            <div className="rounded-xl border border-border bg-white/[0.02] p-4">
+              <h3 className="mb-3 font-display text-sm font-medium tracking-tight text-ink">Repository information</h3>
+              <div className="space-y-2.5 text-sm">
                 {selectedRepo.language && (
                   <div className="flex justify-between">
                     <span className="text-ink-soft">Language:</span>
@@ -1344,8 +1338,8 @@ const Repositories = () => {
                 </div>
               </div>
 
-              <div className="mt-6">
-                <h3 className="text-lg font-medium text-ink mb-3 flex items-center">
+              <div className="mt-5 border-t border-border pt-4">
+                <h3 className="mb-3 flex items-center font-display text-sm font-medium tracking-tight text-ink">
                   <FiUsers className="w-4 h-4 mr-2" />
                   Contributors
                   {!contributorsLoading && (
@@ -1378,7 +1372,7 @@ const Repositories = () => {
                       return (
                         <li
                           key={person.id || person.username}
-                          className="flex items-start justify-between gap-3 rounded-lg border border-border bg-cream-mid/50 px-3 py-2"
+                          className="flex items-start justify-between gap-3 rounded-lg border border-border bg-white/[0.03] px-3 py-2"
                         >
                           <div className="min-w-0">
                             <p className="font-medium text-ink truncate">{displayName}</p>
@@ -1398,9 +1392,9 @@ const Repositories = () => {
             </div>
 
             {/* Files Structure */}
-            <div>
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-medium text-ink">Files & Folders</h3>
+            <div className="rounded-xl border border-border bg-white/[0.02] p-4">
+              <div className="mb-4 flex items-center justify-between">
+                <h3 className="font-display text-sm font-medium tracking-tight text-ink">Files & folders</h3>
                 {branchesLoading && (
                   <FiLoader className="w-4 h-4 text-muted animate-spin" />
                 )}
@@ -1408,7 +1402,7 @@ const Repositories = () => {
 
               {/* Branch Selector */}
               {branches.length > 0 && (
-                <div className="mb-4 p-3 rounded-lg bg-cream-mid/70 border border-border">
+                <div className="mb-4 rounded-lg border border-border bg-white/[0.03] p-3">
                   <label className="block text-sm text-ink-soft mb-2">
                     <FiGitBranch className="w-4 h-4 mr-2 inline" />
                     Branch
@@ -1416,7 +1410,7 @@ const Repositories = () => {
                   <select 
                     value={selectedBranch || ''} 
                     onChange={(e) => setSelectedBranch(e.target.value)}
-                    className="w-full px-3 py-2 bg-cream-mid border border-border rounded text-ink text-sm focus:border-ink focus:outline-none transition-colors"
+                    className="w-full rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-ink transition-colors focus:border-accent focus:outline-none"
                     disabled={filesLoading}
                   >
                     {branches.map((branch, index) => (
@@ -1459,7 +1453,7 @@ const Repositories = () => {
                 <div className="space-y-2 max-h-64 overflow-y-auto">
                   {repoFiles && repoFiles.length > 0 ? (
                     repoFiles.map((file, index) => (
-                      <div key={index} className="flex items-center justify-between p-2 rounded-lg bg-cream-mid hover:bg-cream-deep transition-colors">
+                      <div key={index} className="flex items-center justify-between rounded-lg border border-transparent bg-white/[0.03] p-2 transition-colors hover:border-border hover:bg-white/[0.05]">
                         <div className="flex items-center space-x-2">
                           {file.type === 'folder' ? (
                             <FiFolder className="w-4 h-4 text-info-fg" />
@@ -1505,8 +1499,8 @@ const Repositories = () => {
             </div>
 
             {/* Documentation */}
-            <div className="mt-6">
-              <h3 className="text-lg font-medium text-ink mb-3">Documentation</h3>
+            <div className="rounded-xl border border-border bg-white/[0.02] p-4 lg:col-span-2">
+              <h3 className="mb-3 font-display text-sm font-medium tracking-tight text-ink">Documentation</h3>
               {docsLoading ? (
                 <div className="flex items-center space-x-2 text-ink-soft">
                   <FiLoader className="w-4 h-4 animate-spin" />
@@ -1547,7 +1541,7 @@ const Repositories = () => {
                     </a>
                   </div>
                   {Array.isArray(docsInfo.files) && docsInfo.files.length > 0 && (
-                    <div className="max-h-40 overflow-y-auto rounded-lg border border-border bg-cream-mid/70 p-2 space-y-1">
+                    <div className="max-h-40 space-y-1 overflow-y-auto rounded-lg border border-border bg-white/[0.03] p-2">
                       {docsInfo.files.map((f) => (
                         <div key={f.path} className="flex items-center justify-between gap-2 text-xs">
                           <a
@@ -1795,9 +1789,8 @@ const Repositories = () => {
       )}
 
       {filePreview && selectedRepo && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 backdrop-blur-sm p-4">
-          <div className="absolute inset-0" onClick={() => { setFilePreview(null); setFilePreviewError(null) }} />
-          <GlassCard className="relative p-5 w-full max-w-4xl" hover={false}>
+        <ModalOverlay onClose={() => { setFilePreview(null); setFilePreviewError(null) }}>
+          <GlassCard className="relative max-h-[90vh] w-full max-w-4xl overflow-y-auto p-5" hover={false}>
             <div className="flex items-start justify-between gap-4 mb-4">
               <div>
                 <p className="text-xs uppercase tracking-[0.16em] text-muted">File Preview</p>
@@ -1837,7 +1830,7 @@ const Repositories = () => {
               </div>
             )}
           </GlassCard>
-        </div>
+        </ModalOverlay>
       )}
 
       {pullRequestsModalRepo && (

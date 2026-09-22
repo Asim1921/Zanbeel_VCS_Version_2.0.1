@@ -115,13 +115,21 @@ class VersioningApiTests(unittest.TestCase):
             db.close()
 
     def test_branch_aware_file_state(self):
-        main_response = self.client.get(f'/api/repository/{self.repo_id}/files', params={'branch': 'main'})
+        main_response = self.client.get(
+            f'/api/repository/{self.repo_id}/files',
+            headers={'Authorization': f'Bearer {self.auth_token}'},
+            params={'branch': 'main'},
+        )
         self.assertEqual(main_response.status_code, 200)
         main_payload = main_response.json()
         self.assertTrue(main_payload['success'])
         self.assertEqual(main_payload['files']['src/sample.txt']['content'], 'line1\nline2-updated\n')
 
-        feature_response = self.client.get(f'/api/repository/{self.repo_id}/files', params={'branch': 'feature_old'})
+        feature_response = self.client.get(
+            f'/api/repository/{self.repo_id}/files',
+            headers={'Authorization': f'Bearer {self.auth_token}'},
+            params={'branch': 'feature_old'},
+        )
         self.assertEqual(feature_response.status_code, 200)
         feature_payload = feature_response.json()
         self.assertTrue(feature_payload['success'])
@@ -130,6 +138,7 @@ class VersioningApiTests(unittest.TestCase):
     def test_file_history_and_compare(self):
         history_response = self.client.get(
             f'/api/repository/{self.repo_id}/file-history',
+            headers={'Authorization': f'Bearer {self.auth_token}'},
             params={'path': 'src/sample.txt', 'branch': 'main'}
         )
         self.assertEqual(history_response.status_code, 200)
@@ -139,6 +148,7 @@ class VersioningApiTests(unittest.TestCase):
 
         compare_response = self.client.get(
             f'/api/repository/{self.repo_id}/compare',
+            headers={'Authorization': f'Bearer {self.auth_token}'},
             params={
                 'from_commit': self.commit_old,
                 'to_commit': self.commit_new,
@@ -178,7 +188,11 @@ class VersioningApiTests(unittest.TestCase):
         self.assertTrue(payload['success'])
         self.assertIn('new_commit_id', payload)
 
-        files_after = self.client.get(f'/api/repository/{self.repo_id}/files', params={'branch': 'main'})
+        files_after = self.client.get(
+            f'/api/repository/{self.repo_id}/files',
+            headers={'Authorization': f'Bearer {self.auth_token}'},
+            params={'branch': 'main'},
+        )
         self.assertEqual(files_after.status_code, 200)
         after_payload = files_after.json()
         self.assertEqual(after_payload['files']['src/sample.txt']['content'], 'line1\nline2\n')
@@ -241,6 +255,7 @@ class VersioningApiTests(unittest.TestCase):
 
         history_response = self.client.get(
             f'/api/repository/{repo_id}/file-history',
+            headers={'Authorization': f'Bearer {self.auth_token}'},
             params={'path': 'src/rapid.txt', 'branch': 'main', 'limit': 50}
         )
         self.assertEqual(history_response.status_code, 200)
@@ -254,7 +269,11 @@ class VersioningApiTests(unittest.TestCase):
         for idx in range(len(versions) - 1):
             self.assertNotEqual(versions[idx]['file_hash'], versions[idx + 1]['file_hash'])
 
-        files_after = self.client.get(f'/api/repository/{repo_id}/files', params={'branch': 'main'})
+        files_after = self.client.get(
+            f'/api/repository/{repo_id}/files',
+            headers={'Authorization': f'Bearer {self.auth_token}'},
+            params={'branch': 'main'},
+        )
         self.assertEqual(files_after.status_code, 200)
         latest_content = files_after.json()['files']['src/rapid.txt']['content']
         self.assertEqual(latest_content, 'first\n')
@@ -291,6 +310,7 @@ class VersioningApiTests(unittest.TestCase):
 
         page_1 = self.client.get(
             f'/api/repository/{repo_id}/file-history',
+            headers={'Authorization': f'Bearer {self.auth_token}'},
             params={'path': 'src/paginated.txt', 'limit': 120}
         )
         self.assertEqual(page_1.status_code, 200)
@@ -305,6 +325,7 @@ class VersioningApiTests(unittest.TestCase):
         while cursor:
             page = self.client.get(
                 f'/api/repository/{repo_id}/file-history',
+                headers={'Authorization': f'Bearer {self.auth_token}'},
                 params={'path': 'src/paginated.txt', 'limit': 120, 'cursor': cursor}
             )
             self.assertEqual(page.status_code, 200)
@@ -366,6 +387,7 @@ class VersioningApiTests(unittest.TestCase):
 
         without_lineage = self.client.get(
             f'/api/repository/{repo_id}/file-history',
+            headers={'Authorization': f'Bearer {self.auth_token}'},
             params={'path': 'src/new_name.txt', 'follow_renames': 'false'}
         )
         self.assertEqual(without_lineage.status_code, 200)
@@ -374,6 +396,7 @@ class VersioningApiTests(unittest.TestCase):
 
         with_lineage = self.client.get(
             f'/api/repository/{repo_id}/file-history',
+            headers={'Authorization': f'Bearer {self.auth_token}'},
             params={'path': 'src/new_name.txt', 'follow_renames': 'true'}
         )
         self.assertEqual(with_lineage.status_code, 200)

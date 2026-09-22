@@ -3,6 +3,7 @@ import { FiX, FiRefreshCw, FiPlus, FiLoader, FiMessageSquare, FiTag, FiFlag, FiU
 import GlassCard from './ui/GlassCard'
 import Button from './ui/Button'
 import Badge from './ui/Badge'
+import { ModalOverlay } from './ui/Modal'
 import api from '../utils/api'
 
 const STATUS_META = {
@@ -283,9 +284,8 @@ const IssuesModal = ({ repo, onClose }) => {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 backdrop-blur-sm p-4">
-      <div className="absolute inset-0" onClick={onClose} />
-      <div className="relative w-full max-w-6xl">
+    <ModalOverlay onClose={onClose}>
+      <div className="relative max-h-[90vh] w-full max-w-6xl overflow-y-auto">
         <GlassCard className="p-6" hover={false}>
           <div className="flex items-start justify-between gap-4 mb-5">
             <div>
@@ -690,7 +690,7 @@ const IssuesModal = ({ repo, onClose }) => {
           )}
         </GlassCard>
       </div>
-    </div>
+    </ModalOverlay>
   )
 }
 

@@ -131,6 +131,35 @@ def ensure_commit_signatures_table():
         print(f"[warn] Unable to create commit_signatures table: {exc}")
 
 
+def ensure_password_reset_otp_table():
+    """Create the password-reset one-time-code table for deployments upgrading in place."""
+    try:
+        with engine.begin() as connection:
+            connection.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS password_reset_otps (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    username VARCHAR(50) NOT NULL,
+                    email VARCHAR(100) NOT NULL,
+                    code_hash VARCHAR(64) NOT NULL,
+                    expires_at TIMESTAMP NOT NULL,
+                    attempts INTEGER DEFAULT 0,
+                    consumed_at TIMESTAMP,
+                    requested_by_id INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            ))
+            connection.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_password_reset_otps_username "
+                "ON password_reset_otps(username)"
+            ))
+        print("[ok] Password reset OTP table verified")
+    except Exception as exc:
+        print(f"[warn] Unable to create password_reset_otps table: {exc}")
+
+
 def ensure_merge_conflict_tables():
     """Create the merge-conflict resolution tables where they do not already exist.
 

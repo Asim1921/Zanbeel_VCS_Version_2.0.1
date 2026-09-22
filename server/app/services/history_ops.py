@@ -26,11 +26,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
-from database.crud import BranchCRUD, CommitCRUD, FileObjectCRUD
+from database.crud import BranchCRUD, CommitCRUD, FileObjectCRUD, UserCRUD
 from database.models import Commit
 
 from app.services.commit_graph import _get_commit_tree
 from app.services.merge import _merge_trees
+from app.services.signing import sign_commit
 
 
 class HistoryOpError(Exception):
@@ -162,6 +163,10 @@ def _write_commit(
 
     commit = CommitCRUD.create_commit_from_file_hashes(db, commit_data, entries)
     BranchCRUD.update_branch_head(db, repo_id, branch.name, commit.id)
+    # Attest it like a pushed commit, otherwise every cherry-pick, revert and rebase
+    # leaves a permanently unsigned gap in the history verification covers. The user
+    # running the operation is both the author and the pusher here.
+    sign_commit(db, commit, author_username, commit.author_id)
     return commit
 
 
@@ -322,6 +327,10 @@ def rebase(
     original_head = branch.head_commit_id
     parent_id = onto.head_commit_id
     new_ids: List[str] = []
+    # Replayed commits keep their original author, so the pusher is the user running the
+    # rebase -- resolved once rather than per replayed commit.
+    actor = UserCRUD.get_user_by_username(db, author_username)
+    actor_id = actor.id if actor else None
     for commit, tree in planned:
         entries = []
         for path, content in tree.items():
@@ -345,6 +354,7 @@ def rebase(
             },
             entries,
         )
+        sign_commit(db, written, author_username, actor_id)
         parent_id = written.id
         new_ids.append(written.id)
 

@@ -11,6 +11,8 @@ from app.schemas.admin import (
 )
 from app.schemas.auth import (
     BootstrapPasswordRequest,
+    ForgotPasswordRequest,
+    ResetPasswordWithOtpRequest,
     ChangePasswordRequest,
     LoginRequest,
     RegistrationRequest,
@@ -66,6 +68,8 @@ __all__ = [
     "ReviewCommitRequest",
     # auth
     "BootstrapPasswordRequest",
+    "ForgotPasswordRequest",
+    "ResetPasswordWithOtpRequest",
     "ChangePasswordRequest",
     "LoginRequest",
     "RegistrationRequest",

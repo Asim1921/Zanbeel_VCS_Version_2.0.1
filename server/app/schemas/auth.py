@@ -18,6 +18,14 @@ class BootstrapPasswordRequest(BaseModel):
     new_password: str
     setup_key: str
 
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordWithOtpRequest(BaseModel):
+    email: str
+    otp: str
+    new_password: str
+
 class RegistrationRequest(BaseModel):
     username: str
     password: str

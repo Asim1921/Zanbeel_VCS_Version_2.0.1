@@ -14,10 +14,91 @@ from database.database import get_db
 from database.models import Repository, User
 
 from app.core.dependencies import require_admin_user, require_reviewer_user
+from app.core.security import hash_password
 from app.schemas import ReviewRegistrationRequest
+from app.services import password_reset
 
 
 router = APIRouter()
+
+
+@router.post("/api/admin/users/{username}/reset-password/request-otp")
+async def request_password_reset_otp(
+    username: str,
+    current_user: User = Depends(require_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Email a six-digit reset code to the account's own address.
+
+    The code goes to the user, never back in the response, so an admin cannot reset an
+    account without the account holder seeing it happen.
+    """
+    user = UserCRUD.get_user_by_username(db, username)
+    if not user:
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+
+    try:
+        record, masked = password_reset.request_code(db, user, requested_by=current_user)
+    except password_reset.PasswordResetError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+
+    ActivityCRUD.create_activity(
+        db,
+        user_id=current_user.id,
+        activity_type="password_reset_otp_sent",
+        description=f"Sent a password reset code to {username}",
+    )
+
+    return {
+        "success": True,
+        "message": f"A 6-digit code was emailed to {masked}. It expires in "
+                   f"{max(1, password_reset.OTP_TTL_SECONDS // 60)} minutes.",
+        "username": username,
+        "sent_to": masked,
+        "expires_at": record.expires_at.isoformat() if record.expires_at else None,
+    }
+
+
+@router.post("/api/admin/users/{username}/reset-password")
+async def reset_password_with_otp(
+    username: str,
+    request: dict,
+    current_user: User = Depends(require_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Set a new password once the emailed code has been supplied."""
+    new_password = (request or {}).get("new_password") or ""
+    code = (request or {}).get("otp") or (request or {}).get("code") or ""
+
+    if len(new_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+
+    user = UserCRUD.get_user_by_username(db, username)
+    if not user:
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+
+    try:
+        password_reset.verify_and_consume(db, user, code)
+    except password_reset.PasswordResetError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+
+    user.password_hash = hash_password(new_password)
+    user.updated_at = datetime.now()
+    db.commit()
+
+    ActivityCRUD.create_activity(
+        db,
+        user_id=current_user.id,
+        activity_type="password_reset",
+        description=f"Reset password for user: {username} (verified by emailed code)",
+    )
+
+    return {
+        "success": True,
+        "message": f"Password reset successfully for '{username}'. "
+                   f"Any existing sessions remain valid until they expire.",
+        "username": username,
+    }
 
 
 @router.get("/api/admin/pending-counts")

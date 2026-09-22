@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { FiX } from 'react-icons/fi'
 import { cn } from '../../lib/utils'
@@ -15,24 +15,25 @@ import { cn } from '../../lib/utils'
  * generally cannot know whether something above it happens to be a modal.
  */
 
-// Module-level: shared by every mounted Modal, which is exactly the scope
+// Module-level: shared by every mounted dialog, which is exactly the scope
 // "how many dialogs are currently open" needs.
 let openModals = 0
 
-export default function Modal({
-  open,
-  onClose,
-  children,
-  title,
-  subtitle,
-  className,
-  panelClassName,
-  showClose = true,
-}) {
-  const [depth, setDepth] = useState(1)
+/**
+ * Join the shared dialog stack. Returns a z-index that sits above every
+ * dialog opened before this one. `onClose` is read from a ref so a parent
+ * re-render does not tear this dialog down and hand its slot to a child.
+ */
+export function useModalStack(open, onClose) {
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+  const [depth, setDepth] = useState(0)
 
-  useEffect(() => {
-    if (!open) return undefined
+  useLayoutEffect(() => {
+    if (!open) {
+      setDepth(0)
+      return undefined
+    }
 
     openModals += 1
     const myDepth = openModals
@@ -41,7 +42,7 @@ export default function Modal({
     const onKey = (e) => {
       // Only the topmost dialog reacts, or one Escape would close the whole
       // stack at once.
-      if (e.key === 'Escape' && myDepth === openModals) onClose?.()
+      if (e.key === 'Escape' && myDepth === openModals) onCloseRef.current?.()
     }
     window.addEventListener('keydown', onKey)
 
@@ -52,11 +53,51 @@ export default function Modal({
     document.body.style.overflow = 'hidden'
 
     return () => {
-      openModals -= 1
+      openModals = Math.max(0, openModals - 1)
       window.removeEventListener('keydown', onKey)
       document.body.style.overflow = previous
     }
-  }, [open, onClose])
+  }, [open])
+
+  return 50 + Math.max(depth, 1) * 10
+}
+
+/** Full-screen overlay that portals to document.body and stacks above other dialogs. */
+export function ModalOverlay({ open = true, onClose, children, className }) {
+  const zIndex = useModalStack(open, onClose)
+  if (!open) return null
+
+  return createPortal(
+    <div
+      role="dialog"
+      aria-modal="true"
+      style={{ zIndex }}
+      className={cn(
+        'fixed inset-0 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm',
+        className
+      )}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose?.()
+      }}
+    >
+      {children}
+    </div>,
+    document.body
+  )
+}
+
+export default function Modal({
+  open,
+  onClose,
+  children,
+  title,
+  subtitle,
+  className,
+  panelClassName,
+  bodyClassName,
+  showClose = true,
+}) {
+  const zIndex = useModalStack(open, onClose)
 
   if (!open) return null
 
@@ -69,7 +110,7 @@ export default function Modal({
     <div
       role="dialog"
       aria-modal="true"
-      style={{ zIndex: 50 + depth * 10 }}
+      style={{ zIndex }}
       className={cn(
         'fixed inset-0 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm',
         className
@@ -80,12 +121,12 @@ export default function Modal({
     >
       <div
         className={cn(
-          'panel-float-lg hairline-top animate-rise-in relative w-full max-w-lg overflow-hidden',
+          'panel-float-lg hairline-top animate-rise-in relative flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden',
           panelClassName
         )}
       >
         {(title || showClose) && (
-          <div className="flex items-start justify-between gap-4 border-b border-border px-6 py-4">
+          <div className="flex shrink-0 items-start justify-between gap-4 border-b border-border px-6 py-4">
             <div className="min-w-0">
               {title && (
                 <h2 className="font-display text-lg font-medium tracking-tight text-ink">
@@ -105,7 +146,7 @@ export default function Modal({
             )}
           </div>
         )}
-        <div className="p-6">{children}</div>
+        <div className={cn('min-h-0 flex-1 overflow-y-auto p-6', bodyClassName)}>{children}</div>
       </div>
     </div>,
     document.body
