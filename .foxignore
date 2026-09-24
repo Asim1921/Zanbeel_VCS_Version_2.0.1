@@ -68,3 +68,6 @@ obj/
 Thumbs.db
 *.log
 nohup.out
+
+# Office lock/owner files created while a document is open.
+~$*

@@ -1,4 +1,4 @@
-const Navigation = ({ activeTab, setActiveTab }) => {
+const Navigation = () => {
   // This component can be used for additional navigation if needed
   return null
 }

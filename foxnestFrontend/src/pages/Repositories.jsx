@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { useLocalStorage } from '../hooks/useCustomHooks'
-import { FiFolder, FiGitCommit, FiUsers, FiStar, FiEye, FiGitBranch, FiClock, FiArchive, FiEdit3, FiTrash2, FiWifi, FiWifiOff, FiLoader, FiCode, FiMessageSquare, FiSearch, FiX, FiCheck, FiFileText, FiRotateCcw, FiGitPullRequest, FiHash, FiSettings, FiChevronLeft, FiChevronRight } from 'react-icons/fi'
+import { FiFolder, FiGitCommit, FiUsers, FiStar, FiGitBranch, FiClock, FiArchive, FiEdit3, FiTrash2, FiLoader, FiCode, FiMessageSquare, FiSearch, FiX, FiCheck, FiFileText, FiRotateCcw, FiGitPullRequest, FiHash, FiSettings, FiChevronLeft, FiChevronRight } from 'react-icons/fi'
 import GlassCard from '../components/ui/GlassCard'
 import Badge from '../components/ui/Badge'
 import Button from '../components/ui/Button'
@@ -12,7 +12,6 @@ import BranchActionsPanel from '../components/BranchActionsPanel'
 import PullRequestsModal from '../components/PullRequestsModal'
 import IssuesModal from '../components/IssuesModal'
 import AutomationModal from '../components/repository/AutomationModal'
-import { useRepositories, useServerHealth } from '../hooks/useApi'
 import api from '../utils/api'
 import { API_SERVER_URL } from '../config'
 import { getSessionUser, getSessionToken } from '../utils/session'
@@ -41,7 +40,6 @@ const Repositories = ({ onBrowseRepo }) => {
   const [editorOpen, setEditorOpen] = useState(false)
   const [editorRepo, setEditorRepo] = useState(null)
   const [commitModalRepo, setCommitModalRepo] = useState(null)
-  const [hoveredRepoId, setHoveredRepoId] = useState(null)
   const [repoComments, setRepoComments] = useState({})
   const [commentModalRepo, setCommentModalRepo] = useState(null)
   const [searchQuery, setSearchQuery] = useState('')
@@ -294,8 +292,6 @@ const Repositories = ({ onBrowseRepo }) => {
 
   const fetchAllRepoComments = async (repos) => {
     try {
-      const commentsMap = {}
-      
       // Create promises for all repositories to fetch commit messages in parallel
       const commentPromises = repos.map(async (repo) => {
         const localMap = {}
@@ -595,21 +591,6 @@ const Repositories = ({ onBrowseRepo }) => {
     fetchCommitHistoryForRepo(repo)
   }
 
-  const handleViewComments = (e, repo) => {
-    e.stopPropagation()
-    if (repoComments[repo.id]) {
-      setCommentModalRepo(repo)
-    }
-  }
-
-  const handleRepoMouseEnter = (repo) => {
-    setHoveredRepoId(repo.id)
-  }
-
-  const handleRepoMouseLeave = () => {
-    setHoveredRepoId(null)
-  }
-
   const filteredRepos = repositories.filter(repo => {
     const isActive = repo.status === 'active'
     if (!searchQuery.trim()) return isActive
@@ -806,8 +787,6 @@ const Repositories = ({ onBrowseRepo }) => {
                   selectedRepo?.id === repo.id ? 'ring-2 ring-ink bg-cream-mid' : ''
                 }`}
                 onClick={() => handleRepoClick(repo)}
-                onMouseEnter={() => handleRepoMouseEnter(repo)}
-                onMouseLeave={handleRepoMouseLeave}
               >
                 {/* Repository Header */}
                 <div className="mb-4">

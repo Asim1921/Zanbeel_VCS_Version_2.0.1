@@ -1,6 +1,5 @@
 import { FiMenu, FiLogOut, FiBell, FiCheck, FiChevronDown, FiChevronUp, FiExternalLink, FiDownload } from 'react-icons/fi'
 import React, { useEffect, useMemo, useState } from 'react'
-import GlassCard from '../ui/GlassCard'
 import Button from '../ui/Button'
 import Modal from '../ui/Modal'
 import api from '../../utils/api'

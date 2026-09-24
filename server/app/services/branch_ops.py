@@ -31,6 +31,7 @@ from database.models import Repository, User
 from app.services.branches import _get_default_branch, _normalize_branch_name
 from app.services.commit_graph import _find_merge_base, _get_commit_tree, _is_ancestor
 from app.services.merge import _merge_trees
+from app.services import refs
 from app.services.signing import sign_commit
 
 
@@ -165,7 +166,11 @@ def _write(db: Session, repo_id: str, target, tree: Dict[str, bytes], author: st
         },
         entries,
     )
-    BranchCRUD.update_branch_head(db, repo_id, target.name, commit.id)
+    refs.update_reference_by_id(
+        db, repository_id=repo_id, actor_username=author,
+        branch_name=target.name, new_commit_id=commit.id,
+        operation=refs.OP_MERGE,
+    )
     # The user running the branch operation is both author and pusher here.
     sign_commit(db, commit, author, commit.author_id)
     return commit
@@ -239,7 +244,11 @@ def publish_branch(db: Session, repository: Repository, actor: User, source_name
         )
 
     previous = target.head_commit_id
-    BranchCRUD.update_branch_head(db, repository.id, target.name, source.head_commit_id)
+    refs.update_reference(
+        db, repository=repository, actor=actor,
+        branch_name=target.name, new_commit_id=source.head_commit_id,
+        operation=refs.OP_MERGE,
+    )
     ActivityCRUD.create_activity(
         db, actor.id, "publish_branch",
         f"Fast-forwarded '{target.name}' to '{source.name}' "

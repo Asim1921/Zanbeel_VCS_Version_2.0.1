@@ -1,14 +1,13 @@
 import React, { useState, useEffect } from 'react'
-import { FiClock, FiCheck, FiX, FiUser, FiFolder, FiGitBranch, FiAlertCircle, FiRefreshCw } from 'react-icons/fi'
+import { FiCheck, FiX, FiUser, FiFolder, FiAlertCircle, FiRefreshCw } from 'react-icons/fi'
 import GlassCard from '../components/ui/GlassCard'
 import Badge from '../components/ui/Badge'
 import Button from '../components/ui/Button'
 import { API_SERVER_URL } from '../config.js'
-import { getSessionToken, getSessionUsername } from '../utils/session'
+import { getSessionToken } from '../utils/session'
 
 const IssueAccessRequests = () => {
   const token = getSessionToken()
-  const currentUsername = getSessionUsername()
   const [requests, setRequests] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)

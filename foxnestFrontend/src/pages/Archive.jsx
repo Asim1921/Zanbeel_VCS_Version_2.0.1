@@ -47,7 +47,7 @@ const Archive = () => {
         const archivedRepos = response.repositories.filter(repo => repo.is_archived === true)
         
         // Transform server data to match our component expectations
-        const transformedRepos = archivedRepos.map((repo, index) => ({
+        const transformedRepos = archivedRepos.map((repo) => ({
           id: repo.id,
           name: repo.name,
           description: repo.description || `Repository owned by ${repo.owner}`,
@@ -125,11 +125,6 @@ const Archive = () => {
     e.stopPropagation()
     setEditorRepo(repo)
     setEditorOpen(true)
-  }
-
-  const handleDeleteClick = (e, repo) => {
-    e.stopPropagation()
-    setDeleteModal({ isOpen: true, repo })
   }
 
   const handleDelete = (repoId) => {

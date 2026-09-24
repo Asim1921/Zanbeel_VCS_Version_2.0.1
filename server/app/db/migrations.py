@@ -131,6 +131,114 @@ def ensure_commit_signatures_table():
         print(f"[warn] Unable to create commit_signatures table: {exc}")
 
 
+def ensure_branch_protection_tables():
+    """Branch protection: the generation counter plus the policy, unlock, release and audit tables."""
+    try:
+        with engine.begin() as connection:
+            # Compare-and-swap counter. Existing branches start at 0.
+            cols = [row[1] for row in connection.execute(text("PRAGMA table_info(branches)"))]
+            if "generation" not in cols:
+                connection.execute(text(
+                    "ALTER TABLE branches ADD COLUMN generation INTEGER NOT NULL DEFAULT 0"
+                ))
+
+            connection.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS branch_protection_policies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repository_id VARCHAR(16) NOT NULL,
+                    branch_pattern VARCHAR(200) NOT NULL,
+                    mode VARCHAR(20) NOT NULL DEFAULT 'open',
+                    policy_version INTEGER NOT NULL DEFAULT 1,
+                    rules_json TEXT,
+                    created_by_id INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_by_id INTEGER,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            ))
+            connection.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_branch_policies_repo_pattern "
+                "ON branch_protection_policies(repository_id, branch_pattern)"
+            ))
+
+            connection.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS branch_unlocks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repository_id VARCHAR(16) NOT NULL,
+                    branch_name VARCHAR(200) NOT NULL,
+                    operations VARCHAR(200) NOT NULL,
+                    reason TEXT NOT NULL,
+                    requested_by_id INTEGER NOT NULL,
+                    expires_at TIMESTAMP NOT NULL,
+                    consumed_at TIMESTAMP,
+                    consumed_by_id INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            ))
+            connection.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_branch_unlocks_repo_branch "
+                "ON branch_unlocks(repository_id, branch_name)"
+            ))
+
+            connection.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS immutable_releases (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repository_id VARCHAR(16) NOT NULL,
+                    name VARCHAR(200) NOT NULL,
+                    commit_id VARCHAR(40) NOT NULL,
+                    manifest_json TEXT,
+                    signature VARCHAR(128),
+                    created_by_id INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            ))
+            # The uniqueness is the immutability: a name can never be reused.
+            connection.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_immutable_releases_repo_name "
+                "ON immutable_releases(repository_id, name)"
+            ))
+
+            connection.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS ref_audit_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repository_id VARCHAR(16) NOT NULL,
+                    event_type VARCHAR(60) NOT NULL,
+                    reference VARCHAR(200) NOT NULL,
+                    operation VARCHAR(30),
+                    actor_id INTEGER,
+                    actor_username VARCHAR(50),
+                    old_commit_id VARCHAR(40),
+                    new_commit_id VARCHAR(40),
+                    old_generation INTEGER,
+                    new_generation INTEGER,
+                    policy_id INTEGER,
+                    policy_version INTEGER,
+                    mode VARCHAR(20),
+                    decision VARCHAR(20) NOT NULL,
+                    error_code VARCHAR(40),
+                    reason TEXT,
+                    occurred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    previous_event_hash VARCHAR(64),
+                    event_hash VARCHAR(64) NOT NULL
+                )
+                """
+            ))
+            connection.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_ref_audit_repo_ref "
+                "ON ref_audit_events(repository_id, reference)"
+            ))
+        print("[ok] Branch protection tables verified")
+    except Exception as exc:
+        print(f"[warn] Unable to create branch protection tables: {exc}")
+
+
 def ensure_password_reset_otp_table():
     """Create the password-reset one-time-code table for deployments upgrading in place."""
     try:

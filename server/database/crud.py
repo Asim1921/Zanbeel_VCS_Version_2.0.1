@@ -1137,13 +1137,21 @@ class PendingCommitCRUD:
         db.refresh(pending)
         if branch_name:
             try:
-                branch = BranchCRUD.get_branch(db, commit.repository_id, branch_name)
-                if not branch:
-                    BranchCRUD.create_branch(db, commit.repository_id, branch_name, head_commit_id=commit.id)
-                else:
-                    BranchCRUD.update_branch_head(db, commit.repository_id, branch_name, commit.id)
+                from app.services import refs as _refs
+
+                _refs.update_reference_by_id(
+                    db,
+                    repository_id=commit.repository_id,
+                    actor_username=getattr(commit.author, "username", None),
+                    branch_name=branch_name,
+                    new_commit_id=commit.id,
+                    create_if_missing=True,
+                )
             except Exception:
-                pass
+                # A refused reference change must not be swallowed here: approving a
+                # queued commit would otherwise report success while the branch stayed
+                # put, or worse, move a frozen branch.
+                raise
 
         return pending, commit
     

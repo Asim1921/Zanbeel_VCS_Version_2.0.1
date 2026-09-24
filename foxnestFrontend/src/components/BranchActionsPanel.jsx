@@ -29,7 +29,6 @@ const BranchActionsPanel = ({
   const [copyTarget, setCopyTarget] = useState(selectedBranch || '')
   const [copyPath, setCopyPath] = useState(selectedFilePath || '')
 
-  const [policy, setPolicy] = useState(null)
   const [policyDraft, setPolicyDraft] = useState(null)
   const [yourScope, setYourScope] = useState('read')
 
@@ -46,7 +45,6 @@ const BranchActionsPanel = ({
     let cancelled = false
     api.getBranchPolicy(repo.id).then((res) => {
       if (cancelled || !res?.success) return
-      setPolicy(res.policy)
       setPolicyDraft(res.policy)
       setYourScope(res.your_scope || 'read')
     }).catch(() => {})
@@ -159,7 +157,6 @@ const BranchActionsPanel = ({
     if (!policyDraft) return
     const res = await api.updateBranchPolicy(repo.id, policyDraft)
     if (res?.success) {
-      setPolicy(res.policy)
       setPolicyDraft(res.policy)
       setMessage('Branch policy saved')
     }

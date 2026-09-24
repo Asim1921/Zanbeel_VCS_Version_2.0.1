@@ -1,11 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
-import { FiActivity, FiRefreshCw, FiAlertTriangle, FiFilter } from 'react-icons/fi'
+import { FiRefreshCw, FiAlertTriangle, FiFilter } from 'react-icons/fi'
 import PageHeader from '../components/ui/PageHeader'
 import GlassCard from '../components/ui/GlassCard'
 import Button from '../components/ui/Button'
 import ActivityFeed from '../components/ActivityFeed'
 import api from '../utils/api'
-import { cn } from '../lib/utils'
 
 /**
  * The audit view.

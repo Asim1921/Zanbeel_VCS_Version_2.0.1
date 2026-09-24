@@ -24,6 +24,7 @@ from app.services.branches import _get_default_branch, _resolve_branch
 from app.services.commit_graph import _get_commit_tree, _is_ancestor
 from app.services.history_ops import HistoryOpError, cherry_pick, rebase, revert
 from app.services.merge import _tree_to_commit_payload
+from app.services import refs
 from app.services.signing import sign_commit
 from app.services.paths import normalize as normalize_path
 
@@ -104,7 +105,10 @@ async def rollback_file(
     }
 
     commit = CommitCRUD.create_commit(db, commit_data)
-    BranchCRUD.update_branch_head(db, repo_id, rollback_branch.name, commit.id)
+    refs.update_reference(
+        db, repository=repository, actor=current_user,
+        branch_name=rollback_branch.name, new_commit_id=commit.id,
+    )
     sign_commit(db, commit, current_user.username, current_user.id)
 
     logger.info(
@@ -185,7 +189,10 @@ async def rollback_branch(
     }
 
     commit = CommitCRUD.create_commit(db, commit_data)
-    BranchCRUD.update_branch_head(db, repo_id, rollback_branch_obj.name, commit.id)
+    refs.update_reference(
+        db, repository=repository, actor=current_user,
+        branch_name=rollback_branch_obj.name, new_commit_id=commit.id,
+    )
     sign_commit(db, commit, current_user.username, current_user.id)
 
     logger.info(
@@ -235,6 +242,17 @@ def _run_history_op(op, db, repo_id, request, current_user, verb):
     if request.expected_head_commit_id is not None and \
             request.expected_head_commit_id != branch.head_commit_id:
         _raise_head_mismatch(branch.name, request.expected_head_commit_id, branch.head_commit_id)
+
+    # Ask the branch before doing the work. Computing a three-way merge only to refuse
+    # the write afterwards wastes the effort and, worse, reports a merge conflict on a
+    # frozen branch -- telling the caller to resolve something that was never going to
+    # be written.
+    if not request.dry_run:
+        refs.check_reference_operation(
+            db, repository=repository, actor=current_user,
+            branch_name=branch.name, operation=refs.OP_UPDATE,
+            current_head=branch.head_commit_id,
+        )
 
     try:
         result = op(

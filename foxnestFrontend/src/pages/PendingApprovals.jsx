@@ -1,11 +1,10 @@
 import React, { useState, useEffect } from 'react'
-import { FiClock, FiCheck, FiX, FiGitCommit, FiUser, FiFolder, FiMessageSquare, FiRefreshCw, FiAlertTriangle } from 'react-icons/fi'
+import { FiClock, FiCheck, FiX, FiGitCommit, FiUser, FiFolder, FiRefreshCw, FiAlertTriangle } from 'react-icons/fi'
 import GlassCard from '../components/ui/GlassCard'
 import Badge from '../components/ui/Badge'
 import Button from '../components/ui/Button'
 import PageHeader from '../components/ui/PageHeader'
 import EmptyState from '../components/ui/EmptyState'
-import api from '../utils/api'
 import { API_SERVER_URL } from '../config.js'
 import { getSessionToken, getSessionUsername } from '../utils/session'
 

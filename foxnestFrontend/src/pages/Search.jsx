@@ -87,7 +87,7 @@ function CodeFileResult({ file }) {
   )
 }
 
-export default function Search({ setActiveTab }) {
+export default function Search() {
   const [mode, setMode] = useState('repositories')
   const [query, setQuery] = useState('')
   const [owner, setOwner] = useState('')

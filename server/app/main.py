@@ -7,15 +7,18 @@ module would create an import cycle.
 """
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from database.database import create_tables
 
 from app.api import register_routers
 from app.config import CORS_ORIGINS
+from app.services.refs import ReferenceError
 from app.db.schema_check import verify_or_fail
 from app.db.migrations import (
     ensure_access_tokens_table,
+    ensure_branch_protection_tables,
     ensure_commit_signatures_table,
     ensure_commit_statuses_table,
     ensure_fork_columns,
@@ -51,6 +54,23 @@ app.add_middleware(
 )
 
 
+# A refused reference change answers in one shape everywhere, whichever route it came
+# from, so a client can branch on `error` instead of parsing prose.
+@app.exception_handler(ReferenceError)
+async def _reference_error_handler(request, exc: ReferenceError):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "success": False,
+            "error": exc.code,
+            "code": exc.code,
+            "message": exc.message,
+            "detail": exc.message,
+            **exc.payload,
+        },
+    )
+
+
 # Create tables on startup
 @app.on_event("startup")
 async def startup_event():
@@ -69,6 +89,7 @@ async def startup_event():
     ensure_versioning_schema()
     ensure_commit_signatures_table()
     ensure_password_reset_otp_table()
+    ensure_branch_protection_tables()
     ensure_merge_conflict_tables()
     ensure_pull_request_reviews_table()
     ensure_pull_request_comments_table()

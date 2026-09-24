@@ -467,6 +467,38 @@ class FoxNestAPI {
     return this.request(`/repository/${repoId}/file-history?${params.toString()}`)
   }
 
+  async getBranchProtection(repoId) {
+    return this.request(`/repository/${repoId}/branch-protection`)
+  }
+
+  async setBranchProtection(repoId, branchPattern, mode, expectedPolicyVersion = null) {
+    return this.request(`/repository/${repoId}/branch-protection`, {
+      method: 'PUT',
+      body: {
+        branch_pattern: branchPattern,
+        mode,
+        expected_policy_version: expectedPolicyVersion,
+      },
+    })
+  }
+
+  async requestBranchUnlock(repoId, branch, { reason, operations = ['update'], minutes = 30 }) {
+    return this.request(`/repository/${repoId}/branches/${encodeURIComponent(branch)}/unlock-requests`, {
+      method: 'POST',
+      body: { reason, operations, expires_in_minutes: minutes },
+    })
+  }
+
+  async getReferenceAudit(repoId, { reference = null, limit = 100 } = {}) {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (reference) params.append('reference', reference)
+    return this.request(`/repository/${repoId}/audit/references?${params.toString()}`)
+  }
+
+  async listImmutableReleases(repoId) {
+    return this.request(`/repository/${repoId}/releases/immutable`)
+  }
+
   async blameFile(repoId, path, { commit = null, branch = null } = {}) {
     const params = new URLSearchParams({ path })
     if (commit) params.append('commit', commit)
