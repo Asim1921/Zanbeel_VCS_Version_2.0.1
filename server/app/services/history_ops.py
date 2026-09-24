@@ -162,6 +162,15 @@ def _write_commit(
         "timestamp": datetime.utcnow().isoformat(),
     }
 
+    # Ask the branch before writing. create_commit_from_file_hashes() commits its
+    # own transaction and moves repository.head_commit_id, so a refusal arriving
+    # after it leaves the refused commit stored and the repository head pointing
+    # at it. update_reference_by_id() below is still the authoritative check.
+    refs.precheck_by_id(
+        db, repository_id=repo_id, actor_username=author_username,
+        branch_name=branch.name, operation=refs.OP_UPDATE,
+    )
+
     commit = CommitCRUD.create_commit_from_file_hashes(db, commit_data, entries)
     refs.update_reference_by_id(
         db, repository_id=repo_id, actor_username=author_username,
@@ -301,6 +310,15 @@ def rebase(
     to_replay = _replay_order(db, branch.head_commit_id, base_id)
     if not to_replay:
         return {"status": "no-op", "reason": "Nothing to replay.", "replayed": 0}
+
+    # A rebase is a force update, and it writes the whole rewritten chain before the
+    # reference is consulted -- so a protected branch refusing it would leave every
+    # replayed commit behind. Refuse first; update_reference_by_id below is still the
+    # authoritative check.
+    refs.precheck_by_id(
+        db, repository_id=repo_id, actor_username=author_username,
+        branch_name=branch.name, operation=refs.OP_FORCE_UPDATE,
+    )
 
     # Simulate the whole sequence before writing anything.
     cursor_tree = _get_commit_tree(db, onto.head_commit_id)

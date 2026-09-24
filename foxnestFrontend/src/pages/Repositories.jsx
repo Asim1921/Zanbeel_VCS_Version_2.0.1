@@ -21,7 +21,7 @@ import { getSessionUser, getSessionToken } from '../utils/session'
 const ICON_ACTION = '!px-2'
 const REPOS_PAGE_SIZE = 5
 
-const Repositories = ({ onBrowseRepo }) => {
+const Repositories = ({ onBrowseRepo, onReviewPullRequest }) => {
   const sessionUser = getSessionUser()
   const currentUsername = sessionUser.username
   const hasAuthToken = !!getSessionToken()
@@ -1830,6 +1830,17 @@ const Repositories = ({ onBrowseRepo }) => {
         <PullRequestsModal
           repo={pullRequestsModalRepo}
           onClose={() => setPullRequestsModalRepo(null)}
+          onReview={
+            typeof onReviewPullRequest === 'function'
+              ? (prId) => {
+                  // Close the dialog as the review page opens: leaving it stacked
+                  // behind puts a scrim over the diff the reviewer came to read.
+                  const repoForReview = pullRequestsModalRepo
+                  setPullRequestsModalRepo(null)
+                  onReviewPullRequest({ repo: repoForReview, prId })
+                }
+              : undefined
+          }
         />
       )}
 

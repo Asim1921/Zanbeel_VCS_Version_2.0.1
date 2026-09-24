@@ -59,6 +59,19 @@ def required_approvals(repository: Repository) -> int:
     return max(0, value)
 
 
+def required_approvals_for(db: Session, repository: Repository, branch_name: str) -> int:
+    """Approvals required to land on one specific branch.
+
+    Branch protection policies carry review requirements per pattern, so `main` can
+    demand two approvals while feature branches demand none. When no pattern sets a
+    count this falls through to the repository-wide value above, which is what keeps
+    every repository configured before per-branch policies behaving as it does now.
+    """
+    from app.services import branch_protection
+
+    return branch_protection.review_rules(db, repository, branch_name)["required_approvals"]
+
+
 def submit(
     db: Session,
     repository: Repository,
@@ -138,7 +151,9 @@ def summarize(db: Session, repository: Repository, pr: PullRequest) -> Dict[str,
             else:
                 approvals.append(entry)
 
-    needed = required_approvals(repository)
+    # Resolved against the target branch, because that is the branch whose rules
+    # this merge has to satisfy -- not the repository as a whole.
+    needed = required_approvals_for(db, repository, pr.target_branch)
     blockers: List[str] = []
     if changes_requested:
         who = ", ".join(sorted(e["reviewer"] or "?" for e in changes_requested))

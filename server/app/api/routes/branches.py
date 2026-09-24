@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from database.crud import ActivityCRUD, BranchCRUD, CommitCRUD, RepositoryCRUD
 from database.database import get_db
-from database.models import User
+from database.models import MergeConflictSession, User
 
 from app.core.dependencies import get_current_user
 from app.core.permissions import (
@@ -17,8 +17,9 @@ from app.core.permissions import (
 from app.schemas import (
     BranchCreateRequest, BranchHeadUpdateRequest, BranchMergeRequest,
     BranchPolicyRequest, BranchPublishRequest, BranchRenameRequest, CopyFilesRequest,
+    ResolveConflictsRequest,
 )
-from app.services import branch_ops, refs
+from app.services import branch_ops, merge_conflicts, refs
 from app.services.branches import _get_default_branch, _normalize_branch_name
 
 
@@ -349,3 +350,180 @@ async def copy_files_between_branches(
         expected_head_commit_id=request.expected_head_commit_id,
     )
     return {"success": True, **result}
+
+
+# --- conflict resolution for a direct branch merge --------------------------------
+# A conflicted `fox merge` used to report the conflict and stop: resolution sessions
+# belonged to pull requests, so there was nowhere to park the three sides. These are
+# the same session endpoints, addressed by branch pair rather than by pull request.
+
+def _load_branch_session(db: Session, repo_id: str, session_id: int):
+    session = (
+        db.query(MergeConflictSession)
+        .filter(
+            MergeConflictSession.id == session_id,
+            MergeConflictSession.repository_id == repo_id,
+        )
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Merge session not found")
+    if session.pull_request_id is not None:
+        # Addressed here it would skip the pull request's own review gate.
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "WRONG_SESSION_KIND",
+                "message": f"Session {session_id} belongs to pull request "
+                           f"#{session.pull_request_id}; resolve it there.",
+                "pull_request_id": session.pull_request_id,
+            },
+        )
+    return session
+
+
+@router.post("/api/repository/{repo_id}/branches/conflicts")
+async def start_branch_merge_conflict_session(
+    repo_id: str,
+    request: BranchMergeRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Park a conflicted branch merge for manual resolution.
+
+    Reuses an open session for the same pair when neither branch has moved, so
+    reopening the resolver does not discard work already done.
+    """
+    repository = RepositoryCRUD.get_repository(db, repo_id)
+    if not repository:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    require_repository_access(db, current_user.username, repository,
+                              "resolve merge conflicts in", required_scope="manage")
+
+    # Refuse on a branch that would never accept the result, rather than inviting
+    # someone to work through a resolution that cannot land.
+    refs.check_reference_operation(
+        db, repository=repository, actor=current_user,
+        branch_name=request.target_branch, operation=refs.OP_MERGE,
+    )
+
+    try:
+        session = merge_conflicts.open_branch_session(
+            db, repo_id, current_user,
+            source_branch=request.source_branch,
+            target_branch=request.target_branch,
+        )
+    except merge_conflicts.ConflictError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+
+    return {"success": True, **merge_conflicts.get_bundle(db, session)}
+
+
+@router.get("/api/repository/{repo_id}/branches/conflicts/{session_id}")
+async def get_branch_merge_conflicts(
+    repo_id: str,
+    session_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """All three sides of every conflicted file in a branch merge session."""
+    repository = RepositoryCRUD.get_repository(db, repo_id)
+    if not repository:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    _require_repository_read_access(db, current_user, repository, "view merge conflicts")
+
+    session = _load_branch_session(db, repo_id, session_id)
+    return {"success": True, **merge_conflicts.get_bundle(db, session)}
+
+
+@router.post("/api/repository/{repo_id}/branches/conflicts/{session_id}/resolve")
+async def resolve_branch_merge_conflicts(
+    repo_id: str,
+    session_id: int,
+    request: ResolveConflictsRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Apply the resolutions and complete the branch merge.
+
+    Every conflicted path must be resolved; a partial submission is refused rather than
+    merged with the remainder guessed. The target branch's review rules still apply --
+    resolving conflicts is not a way to land unreviewed content.
+    """
+    repository = RepositoryCRUD.get_repository(db, repo_id)
+    if not repository:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    require_repository_access(db, current_user.username, repository,
+                              "resolve merge conflicts in", required_scope="manage")
+
+    session = _load_branch_session(db, repo_id, session_id)
+    try:
+        result = merge_conflicts.resolve(
+            db, session, request.resolutions, current_user,
+            expected_head_commit_id=request.expected_head_commit_id,
+        )
+    except merge_conflicts.ConflictError as exc:
+        raise HTTPException(status_code=exc.status_code,
+                            detail={"message": exc.message, **exc.payload})
+    return {"success": True, **result}
+
+
+@router.post("/api/repository/{repo_id}/branches/conflicts/{session_id}/abort")
+async def abort_branch_merge_conflicts(
+    repo_id: str,
+    session_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Discard a branch merge session without merging anything."""
+    repository = RepositoryCRUD.get_repository(db, repo_id)
+    if not repository:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    require_repository_access(db, current_user.username, repository,
+                              "resolve merge conflicts in", required_scope="manage")
+
+    session = _load_branch_session(db, repo_id, session_id)
+    try:
+        result = merge_conflicts.abort(db, session, current_user)
+    except merge_conflicts.ConflictError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    return {"success": True, **result}
+
+
+@router.get("/api/repository/{repo_id}/branches/conflicts")
+async def list_branch_merge_sessions(
+    repo_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Open branch merge sessions, so an interrupted resolution can be found again."""
+    repository = RepositoryCRUD.get_repository(db, repo_id)
+    if not repository:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    _require_repository_read_access(db, current_user, repository, "view merge conflicts")
+
+    rows = (
+        db.query(MergeConflictSession)
+        .filter(
+            MergeConflictSession.repository_id == repo_id,
+            MergeConflictSession.pull_request_id.is_(None),
+            MergeConflictSession.status == "open",
+        )
+        .order_by(MergeConflictSession.id.desc())
+        .all()
+    )
+    return {
+        "success": True,
+        "sessions": [
+            {
+                "id": row.id,
+                "source_branch": row.source_branch,
+                "target_branch": row.target_branch,
+                "status": row.status,
+                "files": len(row.files),
+                "unresolved": sum(1 for f in row.files if not f.resolved_file_hash),
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in rows
+        ],
+    }

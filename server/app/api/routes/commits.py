@@ -19,7 +19,7 @@ from app.core.permissions import (
     _require_repository_checkout_access, _require_repository_read_access,
 )
 from app.schemas import PushCommitRequest
-from app.services import branch_ops
+from app.services import branch_ops, commit_changes, commit_dag
 from app.services.branches import _get_default_branch, _normalize_branch_name, _resolve_branch
 from app.services.commit_graph import _collect_reachable_commits
 from app.services.issues import _sync_issues_for_new_commit
@@ -189,6 +189,32 @@ async def push_commit(
                                + "; ".join(rejection.reasons),
                 },
             )
+
+        # Branch protection, asked before anything is written.
+        #
+        # create_commit() commits its own transaction and moves
+        # repository.head_commit_id, so a refusal arriving after it left the refused
+        # commit stored and the repository head pointing at content the branch had
+        # just rejected. The branch ref was protected; the write had already landed.
+        # update_reference() below still performs the authoritative check against the
+        # real commit id -- this one only makes the refusal arrive early enough to
+        # cost nothing.
+        refs.check_reference_operation(
+            db,
+            repository=repository,
+            actor=current_user,
+            branch_name=branch_name,
+            operation=refs.classify_incoming_push(
+                db,
+                current_head=actual_head,
+                parent_ids=(
+                    commit_data.get("parents")
+                    or ([commit_data.get("parent")] if commit_data.get("parent") else [])
+                ),
+                branch_exists=current_branch is not None,
+            ),
+            current_head=actual_head,
+        )
 
         # Check if user role is 'developer' - developers always need approval regardless of ownership or permissions
         # Team leads can push directly
@@ -430,6 +456,63 @@ async def get_commits(
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+
+@router.get("/api/repository/{repo_id}/commits/graph")
+async def get_commit_graph(
+    repo_id: str,
+    limit: Optional[int] = None,
+    branch: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The commit graph across every branch, ordered so it can be drawn.
+
+    Separate from /commits because that answers for one branch: a graph whose whole
+    purpose is showing where branches diverged and rejoined cannot be built from a
+    single branch's history.
+    """
+    repository = RepositoryCRUD.get_repository(db, repo_id)
+    if not repository:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    _require_repository_checkout_access(db, current_user, repository, branch, "view commits")
+
+    return {"success": True, **commit_dag.build(db, repository, limit=limit, branch=branch)}
+
+
+
+@router.get("/api/repository/{repo_id}/commits/{commit_id}/changes")
+async def get_commit_changes(
+    repo_id: str,
+    commit_id: str,
+    against: Optional[str] = None,
+    path: Optional[str] = None,
+    max_rows: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The files one commit changed, with their diffs.
+
+    Compared against the commit's first parent. A merge is reported against its first
+    parent too -- what landed on the target branch as a result -- with the other
+    parents listed so a caller can ask for those explicitly via `against`.
+    """
+    repository = RepositoryCRUD.get_repository(db, repo_id)
+    if not repository:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    _require_repository_read_access(db, current_user, repository, "view commit changes")
+
+    try:
+        return {
+            "success": True,
+            **commit_changes.build(
+                db, repository, commit_id,
+                against=against, path=path, max_rows=max_rows,
+            ),
+        }
+    except commit_changes.CommitNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @router.get("/api/repository/{repo_id}/commits/{commit_id}/verify")

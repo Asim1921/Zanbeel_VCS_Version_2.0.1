@@ -34,7 +34,9 @@ from app.services.issues import _sync_issues_for_pr_created, _sync_issues_for_pr
 from app.services.merge import _merge_trees
 from app.services import refs
 from app.services.signing import sign_commit
-from app.services import codeowners, forks, merge_conflicts, pr_comments, pr_reviews
+from app.services import (
+    codeowners, forks, merge_conflicts, pr_comments, pr_files, pr_reviews,
+)
 
 
 router = APIRouter()
@@ -620,6 +622,31 @@ async def delete_pull_request_comment(
         return {"success": True, **pr_comments.delete(db, pr, comment_id, current_user)}
     except pr_comments.CommentError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message)
+
+
+
+@router.get("/api/repository/{repo_id}/pull-requests/{pr_id}/files")
+async def list_pull_request_files(
+    repo_id: str,
+    pr_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The diff this pull request proposes, with comment threads already attached.
+
+    One request rather than one per file, and the rows carry line numbers, so a client
+    can render the review without re-deriving which line a comment belongs to.
+    """
+    repository = RepositoryCRUD.get_repository(db, repo_id)
+    if not repository:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    _require_repository_read_access(db, current_user, repository, "view pull request files")
+
+    pr = PullRequestCRUD.get_pull_request(db, repo_id, pr_id)
+    if not pr:
+        raise HTTPException(status_code=404, detail="Pull request not found")
+
+    return {"success": True, **pr_files.build(db, repository, pr)}
 
 
 @router.get("/api/repository/{repo_id}/pull-requests/{pr_id}/owners")

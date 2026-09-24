@@ -319,6 +319,79 @@ def ensure_merge_conflict_tables():
         print(f"[warn] Unable to create merge conflict tables: {exc}")
 
 
+
+def ensure_merge_conflict_branch_sessions():
+    """Let a conflict session exist without a pull request.
+
+    Sessions were modelled as belonging to a pull request, so a conflicted `fox merge`
+    had nowhere to park its three sides: the merge reported the conflict and stopped,
+    which is the state this feature exists to remove. Branch merges need the same
+    resolution surface, so pull_request_id becomes optional.
+
+    SQLite cannot drop a NOT NULL constraint in place, so the table is rebuilt and the
+    rows copied. Existing sessions keep their pull request.
+    """
+    try:
+        with engine.begin() as connection:
+            columns = connection.execute(
+                text("PRAGMA table_info(merge_conflict_sessions)")
+            ).fetchall()
+            if not columns:
+                return  # Table does not exist yet; the models will create it correctly.
+
+            pr_column = next((c for c in columns if c[1] == "pull_request_id"), None)
+            if pr_column is None or not pr_column[3]:
+                return  # Already nullable, or the column is gone.
+
+            connection.execute(text(
+                """
+                CREATE TABLE merge_conflict_sessions_rebuilt (
+                    id INTEGER PRIMARY KEY,
+                    repository_id VARCHAR(16) NOT NULL,
+                    pull_request_id INTEGER,
+                    source_branch VARCHAR(100) NOT NULL,
+                    target_branch VARCHAR(100) NOT NULL,
+                    base_commit_id VARCHAR(40),
+                    source_head_commit_id VARCHAR(40) NOT NULL,
+                    target_head_commit_id VARCHAR(40) NOT NULL,
+                    status VARCHAR(20),
+                    created_by_id INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            ))
+            connection.execute(text(
+                """
+                INSERT INTO merge_conflict_sessions_rebuilt (
+                    id, repository_id, pull_request_id, source_branch, target_branch,
+                    base_commit_id, source_head_commit_id, target_head_commit_id,
+                    status, created_by_id, created_at, updated_at
+                )
+                SELECT id, repository_id, pull_request_id, source_branch, target_branch,
+                       base_commit_id, source_head_commit_id, target_head_commit_id,
+                       status, created_by_id, created_at, updated_at
+                FROM merge_conflict_sessions
+                """
+            ))
+            connection.execute(text("DROP TABLE merge_conflict_sessions"))
+            connection.execute(text(
+                "ALTER TABLE merge_conflict_sessions_rebuilt "
+                "RENAME TO merge_conflict_sessions"
+            ))
+            connection.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_merge_conflict_sessions_pr "
+                "ON merge_conflict_sessions(pull_request_id, status)"
+            ))
+            connection.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_merge_conflict_sessions_branches "
+                "ON merge_conflict_sessions(repository_id, target_branch, status)"
+            ))
+        print("[ok] Merge conflict sessions accept branch merges")
+    except Exception as exc:
+        print(f"[warn] Unable to relax merge conflict sessions: {exc}")
+
+
 def ensure_repositories_branch_policy_column():
     """Add repositories.branch_policy_json for branch protection rules.
 

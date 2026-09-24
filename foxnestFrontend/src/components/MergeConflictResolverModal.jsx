@@ -15,6 +15,9 @@ const decodeB64 = (b64) => {
 }
 
 const MergeConflictResolverModal = ({ repo, prId, sessionId, expectedHeadCommitId, onClose, onResolved }) => {
+  // A session with no pull request came from a direct branch merge. Same three sides,
+  // different endpoints, so the modal picks the pair rather than being duplicated.
+  const isBranchSession = prId == null
   const repoId = repo?.id
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -28,11 +31,13 @@ const MergeConflictResolverModal = ({ repo, prId, sessionId, expectedHeadCommitI
   const activeFile = useMemo(() => files.find((f) => f.path === activePath) || null, [files, activePath])
 
   const load = async () => {
-    if (!repoId || !prId || !sessionId) return
+    if (!repoId || !sessionId || (!isBranchSession && !prId)) return
     try {
       setLoading(true)
       setError(null)
-      const res = await api.getMergeConflicts(repoId, prId, sessionId)
+      const res = isBranchSession
+        ? await api.getBranchMergeConflicts(repoId, sessionId)
+        : await api.getMergeConflicts(repoId, prId, sessionId)
       setBundle(res)
       const first = (res.files || [])[0]?.path || null
       setActivePath((prev) => prev || first)
@@ -56,7 +61,7 @@ const MergeConflictResolverModal = ({ repo, prId, sessionId, expectedHeadCommitI
   useEffect(() => {
     load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repoId, prId, sessionId])
+  }, [repoId, prId, sessionId, isBranchSession])
 
   const chooseSide = (path, side) => {
     const f = files.find((x) => x.path === path)
@@ -72,7 +77,7 @@ const MergeConflictResolverModal = ({ repo, prId, sessionId, expectedHeadCommitI
   }
 
   const handleSubmit = async () => {
-    if (!repoId || !prId || !sessionId) return
+    if (!repoId || !sessionId || (!isBranchSession && !prId)) return
     try {
       setSubmitting(true)
       setError(null)
@@ -87,10 +92,15 @@ const MergeConflictResolverModal = ({ repo, prId, sessionId, expectedHeadCommitI
         }
       }
 
-      await api.resolveMergeConflicts(repoId, prId, sessionId, {
+      const payload = {
         resolutions,
         expected_head_commit_id: expectedHeadCommitId || null,
-      })
+      }
+      if (isBranchSession) {
+        await api.resolveBranchMergeConflicts(repoId, sessionId, payload)
+      } else {
+        await api.resolveMergeConflicts(repoId, prId, sessionId, payload)
+      }
       onResolved?.()
       onClose?.()
     } catch (err) {
@@ -101,11 +111,15 @@ const MergeConflictResolverModal = ({ repo, prId, sessionId, expectedHeadCommitI
   }
 
   const handleAbort = async () => {
-    if (!repoId || !prId || !sessionId) return
+    if (!repoId || !sessionId || (!isBranchSession && !prId)) return
     try {
       setSubmitting(true)
       setError(null)
-      await api.abortMergeConflicts(repoId, prId, sessionId, expectedHeadCommitId || null)
+      if (isBranchSession) {
+        await api.abortBranchMergeConflicts(repoId, sessionId)
+      } else {
+        await api.abortMergeConflicts(repoId, prId, sessionId, expectedHeadCommitId || null)
+      }
       onClose?.()
     } catch (err) {
       setError(err.message || 'Failed to abort merge conflict session')
@@ -121,7 +135,12 @@ const MergeConflictResolverModal = ({ repo, prId, sessionId, expectedHeadCommitI
           <div className="flex items-start justify-between gap-4 mb-5">
             <div>
               <p className="text-xs uppercase tracking-[0.16em] text-muted">Resolve merge conflicts</p>
-              <h2 className="text-xl font-semibold text-ink">{repo?.name} • PR #{prId}</h2>
+              <h2 className="text-xl font-semibold text-ink">
+                {repo?.name}
+                {isBranchSession
+                  ? ` • ${bundle?.session?.source_branch ?? ''} → ${bundle?.session?.target_branch ?? ''}`
+                  : ` • PR #${prId}`}
+              </h2>
               <p className="text-sm text-muted">Choose ours/theirs or edit the resolved content, then finalize merge.</p>
             </div>
             <div className="flex items-center gap-2">

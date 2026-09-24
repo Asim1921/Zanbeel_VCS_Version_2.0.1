@@ -222,6 +222,29 @@ class FoxNestAPI {
     return this.request(`/repository/${repoId}/commits?${params}`)
   }
 
+  // The commit graph across every branch. Separate from getCommits, which answers for
+  // one branch and so cannot show where branches diverged or rejoined.
+  async getCommitGraph(repoId, { limit = 300, branch = null } = {}) {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (branch) params.append('branch', branch)
+    return this.request(`/repository/${repoId}/commits/graph?${params.toString()}`, {
+      timeout: 60000,
+    })
+  }
+
+  // What one commit changed, against its first parent. `against` selects a merge's
+  // other parent explicitly.
+  async getCommitChanges(repoId, commitId, { against = null, path = null } = {}) {
+    const params = new URLSearchParams()
+    if (against) params.append('against', against)
+    // One file in full: how a client loads a diff the row budget left out.
+    if (path) params.append('path', path)
+    const suffix = params.toString() ? `?${params.toString()}` : ''
+    return this.request(`/repository/${repoId}/commits/${commitId}/changes${suffix}`, {
+      timeout: 60000,
+    })
+  }
+
   async getBranches(repoId) {
     return this.request(`/repository/${repoId}/branches`)
   }
@@ -258,6 +281,119 @@ class FoxNestAPI {
     return this.request(`/repository/${repoId}/pull-requests/${prId}/merge`, {
       method: 'POST',
       body: expectedHeadCommitId ? { expected_head_commit_id: expectedHeadCommitId } : {},
+    })
+  }
+
+  // --- Branch merge conflicts -------------------------------------------------
+  // The same resolution sessions, for a merge that has no pull request. A conflicted
+  // branch merge used to report the conflict and stop.
+
+  async startBranchMergeConflictSession(repoId, sourceBranch, targetBranch) {
+    return this.request(`/repository/${repoId}/branches/conflicts`, {
+      method: 'POST',
+      body: { source_branch: sourceBranch, target_branch: targetBranch },
+      timeout: 120000,
+    })
+  }
+
+  async getBranchMergeConflicts(repoId, sessionId) {
+    return this.request(`/repository/${repoId}/branches/conflicts/${sessionId}`, {
+      timeout: 60000,
+    })
+  }
+
+  async resolveBranchMergeConflicts(repoId, sessionId, payload) {
+    return this.request(`/repository/${repoId}/branches/conflicts/${sessionId}/resolve`, {
+      method: 'POST', body: payload, timeout: 120000,
+    })
+  }
+
+  async abortBranchMergeConflicts(repoId, sessionId) {
+    return this.request(`/repository/${repoId}/branches/conflicts/${sessionId}/abort`, {
+      method: 'POST', body: {},
+    })
+  }
+
+  async listBranchMergeSessions(repoId) {
+    return this.request(`/repository/${repoId}/branches/conflicts`)
+  }
+
+  // --- Review workflow -------------------------------------------------------
+  // The server has carried reviews, inline comments, code owners and forks since
+  // 2.0.1; none of it was reachable from here, so the approval gate existed but
+  // nobody could satisfy it without the CLI.
+
+  async getPullRequest(repoId, prId) {
+    return this.request(`/repository/${repoId}/pull-requests/${prId}`)
+  }
+
+  // Diff plus comment threads in one response. The rows carry line numbers, which is
+  // what lets a comment anchor to the line a reviewer actually clicked.
+  async getPullRequestFiles(repoId, prId) {
+    return this.request(`/repository/${repoId}/pull-requests/${prId}/files`, {
+      timeout: 60000,
+    })
+  }
+
+  async submitReview(repoId, prId, state, body = '') {
+    return this.request(`/repository/${repoId}/pull-requests/${prId}/reviews`, {
+      method: 'POST',
+      body: { state, body },
+    })
+  }
+
+  async listReviews(repoId, prId) {
+    return this.request(`/repository/${repoId}/pull-requests/${prId}/reviews`)
+  }
+
+  // file_path and line are omitted when replying: the reply inherits them from its root.
+  async addPullRequestComment(repoId, prId, payload) {
+    return this.request(`/repository/${repoId}/pull-requests/${prId}/comments`, {
+      method: 'POST',
+      body: payload,
+    })
+  }
+
+  async listPullRequestComments(repoId, prId) {
+    return this.request(`/repository/${repoId}/pull-requests/${prId}/comments`)
+  }
+
+  async resolvePullRequestComment(repoId, prId, commentId, resolved = true) {
+    return this.request(
+      `/repository/${repoId}/pull-requests/${prId}/comments/${commentId}/resolve`,
+      { method: 'POST', body: { resolved } }
+    )
+  }
+
+  async deletePullRequestComment(repoId, prId, commentId) {
+    return this.request(
+      `/repository/${repoId}/pull-requests/${prId}/comments/${commentId}`,
+      { method: 'DELETE' }
+    )
+  }
+
+  async getPullRequestOwners(repoId, prId) {
+    return this.request(`/repository/${repoId}/pull-requests/${prId}/owners`)
+  }
+
+  // --- Forks -----------------------------------------------------------------
+
+  async forkRepository(repoId, name = null) {
+    return this.request(`/repository/${repoId}/fork`, {
+      method: 'POST',
+      body: name ? { name } : {},
+      timeout: 60000,
+    })
+  }
+
+  async listForks(repoId) {
+    return this.request(`/repository/${repoId}/forks`)
+  }
+
+  async createCrossRepoPullRequest(upstreamRepoId, payload) {
+    return this.request(`/repository/${upstreamRepoId}/pull-requests/from-fork`, {
+      method: 'POST',
+      body: payload,
     })
   }
 
@@ -471,14 +607,19 @@ class FoxNestAPI {
     return this.request(`/repository/${repoId}/branch-protection`)
   }
 
-  async setBranchProtection(repoId, branchPattern, mode, expectedPolicyVersion = null) {
+  // rules is left out unless given: the server treats an absent rules field as
+  // "leave them alone", so a mode change does not clear a branch's review
+  // requirement. Pass {} to clear it deliberately.
+  async setBranchProtection(repoId, branchPattern, mode, expectedPolicyVersion = null, rules = undefined) {
+    const body = {
+      branch_pattern: branchPattern,
+      mode,
+      expected_policy_version: expectedPolicyVersion,
+    }
+    if (rules !== undefined) body.rules = rules
     return this.request(`/repository/${repoId}/branch-protection`, {
       method: 'PUT',
-      body: {
-        branch_pattern: branchPattern,
-        mode,
-        expected_policy_version: expectedPolicyVersion,
-      },
+      body,
     })
   }
 

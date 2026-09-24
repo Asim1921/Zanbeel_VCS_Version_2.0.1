@@ -4,6 +4,7 @@ import Dashboard from './pages/Dashboard'
 import UsersManagement from './pages/UsersManagement'
 import Repositories from './pages/Repositories'
 import RepositoryDetail from './pages/RepositoryDetail'
+import PullRequestDetail from './pages/PullRequestDetail'
 import Archive from './pages/Archive'
 import PendingApprovals from './pages/PendingApprovals'
 import PendingRepositories from './pages/PendingRepositories'
@@ -23,6 +24,9 @@ function App() {
   // The repository browser lives inside the Repositories tab rather than as a tab of
   // its own, so Back returns to the list and no permission list needs a new entry.
   const [browsingRepo, setBrowsingRepo] = useState(null)
+  // { repo, prId } while a pull request is open for review. Held here rather than
+  // inside Repositories so the review survives the list re-rendering underneath it.
+  const [reviewing, setReviewing] = useState(null)
   const [currentUser, setCurrentUser] = useState(null)
   const [authLoading, setAuthLoading] = useState(true)
 
@@ -119,10 +123,19 @@ function App() {
         if (!isAdmin) return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
         return <UsersManagement />
       case 'repositories':
+        if (reviewing) {
+          return (
+            <PullRequestDetail
+              repo={reviewing.repo}
+              prId={reviewing.prId}
+              onBack={() => setReviewing(null)}
+            />
+          )
+        }
         return browsingRepo ? (
           <RepositoryDetail repo={browsingRepo} onBack={() => setBrowsingRepo(null)} />
         ) : (
-          <Repositories onBrowseRepo={setBrowsingRepo} />
+          <Repositories onBrowseRepo={setBrowsingRepo} onReviewPullRequest={setReviewing} />
         )
       case 'settings':
         return <Settings isAdmin={isAdmin} />

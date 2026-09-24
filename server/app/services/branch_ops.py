@@ -31,7 +31,7 @@ from database.models import Repository, User
 from app.services.branches import _get_default_branch, _normalize_branch_name
 from app.services.commit_graph import _find_merge_base, _get_commit_tree, _is_ancestor
 from app.services.merge import _merge_trees
-from app.services import refs
+from app.services import merge_gate, refs
 from app.services.signing import sign_commit
 
 
@@ -145,6 +145,14 @@ def _check_expected_head(target, expected_head_commit_id: Optional[str]) -> None
 
 def _write(db: Session, repo_id: str, target, tree: Dict[str, bytes], author: str,
            message: str, parents: List[str], seed: str):
+    # Ask the branch before writing. create_commit_from_file_hashes() commits its
+    # own transaction and moves repository.head_commit_id, so a refusal arriving
+    # after it leaves the refused commit stored and the repository head pointing
+    # at it. update_reference_by_id() below is still the authoritative check.
+    refs.precheck_by_id(
+        db, repository_id=repo_id, actor_username=author,
+        branch_name=target.name, operation=refs.OP_MERGE,
+    )
     commit_id = hashlib.sha256(
         f"{seed}:{repo_id}:{datetime.utcnow().isoformat()}".encode()
     ).hexdigest()[:40]
@@ -176,6 +184,25 @@ def _write(db: Session, repo_id: str, target, tree: Dict[str, bytes], author: st
     return commit
 
 
+
+def _gate_merge(db: Session, repository: Repository, actor: User,
+                source_name: str, target_name: str, operation: str) -> None:
+    """Refuse content arriving on a branch whose rules require it to be reviewed.
+
+    ``enforce`` above answers whether this actor may perform the operation; this answers
+    whether the branch accepts unreviewed content from anyone. Branch protection permits
+    ``merge`` on a protected branch by design, so without this check a branch merge is a
+    way to land unreviewed code on exactly the branches most protected from it.
+    """
+    try:
+        merge_gate.enforce(
+            db, repository=repository, target_branch=target_name,
+            source_branch=source_name, actor=actor, operation=operation,
+        )
+    except merge_gate.MergeGateError as exc:
+        raise BranchOpError(exc.message, exc.status_code, exc.payload) from exc
+
+
 # --- operations -----------------------------------------------------------------
 
 def merge_branches(db: Session, repository: Repository, actor: User, source_name: str,
@@ -184,6 +211,7 @@ def merge_branches(db: Session, repository: Repository, actor: User, source_name
     """Three-way merge source into target, creating a merge commit."""
     source, target = _resolve_pair(db, repository.id, source_name, target_name)
     enforce(db, actor, repository, "merge", target.name)
+    _gate_merge(db, repository, actor, source.name, target.name, "merge")
     _check_expected_head(target, expected_head_commit_id)
 
     if _is_ancestor(db, source.head_commit_id, target.head_commit_id):
@@ -196,10 +224,17 @@ def merge_branches(db: Session, repository: Repository, actor: User, source_name
         _get_commit_tree(db, source.head_commit_id),
     )
     if conflicts:
+        # Point at the resolver rather than just stopping. Reporting a conflict with no
+        # way forward was the whole complaint about this path.
         raise BranchOpError(
             f"Merging '{source.name}' into '{target.name}' has conflicts.", 409,
             {"code": "MERGE_CONFLICT", "conflicts": sorted(conflicts),
-             "source_branch": source.name, "target_branch": target.name},
+             "source_branch": source.name, "target_branch": target.name,
+             "resolve_url": f"/api/repository/{repository.id}/branches/conflicts",
+             "resolve_hint": (
+                 f"fox merge {source.name} --resolve   "
+                 f"(or POST the branch pair to resolve_url)"
+             )},
         )
     if dry_run:
         return {"status": "clean", "source": source.name, "target": target.name,
@@ -231,6 +266,7 @@ def publish_branch(db: Session, repository: Repository, actor: User, source_name
     """Fast-forward target to source. Refuses if the target has diverged."""
     source, target = _resolve_pair(db, repository.id, source_name, target_name)
     enforce(db, actor, repository, "publish", target.name)
+    _gate_merge(db, repository, actor, source.name, target.name, "publish")
     _check_expected_head(target, expected_head_commit_id)
 
     if target.head_commit_id == source.head_commit_id:
