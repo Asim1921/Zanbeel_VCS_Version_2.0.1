@@ -2940,7 +2940,10 @@ class FoxClient:
                     staging_file = self.staging_dir / filepath.name
                     with open(staging_file, "w") as f:
                         json.dump({
-                            "path": str(filepath),
+                            # Forward slashes on every platform: the server stores
+                            # this string verbatim, and a Windows spelling makes the
+                            # same file look like a different path to every other client.
+                            "path": str(filepath).replace(chr(92), "/"),
                             "hash": file_hash,
                             "added_at": datetime.now().isoformat()
                         }, f)
@@ -3029,7 +3032,13 @@ class FoxClient:
         if commits:
             last_commit_files = commits[-1].get("files", {})
             for file_hash, file_data in last_commit_files.items():
-                merged_files_by_path[file_data["path"]] = {
+                # Carried-forward paths are normalised to match the staged ones. Older
+                # commits hold OS-native separators, and without this a file changed
+                # now would be added under its new spelling while the stale copy
+                # survived under the old one -- the same file twice in one snapshot,
+                # which then compares as one "added" plus one "removed".
+                carried_path = (file_data["path"] or "").replace(chr(92), "/")
+                merged_files_by_path[carried_path] = {
                     "hash": file_hash,
                     "content": file_data["content"]
                 }

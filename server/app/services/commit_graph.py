@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from database.models import Commit, CommitParent
+from app.services.paths import normalize
 
 
 def _get_commit_parents(db: Session, commit_id: Optional[str]) -> List[str]:
@@ -62,10 +63,24 @@ def _get_commit_tree(db: Session, commit_id: Optional[str]) -> Dict[str, bytes]:
     commit = db.query(Commit).filter(Commit.id == commit_id).first()
     if not commit:
         return {}
+    # Keyed by the canonical path, not the stored one. A commit can hold the same
+    # logical file under two spellings -- a client that sends forward slashes writes
+    # the changed file as "a/b.py" while the unchanged copy carried over from the
+    # parent is still "a\b.py". Keying raw made those two separate entries, so a
+    # modified file compared as one "added" plus one "removed" and produced no diff.
     tree = {}
+    canonical_source = {}
     for commit_file in commit.files:
-        if commit_file.file_object:
-            tree[commit_file.file_path] = commit_file.file_object.content
+        if not commit_file.file_object:
+            continue
+        raw = commit_file.file_path
+        key = normalize(raw)
+        # On collision keep the canonically spelled row: it is the one the newer
+        # client wrote, so it carries the current content.
+        if key in tree and canonical_source.get(key) and raw != key:
+            continue
+        tree[key] = commit_file.file_object.content
+        canonical_source[key] = raw == key
     return tree
 
 def _get_ancestors_with_depth(db: Session, commit_id: Optional[str]) -> Dict[str, int]:

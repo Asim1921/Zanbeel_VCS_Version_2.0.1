@@ -441,13 +441,16 @@ class FoxNestAPI {
     })
   }
 
-  async getRepositoryFiles(repoId, branch = null) {
+  async getRepositoryFiles(repoId, branch = null, { includeContent = false } = {}) {
     const params = new URLSearchParams()
     if (branch) params.append('branch', branch)
-    // Listing view only needs metadata, not full file content
-    params.append('include_content', 'false')
+    // A listing only needs metadata. The browser asks for content so the whole
+    // tree is readable from one response instead of a request per file opened.
+    params.append('include_content', includeContent ? 'true' : 'false')
     const suffix = params.toString() ? `?${params.toString()}` : ''
-    return this.request(`/repository/${repoId}/files${suffix}`)
+    return this.request(`/repository/${repoId}/files${suffix}`, {
+      timeout: includeContent ? 120000 : undefined,
+    })
   }
 
   async getRepositoryFile(repoId, path, branch = null) {
@@ -462,6 +465,14 @@ class FoxNestAPI {
     if (followRenames) params.append('follow_renames', 'true')
     if (cursor) params.append('cursor', cursor)
     return this.request(`/repository/${repoId}/file-history?${params.toString()}`)
+  }
+
+  async blameFile(repoId, path, { commit = null, branch = null } = {}) {
+    const params = new URLSearchParams({ path })
+    if (commit) params.append('commit', commit)
+    else if (branch) params.append('branch', branch)
+    // Blame walks the whole history of a file, so it can outrun the 10s default.
+    return this.request(`/repository/${repoId}/blame?${params.toString()}`, { timeout: 60000 })
   }
 
   async compareCommits(repoId, fromCommit, toCommit, path = null) {

@@ -22,6 +22,7 @@ from app.services.commit_graph import _collect_reachable_commits, _get_commit_tr
 from app.services.diff import _build_side_by_side_diff
 from app.services.files import _build_files_payload_from_commit, _is_binary_or_large
 from app.services.merge import _try_decode_text
+from app.services.paths import normalize as normalize_path, variants_of_many as _both_separators
 
 
 router = APIRouter()
@@ -408,20 +409,21 @@ async def get_file_history(
             changed = False
             lineage_links = db.query(FileLineage).filter(
                 FileLineage.repository_id == repo_id,
-                FileLineage.old_path.in_(list(tracked_paths))
+                # Lineage rows carry whichever separator the push used.
+                FileLineage.old_path.in_(_both_separators(tracked_paths))
             ).all()
             for link in lineage_links:
-                if link.new_path not in tracked_paths:
-                    tracked_paths.add(link.new_path)
+                if normalize_path(link.new_path) not in tracked_paths:
+                    tracked_paths.add(normalize_path(link.new_path))
                     changed = True
 
             reverse_links = db.query(FileLineage).filter(
                 FileLineage.repository_id == repo_id,
-                FileLineage.new_path.in_(list(tracked_paths))
+                FileLineage.new_path.in_(_both_separators(tracked_paths))
             ).all()
             for link in reverse_links:
-                if link.old_path not in tracked_paths:
-                    tracked_paths.add(link.old_path)
+                if normalize_path(link.old_path) not in tracked_paths:
+                    tracked_paths.add(normalize_path(link.old_path))
                     changed = True
 
     tracked_variants = set()
@@ -537,8 +539,11 @@ async def compare_commits(
     to_tree = _get_commit_tree(db, to_commit)
     paths = set(from_tree.keys()) | set(to_tree.keys())
     if path:
-        normalized_path = path.replace('\\', '/')
-        paths = {normalized_path}
+        # Keep the tree's own spelling of the key. Substituting the caller's spelling
+        # meant the lookup missed entirely whenever the two differed, and the endpoint
+        # answered 200 with an empty file list instead of the diff.
+        wanted = normalize_path(path)
+        paths = {key for key in paths if normalize_path(key) == wanted}
 
     comparisons: List[Dict[str, Any]] = []
     for file_path in sorted(paths):
@@ -558,7 +563,8 @@ async def compare_commits(
         is_binary_or_large = _is_binary_or_large(previous_content) or _is_binary_or_large(current_content)
 
         file_diff: Dict[str, Any] = {
-            "file_path": file_path,
+            # Answer in the canonical spelling so a caller can match it against /files.
+            "file_path": normalize_path(file_path),
             "status": status,
             "is_binary": is_binary_or_large,
             "previous": {
@@ -571,11 +577,15 @@ async def compare_commits(
             }
         }
 
-        if not is_binary_or_large and previous_text is not None and current_text is not None:
-            side_by_side = _build_side_by_side_diff(previous_text, current_text)
+        # A file that was added has no previous side, and one that was removed has no
+        # current side. Treating the missing side as empty gives the whole file as
+        # additions or deletions; requiring both sides sent every added and removed
+        # file down the binary path, where it reported no rows and no counts at all.
+        if not is_binary_or_large and (previous_text is not None or current_text is not None):
+            side_by_side = _build_side_by_side_diff(previous_text or "", current_text or "")
             file_diff["diff"] = side_by_side
-            file_diff["previous"]["content"] = previous_text
-            file_diff["current"]["content"] = current_text
+            file_diff["previous"]["content"] = previous_text or ""
+            file_diff["current"]["content"] = current_text or ""
         else:
             file_diff["diff"] = {
                 "rows": [],

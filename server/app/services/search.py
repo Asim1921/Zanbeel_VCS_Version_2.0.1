@@ -23,6 +23,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from database.models import Branch, Commit, CommitFile, FileObject, Repository, User
+from app.services.paths import normalize as normalize_path
 
 # Guards. Code search reads real bytes off disk, so every dimension is bounded:
 # a pathological query must degrade to "fewer results", never to a hung request.
@@ -281,7 +282,7 @@ def search_code(
         .all()
     )
 
-    path_needle = (path_filter or "").strip().lower()
+    path_needle = normalize_path(path_filter or "").strip().lower()
     results: List[Dict[str, Any]] = []
     scanned = skipped = total_matches = 0
     truncated = False
@@ -294,7 +295,7 @@ def search_code(
             truncated = True
             break
 
-        path = commit_file.file_path or ""
+        path = normalize_path(commit_file.file_path or "")
         if path_needle and path_needle not in path.lower():
             continue
 

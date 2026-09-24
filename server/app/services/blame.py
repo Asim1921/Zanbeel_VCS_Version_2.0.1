@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from database.models import Commit, CommitFile, FileLineage, FileObject
 
 from app.services.merge import _try_decode_text
+from app.services.paths import normalize as normalize_path, variants as path_variants
 
 #: Blame is O(history x file size); refuse absurd inputs rather than stalling a worker.
 MAX_BLAME_LINES = 50_000
@@ -37,7 +38,12 @@ def _file_bytes(db: Session, commit_id: Optional[str], path: str) -> Optional[by
     row = (
         db.query(FileObject)
         .join(CommitFile, CommitFile.file_hash == FileObject.hash)
-        .filter(CommitFile.commit_id == commit_id, CommitFile.file_path == path)
+        # Both spellings: history pushed from Windows stores backslashes, and the
+        # caller works in the forward-slash form every read endpoint hands out.
+        .filter(
+            CommitFile.commit_id == commit_id,
+            CommitFile.file_path.in_(path_variants(path)),
+        )
         .first()
     )
     return row.content if row else None
@@ -60,11 +66,11 @@ def _previous_path(db: Session, repo_id: str, commit_id: str, path: str) -> str:
         .filter(
             FileLineage.repository_id == repo_id,
             FileLineage.commit_id == commit_id,
-            FileLineage.new_path == path,
+            FileLineage.new_path.in_(path_variants(path)),
         )
         .first()
     )
-    return lineage.old_path if lineage else path
+    return normalize_path(lineage.old_path) if lineage else path
 
 
 def _first_parent(db: Session, commit_id: str) -> Optional[str]:

@@ -3,6 +3,7 @@ import Layout from './components/layout/Layout'
 import Dashboard from './pages/Dashboard'
 import UsersManagement from './pages/UsersManagement'
 import Repositories from './pages/Repositories'
+import RepositoryDetail from './pages/RepositoryDetail'
 import Archive from './pages/Archive'
 import PendingApprovals from './pages/PendingApprovals'
 import PendingRepositories from './pages/PendingRepositories'
@@ -19,6 +20,9 @@ import { clearSessionUser, getSessionToken, setSessionUser } from './utils/sessi
 
 function App() {
   const [activeTab, setActiveTab] = useState('dashboard')
+  // The repository browser lives inside the Repositories tab rather than as a tab of
+  // its own, so Back returns to the list and no permission list needs a new entry.
+  const [browsingRepo, setBrowsingRepo] = useState(null)
   const [currentUser, setCurrentUser] = useState(null)
   const [authLoading, setAuthLoading] = useState(true)
 
@@ -74,6 +78,10 @@ function App() {
     if (!allowedTabs.includes(activeTab)) {
       setActiveTab('dashboard')
     }
+    // Leaving the tab closes the browser, so returning to it lands on the list.
+    if (activeTab !== 'repositories') {
+      setBrowsingRepo(null)
+    }
   }, [activeTab, isAdmin])
 
   const handleLogout = () => {
@@ -111,7 +119,11 @@ function App() {
         if (!isAdmin) return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
         return <UsersManagement />
       case 'repositories':
-        return <Repositories />
+        return browsingRepo ? (
+          <RepositoryDetail repo={browsingRepo} onBack={() => setBrowsingRepo(null)} />
+        ) : (
+          <Repositories onBrowseRepo={setBrowsingRepo} />
+        )
       case 'settings':
         return <Settings isAdmin={isAdmin} />
       case 'search':
