@@ -19,6 +19,7 @@ from database.database import SessionLocal
 
 from app.config import DOCS_DIR
 from app.services.files import _is_vendor_path
+from app.services.paths import normalize as normalize_path
 from app.services.signing import sign_commit
 import autodocs_v2
 import docs_generator
@@ -109,7 +110,7 @@ def _generate_repository_docs_sync(repo_id: str, lang_filter: Optional[str] = No
         latest_commit = commits_desc[0]
         source_commit = None
         for commit in commits_desc:
-            if any(not f.file_path.startswith("docs/") for f in commit.files):
+            if any(not normalize_path(f.file_path).startswith("docs/") for f in commit.files):
                 source_commit = commit
                 break
         if not source_commit:
@@ -123,7 +124,7 @@ def _generate_repository_docs_sync(repo_id: str, lang_filter: Optional[str] = No
         temp_dir.mkdir(parents=True, exist_ok=True)
 
         for commit_file in source_commit.files:
-            if commit_file.file_path.startswith("docs/"):
+            if normalize_path(commit_file.file_path).startswith("docs/"):
                 continue
             if _is_vendor_path(commit_file.file_path):
                 continue
@@ -178,7 +179,7 @@ def _generate_repository_docs_sync(repo_id: str, lang_filter: Optional[str] = No
         file_entries = []
 
         for commit_file in source_commit.files:
-            if commit_file.file_path.startswith("docs/"):
+            if normalize_path(commit_file.file_path).startswith("docs/"):
                 continue
             file_size = commit_file.file_size
             if file_size is None and commit_file.file_object:
@@ -312,7 +313,7 @@ def _generate_project_documentation_internal(repo_id: str, llm_model: str, db: S
     def _score_commit(commit_obj) -> tuple:
         non_doc_files = [
             f for f in commit_obj.files
-            if f.file_path and not f.file_path.startswith("docs/") and f.file_object
+            if f.file_path and not normalize_path(f.file_path).startswith("docs/") and f.file_object
         ]
         source_files = [f for f in non_doc_files if _is_source_extension(f.file_path)]
 
@@ -333,7 +334,7 @@ def _generate_project_documentation_internal(repo_id: str, llm_model: str, db: S
     source_commit = None
     candidate_commits = [
         c for c in commits_desc
-        if any(f.file_path and not f.file_path.startswith("docs/") for f in c.files)
+        if any(f.file_path and not normalize_path(f.file_path).startswith("docs/") for f in c.files)
     ]
     if candidate_commits:
         source_commit = max(candidate_commits, key=_score_commit)

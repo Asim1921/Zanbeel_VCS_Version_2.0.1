@@ -5,11 +5,15 @@ import Button from './ui/Button'
 import Badge from './ui/Badge'
 import { ModalOverlay } from './ui/Modal'
 import api from '../utils/api'
+import { normalizePath } from '../lib/fileTree'
 
 const FileVersioningModal = ({ repo, branch, filePath, onClose, onRollbackComplete }) => {
   const [versions, setVersions] = useState([])
   const [selectedVersion, setSelectedVersion] = useState(null)
   const [compareResult, setCompareResult] = useState(null)
+  // True when the two selected versions hold the same content, which the
+  // compare endpoint reports by returning no files at all.
+  const [identical, setIdentical] = useState(false)
   const [loading, setLoading] = useState(true)
   const [loadingCompare, setLoadingCompare] = useState(false)
   const [rollingBack, setRollingBack] = useState(false)
@@ -81,6 +85,12 @@ const FileVersioningModal = ({ repo, branch, filePath, onClose, onRollbackComple
     const loadCompare = async () => {
       if (!latestVersion || !selectedVersion) {
         setCompareResult(null)
+        setIdentical(false)
+        return
+      }
+      if (latestVersion.commit_id === selectedVersion.commit_id) {
+        setCompareResult(null)
+        setIdentical(true)
         return
       }
 
@@ -94,8 +104,15 @@ const FileVersioningModal = ({ repo, branch, filePath, onClose, onRollbackComple
         )
         if (!mounted) return
 
-        const fileEntry = (response.files || [])[0] || null
+        // An empty list means the two commits hold identical content for this file --
+        // including the case where the same commit is on both sides. Say so, rather
+        // than rendering two blank panels and leaving the reader to guess.
+        const entries = response.files || []
+        const wanted = normalizePath(filePath)
+        const fileEntry =
+          entries.find((f) => normalizePath(f.file_path) === wanted) || entries[0] || null
         setCompareResult(fileEntry)
+        setIdentical(!fileEntry)
       } catch (err) {
         if (mounted) setError(err.message || 'Failed to compare versions')
       } finally {
@@ -296,6 +313,15 @@ const FileVersioningModal = ({ repo, branch, filePath, onClose, onRollbackComple
                 ) : compareResult?.is_binary ? (
                   <div className="rounded-xl border border-warning-fg/20 bg-warning-bg p-4 text-warning-fg text-sm">
                     Binary or oversized file detected. Inline text diff is not available for this comparison.
+                  </div>
+                ) : identical || !compareRows.length ? (
+                  <div className="rounded-xl border border-border bg-cream-mid/70 p-6 text-center text-sm text-ink-soft">
+                    <p className="font-medium text-ink">No differences between these two versions.</p>
+                    <p className="mt-1 text-muted">
+                      {versions.length < 2
+                        ? 'This file has only one recorded version, so there is nothing to compare it against yet.'
+                        : 'The file content is byte-for-byte identical across the selected commits.'}
+                    </p>
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">

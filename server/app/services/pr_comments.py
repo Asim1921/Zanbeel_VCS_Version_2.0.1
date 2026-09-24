@@ -25,6 +25,8 @@ from database.models import (
     CommitFile, PullRequest, PullRequestComment, Repository, User,
 )
 
+from app.services.paths import variants as path_variants
+
 
 class CommentError(Exception):
     def __init__(self, message: str, status_code: int = 400):
@@ -47,7 +49,10 @@ def _file_hash_at(db: Session, commit_id: Optional[str], path: str) -> Optional[
         return None
     row = (
         db.query(CommitFile.file_hash)
-        .filter(CommitFile.commit_id == commit_id, CommitFile.file_path == path)
+        .filter(
+            CommitFile.commit_id == commit_id,
+            CommitFile.file_path.in_(path_variants(path)),
+        )
         .first()
     )
     return row[0] if row else None

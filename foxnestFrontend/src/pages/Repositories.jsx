@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
+import { useLocalStorage } from '../hooks/useCustomHooks'
 import { FiFolder, FiGitCommit, FiUsers, FiStar, FiEye, FiGitBranch, FiClock, FiArchive, FiEdit3, FiTrash2, FiWifi, FiWifiOff, FiLoader, FiCode, FiMessageSquare, FiSearch, FiX, FiCheck, FiFileText, FiRotateCcw, FiGitPullRequest, FiHash, FiSettings, FiChevronLeft, FiChevronRight } from 'react-icons/fi'
 import GlassCard from '../components/ui/GlassCard'
 import Badge from '../components/ui/Badge'
@@ -21,14 +22,16 @@ import { getSessionUser, getSessionToken } from '../utils/session'
 const ICON_ACTION = '!px-2'
 const REPOS_PAGE_SIZE = 5
 
-const Repositories = () => {
+const Repositories = ({ onBrowseRepo }) => {
   const sessionUser = getSessionUser()
   const currentUsername = sessionUser.username
   const hasAuthToken = !!getSessionToken()
   const isAdmin = sessionUser.isAdmin
 
   const [selectedRepo, setSelectedRepo] = useState(null)
-  const [viewMode, setViewMode] = useState('grid') // 'grid' or 'list'
+  // List is the default: it shows owner, commits, branches, size and updated-at at a
+  // glance, which is what people scan for. Remembered per browser so the choice sticks.
+  const [viewMode, setViewMode] = useLocalStorage('zanbeel_repo_view', 'list')
   const [currentPage, setCurrentPage] = useState(1)
   const [repositories, setRepositories] = useState([])
   const [loading, setLoading] = useState(true)
@@ -1254,6 +1257,17 @@ const Repositories = () => {
         {selectedRepo && (
           <>
           <div className="mb-5 flex flex-wrap gap-2">
+            {/* The primary action: the dialog summarises, the page is where you read code. */}
+            {typeof onBrowseRepo === 'function' && (
+              <button
+                type="button"
+                onClick={() => onBrowseRepo(selectedRepo)}
+                className="inline-flex items-center gap-2 rounded-full border border-accent/50 bg-accent/15 px-3.5 py-1.5 text-[13px] text-ink transition-colors hover:border-accent"
+              >
+                <FiCode className="h-3.5 w-3.5" />
+                Browse code
+              </button>
+            )}
             <button
               type="button"
               onClick={(e) => handleStarToggle(e, selectedRepo)}

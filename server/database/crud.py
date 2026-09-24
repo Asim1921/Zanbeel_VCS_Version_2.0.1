@@ -454,11 +454,21 @@ class CommitCRUD:
         return db.query(Commit).filter(Commit.id == commit_id).first()
     
     @staticmethod
-    def get_commits_by_repository(db: Session, repo_id: str, limit: int = 50) -> List[Commit]:
-        """Get commits for a repository"""
-        return db.query(Commit).filter(
+    def get_commits_by_repository(
+        db: Session, repo_id: str, limit: Optional[int] = 50
+    ) -> List[Commit]:
+        """Commits for a repository, newest first. `limit=None` returns all of them.
+
+        Callers that filter by branch or paginate afterwards must pass None: a SQL
+        limit applied here truncates the history *before* those steps, which silently
+        hid everything past the newest 50 commits no matter what the caller asked for.
+        """
+        query = db.query(Commit).filter(
             Commit.repository_id == repo_id
-        ).order_by(desc(Commit.created_at)).limit(limit).all()
+        ).order_by(desc(Commit.created_at))
+        if limit is not None:
+            query = query.limit(limit)
+        return query.all()
 
 class FileObjectCRUD:
     @staticmethod

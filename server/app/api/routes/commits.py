@@ -406,7 +406,9 @@ async def get_commits(
     _require_repository_checkout_access(db, current_user, repository, branch, "view commits")
     
     try:
-        commits = CommitCRUD.get_commits_by_repository(db, repo_id)
+        # No SQL limit: the branch filter and pagination below both need the full
+        # history to report an honest total.
+        commits = CommitCRUD.get_commits_by_repository(db, repo_id, limit=None)
         if branch:
             resolved_branch = _resolve_branch(db, repo_id, branch)
             reachable = set(_collect_reachable_commits(db, resolved_branch.head_commit_id))

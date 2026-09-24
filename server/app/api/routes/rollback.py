@@ -25,9 +25,20 @@ from app.services.commit_graph import _get_commit_tree, _is_ancestor
 from app.services.history_ops import HistoryOpError, cherry_pick, rebase, revert
 from app.services.merge import _tree_to_commit_payload
 from app.services.signing import sign_commit
+from app.services.paths import normalize as normalize_path
 
 
 router = APIRouter()
+
+
+def _resolve_tree_key(requested: str, *trees) -> str:
+    """The key these trees use for `requested`, whatever separator it was stored with."""
+    wanted = normalize_path(requested)
+    for tree in trees:
+        for key in tree:
+            if normalize_path(key) == wanted:
+                return key
+    return wanted
 
 
 @router.post("/api/repository/{repo_id}/rollback/file")
@@ -58,9 +69,11 @@ async def rollback_file(
     if not target_commit or target_commit.repository_id != repo_id:
         raise HTTPException(status_code=404, detail="Target commit not found in repository")
 
-    normalized_path = request.path.replace('\\', '/')
     head_tree = _get_commit_tree(db, head_commit_id)
     target_tree = _get_commit_tree(db, target_commit.id)
+    # The trees keep whichever separator was pushed, so resolve the requested
+    # path to the key those trees actually use before touching them.
+    normalized_path = _resolve_tree_key(request.path, head_tree, target_tree)
 
     if normalized_path not in head_tree and normalized_path not in target_tree:
         raise HTTPException(status_code=404, detail="File does not exist in source or target commit")

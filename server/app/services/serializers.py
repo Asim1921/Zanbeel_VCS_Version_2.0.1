@@ -10,6 +10,7 @@ from database.crud import RepositoryStarCRUD, contributor_count_for_repository
 from database.models import Branch, Commit, Repository, User
 
 from app.core.permissions import can_manage_repository, can_write_repository
+from app.services.paths import normalize as normalize_path
 
 
 def repository_to_dict(repo: Repository, db: Optional[Session] = None, actor: Optional[User] = None) -> Dict[str, Any]:
@@ -86,7 +87,7 @@ def commit_to_dict(commit: Commit, include_files: bool = False) -> Dict[str, Any
             if commit_file.file_object:
                 content_b64 = base64.b64encode(commit_file.file_object.content).decode()
                 files[commit_file.file_hash] = {
-                    "path": commit_file.file_path,
+                    "path": normalize_path(commit_file.file_path),
                     "content": content_b64,
                     "size": commit_file.file_size,
                     "mime_type": getattr(commit_file.file_object, "mime_type", None)
@@ -95,7 +96,7 @@ def commit_to_dict(commit: Commit, include_files: bool = False) -> Dict[str, Any
     else:
         commit_dict["files"] = [
             {
-                "path": cf.file_path,
+                "path": normalize_path(cf.file_path),
                 "hash": cf.file_hash,
                 "size": cf.file_size
             }
