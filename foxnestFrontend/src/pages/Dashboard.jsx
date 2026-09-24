@@ -1,4 +1,4 @@
-import { FiGitCommit, FiUsers, FiFolder, FiArchive, FiTrendingUp, FiActivity, FiWifi, FiWifiOff, FiArrowUpRight } from 'react-icons/fi'
+import { FiGitCommit, FiUsers, FiFolder, FiArchive, FiTrendingUp, FiActivity, FiWifiOff, FiArrowUpRight } from 'react-icons/fi'
 import GlassCard from '../components/ui/GlassCard'
 import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'
@@ -8,7 +8,6 @@ import StatTile from '../components/aceternity/StatTile'
 import ActivityFeed from '../components/ActivityFeed'
 import FadeContent from '../components/react-bits/FadeContent'
 import { useActivities, useDashboardStats, useRepositories, useServerHealth } from '../hooks/useApi'
-import { API_SERVER_URL } from '../config'
 import { getSessionUser } from '../utils/session'
 import React, { useMemo } from 'react'
 import { cn } from '../lib/utils'
@@ -158,48 +157,32 @@ const Dashboard = ({ setActiveTab, isAdmin: isAdminProp }) => {
           <div className="mb-4 flex items-center justify-between">
             <h3 className="flex items-center text-lg font-semibold tracking-tight text-ink">
               <FiActivity className="mr-2 h-5 w-5 text-muted" />
-              Server status
+              Recent activity
             </h3>
-            <Badge variant={serverHealth?.status === 'connected' ? 'success' : 'danger'}>
-              {serverHealth?.status === 'connected' ? 'Online' : 'Offline'}
-            </Badge>
-          </div>
-          <div className="space-y-4">
-            <div className="flex items-center gap-3 rounded-xl border border-border bg-white/[0.03] p-3">
-              {serverHealth?.status === 'connected' ? (
-                <FiWifi className="h-8 w-8 text-success-fg" />
-              ) : (
-                <FiWifiOff className="h-8 w-8 text-danger-fg" />
-              )}
-              <div className="flex-1">
-                <p className="text-sm text-ink">
-                  {serverHealth?.status === 'connected'
-                    ? 'Connected to Zanbeel server'
-                    : 'Unable to connect to server'}
-                </p>
-                <p className="mt-1 text-xs text-muted">{serverHealth?.message}</p>
-              </div>
-            </div>
-            {serverHealth?.status !== 'connected' && (
-              <div className="rounded-xl border border-warning-fg/25 bg-warning-fg/10 p-3 text-sm text-warning-fg">
-                <strong>Note:</strong> Ensure the Zanbeel server is running on {API_SERVER_URL}
-              </div>
+            {/* The activity tab is admin-only; App bounces everyone else back to
+                the dashboard, so offering the link to a developer is a dead end. */}
+            {isPrivileged && activities.length > 0 && (
+              <button
+                type="button"
+                onClick={() => goTo('activity')}
+                className="text-xs font-medium text-ink-soft underline-offset-2 hover:text-ink hover:underline"
+              >
+                View all
+              </button>
             )}
-
-            {/* This panel used to end here, leaving half a card of empty space.
-                The activity feed has existed server-side all along with no screen
-                calling it, so it belongs here. */}
-            <div className="border-t border-border pt-4">
-              <h4 className="mb-3 font-mono text-[10.5px] uppercase tracking-[0.16em] text-muted">
-                Recent activity
-              </h4>
-              <ActivityFeed
-                activities={activities}
-                loading={activityLoading}
-                emptyHint="No activity recorded yet."
-              />
-            </div>
           </div>
+          {/* The endpoint returns `user` and `repository`; ActivityFeed reads
+              `username` and `repository_name`, so without this the dashboard feed
+              rendered every row with no author and no repository. */}
+          <ActivityFeed
+            activities={activities.map((a) => ({
+              ...a,
+              username: a.user || a.username,
+              repository_name: a.repository || a.repository_name,
+            }))}
+            loading={activityLoading}
+            emptyHint="No activity recorded yet."
+          />
         </SpotlightCard>
 
         <SpotlightCard className="p-6">
