@@ -24,7 +24,7 @@ let openModals = 0
  * dialog opened before this one. `onClose` is read from a ref so a parent
  * re-render does not tear this dialog down and hand its slot to a child.
  */
-export function useModalStack(open, onClose) {
+function useModalStack(open, onClose) {
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
   const [depth, setDepth] = useState(0)

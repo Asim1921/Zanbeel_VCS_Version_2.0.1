@@ -26,6 +26,7 @@ from database.models import (
 
 from app.services.commit_graph import _find_merge_base, _get_commit_tree
 from app.services.merge import _merge_trees, _merge_text, _try_decode_text
+from app.services import refs
 from app.services.signing import sign_commit
 
 
@@ -289,7 +290,11 @@ def resolve(
         entries,
     )
 
-    BranchCRUD.update_branch_head(db, session.repository_id, session.target_branch, commit.id)
+    refs.update_reference_by_id(
+        db, repository_id=session.repository_id, actor_username=actor.username,
+        branch_name=session.target_branch, new_commit_id=commit.id,
+        operation=refs.OP_MERGE,
+    )
     sign_commit(db, commit, actor.username, actor.id)
 
     pr = db.query(PullRequest).filter(PullRequest.id == session.pull_request_id).first()

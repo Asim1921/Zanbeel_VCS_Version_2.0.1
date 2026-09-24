@@ -1,4 +1,4 @@
-import { FiGitCommit, FiUsers, FiFolder, FiArchive, FiTrendingUp, FiActivity, FiWifiOff, FiArrowUpRight } from 'react-icons/fi'
+import { FiGitCommit, FiUsers, FiFolder, FiArchive, FiTrendingUp, FiActivity, FiWifiOff } from 'react-icons/fi'
 import GlassCard from '../components/ui/GlassCard'
 import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'

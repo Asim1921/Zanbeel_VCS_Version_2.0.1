@@ -303,6 +303,22 @@ class FoxClient:
                 )
         return resp
 
+
+    def _authed_put(self, url, json=None, params=None, timeout=30):
+        """PUT with auth header; on 401, prompt login once and retry."""
+        if not self.ensure_authenticated():
+            resp = requests.Response()
+            resp.status_code = 401
+            resp._content = b'{"detail":"Authentication required"}'
+            resp.headers["Content-Type"] = "application/json"
+            return resp
+        headers = self.get_auth_headers()
+        resp = requests.put(url, params=params, json=json, headers=headers, timeout=timeout)
+        if resp.status_code == 401 and self.prompt_login_and_retry():
+            resp = requests.put(url, params=params, json=json,
+                                headers=self.get_auth_headers(), timeout=timeout)
+        return resp
+
     def _authed_get(self, url, params=None, timeout=30):
         """GET with auth header; on 401, prompt login once and retry."""
         if not self.ensure_authenticated():
@@ -2833,6 +2849,21 @@ class FoxClient:
         print(f"Resolve failed: {out}")
         return False
     
+    @staticmethod
+    def staging_key(filepath):
+        """Filename for a staging entry, unique per path.
+
+        Only the identity matters here -- commit reads the real path out of the
+        JSON body -- so the name just has to be a legal filename that two
+        different paths can never share. The readable tail is for debugging; the
+        digest is what actually guarantees uniqueness once sanitising and length
+        capping have thrown information away.
+        """
+        rel = str(filepath).replace(chr(92), "/").strip("/")
+        digest = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:12]
+        safe = "".join(c if (c.isalnum() or c in "._-") else "_" for c in rel)
+        return f"{safe[-80:]}.{digest}.json"
+
     def add(self, files, add_all=False):
         """Add files to staging area"""
         if not self.check_repository("add"):
@@ -2936,8 +2967,11 @@ class FoxClient:
                     # Update delta cache for future delta compression
                     self.update_delta_cache(str(filepath), file_hash)
                     
-                    # Add to staging
-                    staging_file = self.staging_dir / filepath.name
+                    # Add to staging, keyed by full path rather than basename: this
+                    # repository holds four files called fox.py and three called
+                    # docs_generator.py, and a basename key silently collapses them
+                    # into one staging entry, dropping the rest from the commit.
+                    staging_file = self.staging_dir / self.staging_key(filepath)
                     with open(staging_file, "w") as f:
                         json.dump({
                             # Forward slashes on every platform: the server stores
@@ -4315,6 +4349,171 @@ class FoxClient:
         print("")
         return not data.get("invalid")
 
+
+    # ---- branch protection ----
+
+    MODE_LABELS = {
+        "open": "open, ordinary development",
+        "protected": "protected, no direct pushes or force updates",
+        "frozen": "frozen, nothing may change this reference",
+        "archived": "archived, frozen and hidden from day-to-day listings",
+    }
+
+    def branch_policy_show(self, branch=None, as_json=False):
+        """Effective protection for one branch, or for every branch."""
+        server_url, repo_id = self._server_repo("branch policy")
+        if not repo_id:
+            return False
+        try:
+            resp = self._authed_get(
+                f"{server_url}/api/repository/{repo_id}/branch-protection", timeout=60
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {e}")
+            return False
+        data = self._server_payload(resp, "branch policy")
+        if data is None:
+            return False
+        if as_json:
+            print(json.dumps(data, indent=2))
+            return True
+
+        branches = data.get("branches") or {}
+        if branch:
+            branches = {k: v for k, v in branches.items() if k == branch}
+            if not branches:
+                print(f"No branch named {branch!r} in this repository.")
+                return False
+
+        print("")
+        for name in sorted(branches):
+            info = branches[name]
+            mode = info.get("mode", "open")
+            print(f"  {name}")
+            print(f"    mode: {mode} -- {self.MODE_LABELS.get(mode, '')}")
+            denied = [op for op, ok in (info.get("permits") or {}).items() if not ok]
+            if denied:
+                print(f"    denied: {', '.join(sorted(denied))}")
+            if info.get("matched_patterns"):
+                print(f"    from:   {', '.join(info['matched_patterns'])}")
+        policies = data.get("policies") or []
+        if policies and not branch:
+            print("\n  Stored rules:")
+            for p in policies:
+                print(f"    {p['branch_pattern']:<24} {p['mode']:<10} v{p['policy_version']}")
+        print("")
+        return True
+
+    def branch_set_mode(self, branch, mode):
+        """Set an exact-name protection rule for one branch."""
+        server_url, repo_id = self._server_repo(f"branch {mode}")
+        if not repo_id:
+            return False
+        try:
+            resp = self._authed_put(
+                f"{server_url}/api/repository/{repo_id}/branch-protection",
+                json={"branch_pattern": branch, "mode": mode},
+                timeout=60,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {e}")
+            return False
+        data = self._server_payload(resp, f"branch {mode}")
+        if data is None:
+            return False
+        policy = data.get("policy", {})
+        print(f"'{branch}' is now {policy.get('mode')} (policy v{policy.get('policy_version')}).")
+        print(f"  {self.MODE_LABELS.get(policy.get('mode'), '')}")
+        return True
+
+    def branch_unlock(self, branch, reason, operations=None, minutes=30):
+        """Request a scoped, expiring, single-use exception for a protected branch."""
+        server_url, repo_id = self._server_repo("branch unlock")
+        if not repo_id:
+            return False
+        try:
+            resp = self._authed_post(
+                f"{server_url}/api/repository/{repo_id}/branches/{branch}/unlock-requests",
+                json={
+                    "reason": reason,
+                    "operations": operations or ["update"],
+                    "expires_in_minutes": minutes,
+                },
+                timeout=60,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {e}")
+            return False
+        data = self._server_payload(resp, "branch unlock")
+        if data is None:
+            return False
+        grant = data.get("unlock", {})
+        print(f"Unlock granted for '{grant.get('branch')}'.")
+        print(f"  operations: {', '.join(grant.get('operations') or [])}")
+        print(f"  expires:    {grant.get('expires_at')}")
+        print("  single use: the next matching change spends it.")
+        return True
+
+    def release_create_immutable(self, name, commit_id, notes=None):
+        """Bind a name to one commit, permanently."""
+        server_url, repo_id = self._server_repo("release create")
+        if not repo_id:
+            return False
+        try:
+            resp = self._authed_post(
+                f"{server_url}/api/repository/{repo_id}/releases/immutable",
+                json={"name": name, "commit_id": commit_id, "notes": notes or ""},
+                timeout=60,
+            )
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {e}")
+            return False
+        data = self._server_payload(resp, "release create")
+        if data is None:
+            return False
+        release = data.get("release", {})
+        print(f"Release '{release.get('name')}' created at {str(release.get('commit_id'))[:12]}.")
+        print(f"  signature: {str(release.get('signature'))[:32]}...")
+        print("  This name can never point anywhere else.")
+        return True
+
+    def audit_branch(self, branch=None, limit=50, as_json=False):
+        """The reference audit trail, newest first."""
+        server_url, repo_id = self._server_repo("audit")
+        if not repo_id:
+            return False
+        params = {"limit": str(limit)}
+        if branch:
+            params["reference"] = branch
+        url = f"{server_url}/api/repository/{repo_id}/audit/references?{urllib.parse.urlencode(params)}"
+        try:
+            resp = self._authed_get(url, timeout=60)
+        except requests.exceptions.RequestException as e:
+            print(f"Request failed: {e}")
+            return False
+        data = self._server_payload(resp, "audit")
+        if data is None:
+            return False
+        if as_json:
+            print(json.dumps(data, indent=2))
+            return True
+        events = data.get("events") or []
+        print("")
+        print(f"  {len(events)} event(s)   chain intact: {data.get('chain_intact')}")
+        print("")
+        for e in events:
+            verdict = "OK " if e.get("decision") == "allowed" else "DENY"
+            when = (e.get("occurred_at") or "")[:19].replace("T", " ")
+            line = f"  {verdict}  {when}  {e.get('reference'):<18} {e.get('operation') or '-':<13}"
+            if e.get("error_code"):
+                line += f" {e['error_code']}"
+            print(line)
+            if e.get("old_commit_id") or e.get("new_commit_id"):
+                print(f"           {str(e.get('old_commit_id'))[:12]} -> {str(e.get('new_commit_id'))[:12]}"
+                      f"   gen {e.get('old_generation')} -> {e.get('new_generation')}   by {e.get('actor')}")
+        print("")
+        return True
+
     def gc(self):
         """
         Garbage collection - optimize repository by packing loose objects
@@ -4386,6 +4585,8 @@ def print_extended_help():
     print("  revert <commit>         Create a commit that undoes an earlier one")
     print("  rebase <onto>           Replay this branch's commits on top of another branch")
     print("  verify [commit]         Verify commit signatures recorded by the server")
+    print("  protect show|frozen|... Show or change branch protection")
+    print("  audit [branch]          Reference audit trail (who changed what, and refusals)")
     print("  tag                     Manage tags")
     print("  release                 Manage releases (semantic versions)")
     print("  pr                      Manage pull requests")
@@ -4805,6 +5006,30 @@ def main():
     verify_parser.add_argument("--json", dest="verify_json", action="store_true",
                                help="Print raw JSON")
 
+    # Branch protection
+    protect_parser = subparsers.add_parser(
+        "protect", help="Show or change branch protection"
+    )
+    protect_sub = protect_parser.add_subparsers(dest="protect_command")
+    p_show = protect_sub.add_parser("show", help="Show effective protection")
+    p_show.add_argument("branch", nargs="?", help="Branch name (default: all)")
+    p_show.add_argument("--json", dest="protect_json", action="store_true")
+    for _mode in ("open", "protected", "frozen", "archived"):
+        _p = protect_sub.add_parser(_mode, help=f"Set a branch to {_mode}")
+        _p.add_argument("branch", help="Branch name")
+    p_unlock = protect_sub.add_parser("unlock", help="Request a scoped, expiring unlock")
+    p_unlock.add_argument("branch", help="Branch name")
+    p_unlock.add_argument("--reason", required=True, help="Why this exception is needed")
+    p_unlock.add_argument("--allow", action="append", dest="unlock_ops",
+                          help="Operation to permit (repeatable); default: update")
+    p_unlock.add_argument("--expires-in", dest="unlock_minutes", type=int, default=30,
+                          help="Minutes before the grant expires (default: 30)")
+
+    audit_parser = subparsers.add_parser("audit", help="Reference audit trail")
+    audit_parser.add_argument("branch", nargs="?", help="Limit to one branch")
+    audit_parser.add_argument("--limit", type=int, default=50)
+    audit_parser.add_argument("--json", dest="audit_json", action="store_true")
+
     # Tag command
     tag_parser = subparsers.add_parser("tag", help="Manage tags")
     tag_subparsers = tag_parser.add_subparsers(dest="tag_command", help="Tag commands")
@@ -4821,6 +5046,10 @@ def main():
     release_subparsers = release_parser.add_subparsers(dest="release_command", help="Release commands")
     release_subparsers.add_parser("list", help="List releases")
     release_create = release_subparsers.add_parser("create", help="Create a release")
+    release_create.add_argument("--immutable", action="store_true",
+                                help="Create a permanent release reference that can never move")
+    release_create.add_argument("--commit", dest="release_commit",
+                                help="Commit id the release names (immutable releases)")
     release_create.add_argument("version", help="Semantic version (e.g., 1.2.3)")
     release_create.add_argument("--tag", help="Tag name (optional)")
     release_create.add_argument("--title", help="Release title")
@@ -5076,6 +5305,29 @@ def main():
             branch=getattr(args, "branch", None),
             local_only=getattr(args, "delete_commit_local_only", False),
             expected_head=getattr(args, "delete_commit_expected_head", None),
+        )
+
+    elif args.command == "protect":
+        cmd = getattr(args, "protect_command", None)
+        if cmd in ("open", "protected", "frozen", "archived"):
+            fox.branch_set_mode(args.branch, cmd)
+        elif cmd == "unlock":
+            fox.branch_unlock(
+                args.branch, args.reason,
+                operations=getattr(args, "unlock_ops", None),
+                minutes=getattr(args, "unlock_minutes", 30),
+            )
+        else:
+            fox.branch_policy_show(
+                getattr(args, "branch", None),
+                as_json=getattr(args, "protect_json", False),
+            )
+
+    elif args.command == "audit":
+        fox.audit_branch(
+            getattr(args, "branch", None),
+            limit=getattr(args, "limit", 50),
+            as_json=getattr(args, "audit_json", False),
         )
 
     elif args.command == "rollback":

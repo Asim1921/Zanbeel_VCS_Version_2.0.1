@@ -127,7 +127,7 @@ function App() {
       case 'settings':
         return <Settings isAdmin={isAdmin} />
       case 'search':
-        return <Search setActiveTab={setActiveTab} />
+        return <Search />
       case 'activity':
         if (!isAdmin) return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
         return <Activity />

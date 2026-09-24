@@ -8,7 +8,6 @@ import { getSessionToken } from '../utils/session'
 
 const CodeEditor = ({ repoId, repoName, onClose }) => {
   const [files, setFiles] = useState({})
-  const [folders, setFolders] = useState([])
   const [selectedFile, setSelectedFile] = useState(null)
   const [expandedFolders, setExpandedFolders] = useState(new Set())
   const [loading, setLoading] = useState(true)
@@ -48,7 +47,7 @@ const CodeEditor = ({ repoId, repoName, onClose }) => {
 
     try {
       return JSON.parse(responseText)
-    } catch (parseError) {
+    } catch {
       throw new Error('Invalid JSON response from server')
     }
   }
@@ -62,8 +61,7 @@ const CodeEditor = ({ repoId, repoName, onClose }) => {
 
       if (data.success) {
         setFiles(data.files || {})
-        setFolders(data.folders || [])
-        
+
         // Auto-expand root folders
         const rootFolders = (data.folders || []).filter(f => !f.includes('/') || f.split('/').length === 1)
         setExpandedFolders(new Set(rootFolders))

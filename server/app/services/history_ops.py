@@ -31,6 +31,7 @@ from database.models import Commit
 
 from app.services.commit_graph import _get_commit_tree
 from app.services.merge import _merge_trees
+from app.services import refs
 from app.services.signing import sign_commit
 
 
@@ -162,7 +163,10 @@ def _write_commit(
     }
 
     commit = CommitCRUD.create_commit_from_file_hashes(db, commit_data, entries)
-    BranchCRUD.update_branch_head(db, repo_id, branch.name, commit.id)
+    refs.update_reference_by_id(
+        db, repository_id=repo_id, actor_username=author_username,
+        branch_name=branch.name, new_commit_id=commit.id,
+    )
     # Attest it like a pushed commit, otherwise every cherry-pick, revert and rebase
     # leaves a permanently unsigned gap in the history verification covers. The user
     # running the operation is both the author and the pusher here.
@@ -358,7 +362,13 @@ def rebase(
         parent_id = written.id
         new_ids.append(written.id)
 
-    BranchCRUD.update_branch_head(db, repo_id, branch.name, parent_id)
+    # A rebase replaces the tip with commits that are not its descendants, so the
+    # reference service classifies this as a force update and a protected branch
+    # refuses it -- which is the point.
+    refs.update_reference_by_id(
+        db, repository_id=repo_id, actor_username=author_username,
+        branch_name=branch.name, new_commit_id=parent_id,
+    )
     return {
         "status": "rebased",
         "branch": branch_name,

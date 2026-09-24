@@ -88,7 +88,7 @@ const CommitHistoryModal = ({ repo, branch, onClose, onRollbackComplete }) => {
     if (!timestamp) return 'Unknown'
     try {
       return api.formatDate(timestamp)
-    } catch (err) {
+    } catch {
       return 'Unknown'
     }
   }

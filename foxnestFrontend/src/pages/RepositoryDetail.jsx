@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   FiArrowLeft, FiCode, FiGitCommit, FiUsers, FiFileText,
-  FiLoader, FiAlertCircle, FiGitBranch,
+  FiLoader, FiAlertCircle, FiGitBranch, FiShield,
 } from 'react-icons/fi'
 import api from '../utils/api'
 import FileTree from '../components/FileTree'
 import { ancestorsOf, normalizePath } from '../lib/fileTree'
 import CodeView from '../components/CodeView'
+import BranchProtectionPanel from '../components/BranchProtectionPanel'
 import { authorClass, blameSummary } from '../lib/blame'
 import GlassCard from '../components/ui/GlassCard'
 import Badge from '../components/ui/Badge'
@@ -25,6 +26,7 @@ const TABS = [
   { id: 'code', label: 'Code', icon: FiCode },
   { id: 'commits', label: 'Commits', icon: FiGitCommit },
   { id: 'contributors', label: 'Contributors', icon: FiUsers },
+  { id: 'protection', label: 'Protection', icon: FiShield },
 ]
 
 function Breadcrumbs({ path, onNavigate }) {
@@ -434,6 +436,8 @@ export default function RepositoryDetail({ repo, onBack }) {
           )}
         </GlassCard>
       )}
+
+      {tab === 'protection' && <BranchProtectionPanel repo={repo} />}
 
       {tab === 'contributors' && (
         <GlassCard className="p-4" hover={false}>

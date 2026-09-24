@@ -28,6 +28,7 @@ from app.services.notifications import (
 )
 from app.services.push_policy import screen_commit_files
 from app.services.serializers import commit_to_dict
+from app.services import refs
 from app.services.signing import sign_commit, verify_commit, verify_repository
 from app.services import webhooks as hook_service
 from app.services import server_hooks
@@ -295,11 +296,11 @@ async def push_commit(
             sign_commit(db, commit, pusher_username, current_user.id)
 
             # Update branch head (create if new branch is pushed)
-            branch = current_branch or BranchCRUD.get_branch(db, repo_id, branch_name)
-            if not branch:
-                BranchCRUD.create_branch(db, repo_id, branch_name, head_commit_id=commit.id)
-            else:
-                BranchCRUD.update_branch_head(db, repo_id, branch_name, commit.id)
+            refs.update_reference(
+                db, repository=repository, actor=current_user,
+                branch_name=branch_name, new_commit_id=commit.id,
+                create_if_missing=True,
+            )
             
             # Create activity
             ActivityCRUD.create_activity(
@@ -340,6 +341,11 @@ async def push_commit(
     
     except HTTPException:
         # Re-raise HTTP exceptions as-is
+        raise
+    except refs.ReferenceError:
+        # A refused reference change is a decision, not a fault. Letting it fall into
+        # the handler below reported branch protection as a 500 and lost the error code
+        # the client needs to tell "denied" from "server broke".
         raise
     except Exception as e:
         # Log and raise other exceptions

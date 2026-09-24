@@ -366,6 +366,10 @@ class Branch(Base):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
     is_default = Column(Boolean, default=False)
+    # Monotonic counter for compare-and-swap. A caller that read generation N and asks to
+    # update at N will fail if anyone else moved the branch in between, so two concurrent
+    # updates cannot silently lose one another.
+    generation = Column(Integer, nullable=False, default=0)
     
     # Relationships
     repository = relationship("Repository")
@@ -1125,3 +1129,125 @@ class PasswordResetOTP(Base):
     created_at = Column(DateTime, server_default=func.now(), index=True)
 
     user = relationship("User", foreign_keys=[user_id])
+
+
+class BranchProtectionPolicy(Base):
+    """Protection rules for a branch name or pattern.
+
+    Several policies can match one branch; they combine most-restrictively, so a
+    repository-level rule can never weaken a more specific one. `policy_version`
+    increments on every edit and is quoted in approvals and audit events, which is what
+    makes an approval go stale when the rules change underneath it.
+    """
+
+    __tablename__ = "branch_protection_policies"
+
+    id = Column(Integer, primary_key=True, index=True)
+    repository_id = Column(String(16), ForeignKey("repositories.id"), nullable=False, index=True)
+    # Exact branch name, or an fnmatch pattern such as "releases/*".
+    branch_pattern = Column(String(200), nullable=False)
+    mode = Column(String(20), nullable=False, default="open")
+    policy_version = Column(Integer, nullable=False, default=1)
+    rules_json = Column(Text, nullable=True)
+
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    repository = relationship("Repository")
+
+    __table_args__ = (
+        Index("ix_branch_policies_repo_pattern", "repository_id", "branch_pattern", unique=True),
+    )
+
+
+class BranchUnlock(Base):
+    """A scoped, expiring permission to perform one operation on one protected branch.
+
+    Protection binds administrators too, so without this a frozen branch could never be
+    corrected. Kept as a separate grant rather than an edit to the policy: the policy
+    stays the record of intent, and the grant is the audited exception to it.
+    """
+
+    __tablename__ = "branch_unlocks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    repository_id = Column(String(16), ForeignKey("repositories.id"), nullable=False, index=True)
+    branch_name = Column(String(200), nullable=False, index=True)
+    # Comma-separated operations this grant covers, e.g. "update,delete".
+    operations = Column(String(200), nullable=False)
+    reason = Column(Text, nullable=False)
+
+    requested_by_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    # Single use: set the moment the grant is spent.
+    consumed_at = Column(DateTime, nullable=True)
+    consumed_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), index=True)
+
+    requested_by = relationship("User", foreign_keys=[requested_by_id])
+
+
+class ImmutableRelease(Base):
+    """A permanent name for one exact commit.
+
+    There is deliberately no update or delete path anywhere in the codebase: the absence
+    of one is the guarantee. A mistaken release is corrected by publishing a new version,
+    never by moving an existing one.
+    """
+
+    __tablename__ = "immutable_releases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    repository_id = Column(String(16), ForeignKey("repositories.id"), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    commit_id = Column(String(40), ForeignKey("commits.id"), nullable=False)
+    manifest_json = Column(Text, nullable=True)
+    signature = Column(String(128), nullable=True)
+
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    repository = relationship("Repository")
+
+    __table_args__ = (
+        Index("ix_immutable_releases_repo_name", "repository_id", "name", unique=True),
+    )
+
+
+class RefAuditEvent(Base):
+    """Append-only record of every reference decision, allowed or denied.
+
+    Separate from `activities`, which carries no before/after state and no tamper
+    evidence. Events are hash-chained per repository so a deletion or edit in the middle
+    of the chain is detectable.
+    """
+
+    __tablename__ = "ref_audit_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    repository_id = Column(String(16), ForeignKey("repositories.id"), nullable=False, index=True)
+    event_type = Column(String(60), nullable=False)
+    reference = Column(String(200), nullable=False, index=True)
+    operation = Column(String(30), nullable=True)
+
+    actor_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    actor_username = Column(String(50), nullable=True)
+
+    old_commit_id = Column(String(40), nullable=True)
+    new_commit_id = Column(String(40), nullable=True)
+    old_generation = Column(Integer, nullable=True)
+    new_generation = Column(Integer, nullable=True)
+
+    policy_id = Column(Integer, nullable=True)
+    policy_version = Column(Integer, nullable=True)
+    mode = Column(String(20), nullable=True)
+
+    decision = Column(String(20), nullable=False)  # allowed | denied
+    error_code = Column(String(40), nullable=True)
+    reason = Column(Text, nullable=True)
+
+    occurred_at = Column(DateTime, server_default=func.now(), index=True)
+    previous_event_hash = Column(String(64), nullable=True)
+    event_hash = Column(String(64), nullable=False)

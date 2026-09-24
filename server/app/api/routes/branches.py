@@ -18,7 +18,7 @@ from app.schemas import (
     BranchCreateRequest, BranchHeadUpdateRequest, BranchMergeRequest,
     BranchPolicyRequest, BranchPublishRequest, BranchRenameRequest, CopyFilesRequest,
 )
-from app.services import branch_ops
+from app.services import branch_ops, refs
 from app.services.branches import _get_default_branch, _normalize_branch_name
 
 
@@ -98,6 +98,10 @@ async def create_branch(
     if head_commit_id and not CommitCRUD.get_commit(db, head_commit_id):
         raise HTTPException(status_code=400, detail="Invalid from_commit")
 
+    refs.check_reference_operation(
+        db, repository=repository, actor=current_user, branch_name=branch_name,
+        operation=refs.OP_CREATE, new_commit_id=head_commit_id,
+    )
     branch = BranchCRUD.create_branch(db, repo_id, branch_name, head_commit_id=head_commit_id)
     return {
         "success": True,
@@ -129,7 +133,10 @@ async def rename_branch(
     if BranchCRUD.get_branch(db, repo_id, new_name):
         raise HTTPException(status_code=400, detail="Target branch name already exists")
 
-    branch = BranchCRUD.rename_branch(db, repo_id, old_name, new_name)
+    branch = refs.rename_reference(
+        db, repository=repository, actor=current_user,
+        old_name=old_name, new_name=new_name,
+    )
     return {"success": True, "branch": {"name": branch.name, "head_commit_id": branch.head_commit_id}}
 
 @router.put("/api/repository/{repo_id}/branches/{branch_name}/head")
@@ -151,8 +158,22 @@ async def update_branch_head(
     if not CommitCRUD.get_commit(db, request.head_commit_id):
         raise HTTPException(status_code=400, detail="Commit not found")
 
-    branch = BranchCRUD.update_branch_head(db, repo_id, _normalize_branch_name(branch_name), request.head_commit_id)
-    return {"success": True, "branch": {"name": branch.name, "head_commit_id": branch.head_commit_id}}
+    # Straight through the reference service: this endpoint could previously move any
+    # branch to any commit on a bare "manage" check, protection notwithstanding.
+    branch = refs.update_reference(
+        db, repository=repository, actor=current_user,
+        branch_name=_normalize_branch_name(branch_name),
+        new_commit_id=request.head_commit_id,
+        expected_commit_id=getattr(request, "expected_head_commit_id", None),
+    )
+    return {
+        "success": True,
+        "branch": {
+            "name": branch.name,
+            "head_commit_id": branch.head_commit_id,
+            "generation": branch.generation,
+        },
+    }
 
 @router.put("/api/repository/{repo_id}/branches/{branch_name}/default")
 async def set_default_branch(
@@ -197,7 +218,9 @@ async def delete_branch(
     if branch.is_default:
         raise HTTPException(status_code=400, detail="Cannot delete the default branch")
 
-    BranchCRUD.delete_branch(db, repo_id, branch.name)
+    refs.delete_reference(
+        db, repository=repository, actor=current_user, branch_name=branch.name
+    )
     return {"success": True, "message": f"Branch '{branch.name}' deleted"}
 
 
