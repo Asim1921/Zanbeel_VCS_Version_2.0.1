@@ -80,12 +80,18 @@ async def list_branch_protection(
         .all()
     )
     branches = BranchCRUD.get_branches_by_repository(db, repo_id) or []
-    effective = {
-        branch.name: protection.describe(
+    # The resolved review requirement is reported alongside the mode: it is the part
+    # that decides whether a merge needs a reviewed pull request, and it can come from
+    # the repository-wide setting rather than any pattern, so the raw rules alone do
+    # not tell a reader what is actually in force.
+    effective = {}
+    for branch in branches:
+        entry = protection.describe(
             protection.resolve_effective_policy(db, repository, branch.name)
         )
-        for branch in branches
-    }
+        entry["review"] = protection.review_rules(db, repository, branch.name)
+        entry["requires_review"] = protection.requires_review(db, repository, branch.name)
+        effective[branch.name] = entry
     return {
         "success": True,
         "policies": [
@@ -171,7 +177,12 @@ async def upsert_branch_protection(
             grant.consumed_at = datetime.utcnow()
             grant.consumed_by_id = current_user.id
         existing.mode = request.mode
-        existing.rules_json = json.dumps(request.rules or {})
+        # Omitting rules means "leave them alone", not "clear them". Changing a branch
+        # to frozen from a mode button would otherwise silently drop its review
+        # requirements, which is the opposite of what tightening the mode intends.
+        # Sending an explicit {} is still the way to clear them.
+        if request.rules is not None:
+            existing.rules_json = json.dumps(request.rules)
         existing.policy_version = (existing.policy_version or 1) + 1
         existing.updated_by_id = current_user.id
         policy = existing

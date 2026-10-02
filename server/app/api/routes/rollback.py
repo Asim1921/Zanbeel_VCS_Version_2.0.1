@@ -104,6 +104,14 @@ async def rollback_file(
         "files": _tree_to_commit_payload(new_tree)
     }
 
+    # Ask the branch before writing: create_commit() commits its own transaction,
+    # so refusing afterwards would leave the rollback commit stored on a branch
+    # that never accepted it.
+    refs.check_reference_operation(
+        db, repository=repository, actor=current_user,
+        branch_name=rollback_branch.name, operation=refs.OP_UPDATE,
+    )
+
     commit = CommitCRUD.create_commit(db, commit_data)
     refs.update_reference(
         db, repository=repository, actor=current_user,
@@ -187,6 +195,14 @@ async def rollback_branch(
         "message": rollback_message,
         "files": _tree_to_commit_payload(target_tree)
     }
+
+    # Ask the branch before writing: create_commit() commits its own transaction,
+    # so refusing afterwards would leave the rollback commit stored on a branch
+    # that never accepted it.
+    refs.check_reference_operation(
+        db, repository=repository, actor=current_user,
+        branch_name=rollback_branch_obj.name, operation=refs.OP_UPDATE,
+    )
 
     commit = CommitCRUD.create_commit(db, commit_data)
     refs.update_reference(

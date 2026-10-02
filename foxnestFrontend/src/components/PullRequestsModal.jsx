@@ -7,7 +7,7 @@ import { ModalOverlay } from './ui/Modal'
 import MergeConflictResolverModal from './MergeConflictResolverModal'
 import api from '../utils/api'
 
-const PullRequestsModal = ({ repo, onClose }) => {
+const PullRequestsModal = ({ repo, onClose, onReview }) => {
   const [pullRequests, setPullRequests] = useState([])
   const [branches, setBranches] = useState([])
   const [loading, setLoading] = useState(true)
@@ -263,6 +263,16 @@ const PullRequestsModal = ({ repo, onClose }) => {
                         </div>
                         <div className="flex items-center gap-2">
                           {statusBadge(pr.status)}
+                          {typeof onReview === 'function' && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="text-accent border border-accent/30"
+                              onClick={() => onReview(pr.id)}
+                            >
+                              Review
+                            </Button>
+                          )}
                           {pr.status === 'open' && (
                             <>
                               <Button variant="ghost" size="sm" className="text-info-fg border border-info-fg/30" disabled={mergingId === pr.id} onClick={() => handleMergePr(pr)}>

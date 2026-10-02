@@ -2743,6 +2743,381 @@ class FoxClient:
         sid = entry.get("session_id")
         return int(sid) if sid is not None else None
 
+    # --- review workflow ---------------------------------------------------------
+    # The server has carried reviews, inline comments and code owners since 2.0.1.
+    # None of it was reachable from the CLI, so the only way to satisfy an approval
+    # gate was to open the web client.
+
+    def _repo_api(self, suffix):
+        """Base URL for this repository's API, or None when the repo is not linked."""
+        config = self.load_config()
+        if not config or not config.get("repo_id"):
+            print("Repository not linked to server. Push first.")
+            return None
+        return f"{self._resolve_server_url()}/api/repository/{config['repo_id']}{suffix}"
+
+    @staticmethod
+    def _print_failure(response, action):
+        """Report a refusal in the server's own words rather than a bare status code."""
+        try:
+            detail = response.json().get("detail")
+        except Exception:
+            detail = None
+        if isinstance(detail, dict):
+            code = detail.get("code")
+            message = detail.get("message") or detail.get("detail") or ""
+            print(f"Could not {action}: {message}" + (f" [{code}]" if code else ""))
+            for blocker in detail.get("blockers", []) or []:
+                print(f"  - {blocker}")
+        else:
+            print(f"Could not {action}: HTTP {response.status_code} {detail or ''}".rstrip())
+
+    @staticmethod
+    def _print_gate(data):
+        """The merge gate as a reviewer needs to read it: verdict first, then why not."""
+        approvals = data.get("approvals") or []
+        needed = data.get("required_approvals", 0)
+        print(f"Approvals: {len(approvals)} of {needed} required")
+        for entry in approvals:
+            print(f"  + {entry.get('reviewer')}")
+        for entry in data.get("stale_approvals") or []:
+            print(f"  ~ {entry.get('reviewer')} (stale: the branch moved after approval)")
+        for entry in data.get("changes_requested") or []:
+            print(f"  - {entry.get('reviewer')} requested changes")
+
+        owners = data.get("code_owners") or {}
+        if owners.get("enabled"):
+            missing = owners.get("missing") or []
+            joined = ", ".join(missing)
+            print("Code owners: " + (f"waiting on {joined}" if missing else "satisfied"))
+            for unknown in owners.get("unknown_owners") or []:
+                print(f"  ! CODEOWNERS names unknown user: {unknown}")
+
+        checks = data.get("status_checks")
+        if checks:
+            print(f"Status checks: {checks.get('state', 'unknown')}")
+
+        if data.get("can_merge"):
+            print("Verdict: can be merged.")
+        else:
+            print("Verdict: blocked.")
+            for blocker in data.get("blockers") or []:
+                print(f"  - {blocker}")
+
+    def review_pull_request(self, pr_id, state, body=None):
+        if not self.check_repository("pr"):
+            return False
+        url = self._repo_api(f"/pull-requests/{pr_id}/reviews")
+        if not url:
+            return False
+        response = self._authed_post(url, json={"state": state, "body": body or ""}, timeout=30)
+        if response.status_code != 200:
+            self._print_failure(response, "submit that review")
+            return False
+        print(f"Review recorded: {state}")
+        self._print_gate(response.json())
+        return True
+
+    def comment_pull_request(self, pr_id, body, file_path=None, line=None,
+                             side="new", reply_to=None):
+        if not self.check_repository("pr"):
+            return False
+        url = self._repo_api(f"/pull-requests/{pr_id}/comments")
+        if not url:
+            return False
+        payload = {"body": body, "side": side}
+        if reply_to:
+            payload["in_reply_to_id"] = reply_to
+        else:
+            payload["file_path"] = file_path
+            payload["line"] = line
+        response = self._authed_post(url, json=payload, timeout=30)
+        if response.status_code != 200:
+            self._print_failure(response, "add that comment")
+            return False
+        if reply_to:
+            print(f"Replied to comment {reply_to}.")
+        else:
+            print(f"Commented on {file_path}:{line} ({side}).")
+        return True
+
+    def list_pr_comments(self, pr_id, unresolved_only=False):
+        if not self.check_repository("pr"):
+            return False
+        url = self._repo_api(f"/pull-requests/{pr_id}/comments")
+        if not url:
+            return False
+        response = self._authed_get(url, timeout=30)
+        if response.status_code != 200:
+            self._print_failure(response, "list comments")
+            return False
+        data = response.json()
+        threads = data.get("threads", [])
+        if unresolved_only:
+            threads = [t for t in threads if not t.get("resolved")]
+        if not threads:
+            print("No unresolved comments." if unresolved_only else "No comments.")
+            return True
+        for thread in threads:
+            flags = []
+            if thread.get("resolved"):
+                flags.append("resolved")
+            if thread.get("outdated"):
+                flags.append("outdated")
+            suffix = "  [" + ", ".join(flags) + "]" if flags else ""
+            print(f"{thread['file_path']}:{thread['line']} ({thread['side']}){suffix}")
+            print(f"  #{thread['id']} {thread['author']}: {thread['body']}")
+            for reply in thread.get("replies", []) or []:
+                print(f"    #{reply['id']} {reply['author']}: {reply['body']}")
+        print("")
+        print(
+            f"{data.get('total', 0)} comment(s), {data.get('unresolved', 0)} unresolved, "
+            f"{data.get('outdated', 0)} outdated."
+        )
+        return True
+
+    def pr_checks(self, pr_id):
+        """Why this pull request can or cannot be merged."""
+        if not self.check_repository("pr"):
+            return False
+        url = self._repo_api(f"/pull-requests/{pr_id}/reviews")
+        if not url:
+            return False
+        response = self._authed_get(url, timeout=30)
+        if response.status_code != 200:
+            self._print_failure(response, "read the merge gate")
+            return False
+        data = response.json()
+        self._print_gate(data)
+        return bool(data.get("can_merge"))
+
+    def pr_owners(self, pr_id):
+        if not self.check_repository("pr"):
+            return False
+        url = self._repo_api(f"/pull-requests/{pr_id}/owners")
+        if not url:
+            return False
+        response = self._authed_get(url, timeout=30)
+        if response.status_code != 200:
+            self._print_failure(response, "read code owners")
+            return False
+        data = response.json()
+        if not data.get("enabled"):
+            print("No CODEOWNERS file here, so no owner approval is required.")
+            return True
+        for path, owners in sorted((data.get("by_path") or {}).items()):
+            print(f"{path}: " + (", ".join(owners) if owners else "(no owner)"))
+        required = data.get("required") or []
+        print("")
+        print("Required owner approval from: " + (", ".join(required) if required else "(none)"))
+        for unknown in data.get("unknown_owners") or []:
+            print(f"! CODEOWNERS names a user that does not exist: {unknown}")
+        return True
+
+    def fork_repository(self, name=None):
+        if not self.check_repository("fork"):
+            return False
+        url = self._repo_api("/fork")
+        if not url:
+            return False
+        response = self._authed_post(url, json=({"name": name} if name else {}), timeout=120)
+        if response.status_code != 200:
+            self._print_failure(response, "fork this repository")
+            return False
+        data = response.json()
+        fork = data.get("fork") or data.get("repository") or {}
+        print(f"Forked to {fork.get('name', name or '?')} (id {fork.get('id', '?')}).")
+        print("Clone it, push a branch, then propose it back with:")
+        print("  fox pr from-fork --into <branch> --title <title>")
+        return True
+
+    def list_forks(self):
+        if not self.check_repository("fork"):
+            return False
+        url = self._repo_api("/forks")
+        if not url:
+            return False
+        response = self._authed_get(url, timeout=30)
+        if response.status_code != 200:
+            self._print_failure(response, "list forks")
+            return False
+        forks = response.json().get("forks", [])
+        if not forks:
+            print("No forks.")
+            return True
+        for fork in forks:
+            print(f"{fork.get('id')}  {fork.get('owner')}/{fork.get('name')}")
+        return True
+
+    def create_pull_request_from_fork(self, target_branch, title, source_branch=None,
+                                      upstream_id=None, description=None):
+        """Propose this fork's branch back to the repository it was forked from."""
+        if not self.check_repository("pr"):
+            return False
+        config = self.load_config()
+        if not config or not config.get("repo_id"):
+            print("Repository not linked to server. Push first.")
+            return False
+
+        server_url = self._resolve_server_url()
+        upstream = upstream_id
+        if not upstream:
+            info = self._authed_get(
+                f"{server_url}/api/repository/{config['repo_id']}", timeout=30
+            )
+            if info.status_code == 200:
+                repo = info.json().get("repository") or {}
+                upstream = repo.get("forked_from_id")
+        if not upstream:
+            print("This repository is not a fork, so there is nothing upstream to propose to.")
+            print("Pass --upstream <repo_id> to name the target explicitly.")
+            return False
+
+        payload = {
+            "source_repo_id": config["repo_id"],
+            "source_branch": source_branch or self.get_current_branch(),
+            "target_branch": target_branch,
+            "title": title,
+            "description": description,
+        }
+        response = self._authed_post(
+            f"{server_url}/api/repository/{upstream}/pull-requests/from-fork",
+            json=payload, timeout=60,
+        )
+        if response.status_code != 200:
+            self._print_failure(response, "open that pull request")
+            return False
+        pr = response.json().get("pull_request") or {}
+        print(f"Opened pull request #{pr.get('id')} into {upstream}:{target_branch}.")
+        return True
+
+    # --- branch merge conflict resolution -----------------------------------------
+    # A conflicted branch merge used to report the conflict and stop. Sessions belonged
+    # to pull requests, so there was nowhere to park the three sides of each file.
+
+    def _branch_conflict_dir(self, session_id):
+        return self.fox_dir / "merge-conflicts" / f"branch_session_{session_id}"
+
+    def merge_resolve(self, source_branch, target_branch=None, session_id=None,
+                      submit=False, directory=None, abort=False):
+        """Start, work through, or submit a branch merge resolution.
+
+          1) fox merge <source> --resolve          opens the session and writes the files
+          2) edit the *.resolved files it lists
+          3) fox merge <source> --resolve --submit completes the merge
+        """
+        if not self.check_repository("merge"):
+            return False
+        target_branch = target_branch or self.get_current_branch()
+        base = self._repo_api("/branches/conflicts")
+        if not base:
+            return False
+
+        if abort:
+            if session_id is None:
+                print("Which session? Pass --session <id>.")
+                return False
+            response = self._authed_post(f"{base}/{session_id}/abort", json={}, timeout=60)
+            if response.status_code != 200:
+                self._print_failure(response, "abort that session")
+                return False
+            print(f"Session {session_id} aborted. Neither branch was changed.")
+            return True
+
+        if session_id is None:
+            # Opening is idempotent: an existing session for this pair comes back
+            # unchanged, so re-running this does not discard work already done.
+            response = self._authed_post(
+                base,
+                json={"source_branch": source_branch, "target_branch": target_branch},
+                timeout=300,
+            )
+            if response.status_code != 200:
+                self._print_failure(response, "open a resolution session")
+                return False
+            bundle = response.json()
+            session_id = bundle.get("session", {}).get("id")
+        else:
+            response = self._authed_get(f"{base}/{session_id}", timeout=120)
+            if response.status_code != 200:
+                self._print_failure(response, "read that session")
+                return False
+            bundle = response.json()
+
+        session = bundle.get("session") or {}
+        files = bundle.get("files") or []
+        if session.get("stale_reason"):
+            print(f"This session is stale: {session['stale_reason']}")
+            print("Re-run without --session to compute the conflicts again.")
+            return False
+
+        out_dir = Path(directory) if directory else self._branch_conflict_dir(session_id)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        if not submit:
+            print(f"Session {session_id}: merging '{session.get('source_branch')}' into "
+                  f"'{session.get('target_branch')}'")
+            print(f"{len(files)} conflicted file(s). Edit the .resolved files, then run "
+                  f"the same command with --submit.\n")
+            for entry in files:
+                safe = entry["path"].replace("/", "__").replace(chr(92), "__")
+                for side in ("base", "ours", "theirs"):
+                    blob = entry.get(f"{side}_b64")
+                    if blob is not None:
+                        (out_dir / f"{safe}.{side}").write_bytes(base64.b64decode(blob))
+                # The suggested merge carries conflict markers, so it is the sensible
+                # thing to start editing rather than a blank file.
+                suggested = entry.get("suggested_b64") or entry.get("theirs_b64") or ""
+                resolved_path = out_dir / f"{safe}.resolved"
+                if not resolved_path.exists():
+                    resolved_path.write_bytes(base64.b64decode(suggested) if suggested else b"")
+                print(f"  {entry['path']}")
+                print(f"    edit: {resolved_path}")
+            print(f"\nWhen every file is reconciled:")
+            print(f"  fox merge {source_branch} --resolve --submit --session {session_id}")
+            return True
+
+        resolutions = {}
+        for entry in files:
+            safe = entry["path"].replace("/", "__").replace(chr(92), "__")
+            resolved_path = out_dir / f"{safe}.resolved"
+            if not resolved_path.exists():
+                print(f"Missing resolved file for {entry['path']}: {resolved_path}")
+                return False
+            resolutions[entry["path"]] = base64.b64encode(
+                resolved_path.read_bytes()).decode("utf-8")
+
+        response = self._authed_post(
+            f"{base}/{session_id}/resolve",
+            json={"resolutions": resolutions},
+            timeout=300,
+        )
+        if response.status_code != 200:
+            self._print_failure(response, "complete that merge")
+            return False
+        out = response.json()
+        print(f"Merged '{session.get('source_branch')}' into "
+              f"'{session.get('target_branch')}' as {str(out.get('merge_commit_id'))[:12]}.")
+        print(f"Resolved {out.get('resolved_files')} file(s).")
+        return True
+
+    def list_merge_sessions(self):
+        base = self._repo_api("/branches/conflicts")
+        if not base:
+            return False
+        response = self._authed_get(base, timeout=30)
+        if response.status_code != 200:
+            self._print_failure(response, "list merge sessions")
+            return False
+        sessions = response.json().get("sessions", [])
+        if not sessions:
+            print("No open branch merge sessions.")
+            return True
+        for s in sessions:
+            print(f"#{s['id']}  {s['source_branch']} -> {s['target_branch']}  "
+                  f"{s['unresolved']}/{s['files']} unresolved")
+        return True
+
     def pr_resolve(self, pr_id: int, session_id: Optional[int] = None, submit: bool = False, directory: Optional[str] = None):
         """
         Download merge conflicts (base/ours/theirs) to disk and optionally submit resolutions.
@@ -2773,7 +3148,7 @@ class FoxClient:
 
         # Fetch conflict bundle
         resp = self._authed_get(
-            f"{server_url}/api/repository/{config['repo_id']}/pull-requests/{pr_id}/merge-conflicts/{session_id}",
+            f"{server_url}/api/repository/{config['repo_id']}/pull-requests/{pr_id}/conflicts/{session_id}",
             timeout=120,
         )
         if resp.status_code != 200:
@@ -2835,7 +3210,7 @@ class FoxClient:
             resolutions[safe_path] = base64.b64encode(content).decode("utf-8")
 
         submit_resp = self._authed_post(
-            f"{server_url}/api/repository/{config['repo_id']}/pull-requests/{pr_id}/merge-resolve/{session_id}",
+            f"{server_url}/api/repository/{config['repo_id']}/pull-requests/{pr_id}/conflicts/{session_id}/resolve",
             json={"resolutions": resolutions},
             timeout=300,
         )
@@ -4590,6 +4965,14 @@ def print_extended_help():
     print("  tag                     Manage tags")
     print("  release                 Manage releases (semantic versions)")
     print("  pr                      Manage pull requests")
+    print("  pr review <id>          Approve, request changes, or comment")
+    print("  pr comment <id>         Comment on one line of one file")
+    print("  pr comments <id>        Show inline comment threads")
+    print("  pr checks <id>          Why a pull request can or cannot be merged")
+    print("  pr owners <id>          Code owners whose approval is required")
+    print("  pr from-fork            Propose a fork's branch back upstream")
+    print("  fork [--as <name>]      Create your own copy of this repository")
+    print("  forks                   List forks of this repository")
     print("  config                  Show configuration")
     print("  gc                      Optimize repository (garbage collection)")
     print("  docs [path]             Generate documentation locally")
@@ -4627,6 +5010,9 @@ def print_extended_help():
     print("  fox tag create v1.0.0")
     print("  fox release create 1.0.0 --title 'Initial release'")
     print("  fox pr create --title 'Feature' --source feature/login --target main")
+    print("  fox pr checks 7")
+    print("  fox pr review 7 --approve -m 'Looks good'")
+    print("  fox pr comment 7 --file server/app/main.py --line 42 -m 'Why the retry?'")
     print("  fox gc                  # Optimize repository storage")
     print("  fox docs                # Generate docs for current project")
     print("  fox generate-docs       # Push latest code, then generate docs on server")
@@ -4875,6 +5261,21 @@ def main():
     # Merge command
     merge_parser = subparsers.add_parser("merge", help="Merge a branch into current")
     merge_parser.add_argument("branch", help="Source branch")
+    merge_parser.add_argument("--resolve", action="store_true",
+                              help="Resolve a conflicted merge on the server")
+    merge_parser.add_argument("--submit", action="store_true",
+                              help="With --resolve: submit the edited .resolved files")
+    merge_parser.add_argument("--abort", action="store_true",
+                              help="With --resolve: discard the session, merging nothing")
+    merge_parser.add_argument("--session", dest="session_id", type=int, default=None,
+                              help="Resolution session id")
+    merge_parser.add_argument("--into", dest="into", default=None,
+                              help="Target branch (defaults to the current branch)")
+    merge_parser.add_argument("--dir", dest="merge_dir", default=None,
+                              help="Where to write the conflict files")
+
+    merge_sessions_parser = subparsers.add_parser(
+        "merge-sessions", help="List open branch merge resolution sessions")
 
     # Compare command (server /compare API)
     compare_parser = subparsers.add_parser(
@@ -5056,6 +5457,13 @@ def main():
     release_create.add_argument("--notes", help="Release notes")
 
     # Pull request command
+    fork_parser = subparsers.add_parser(
+        "fork", help="Create your own copy of this repository")
+    fork_parser.add_argument("--as", dest="fork_name", default=None,
+                             help="Name for the fork (defaults to the source name)")
+
+    forks_parser = subparsers.add_parser("forks", help="List forks of this repository")
+
     pr_parser = subparsers.add_parser("pr", help="Manage pull requests")
     pr_subparsers = pr_parser.add_subparsers(dest="pr_command", help="PR commands")
     pr_subparsers.add_parser("list", help="List pull requests")
@@ -5064,6 +5472,48 @@ def main():
     pr_create.add_argument("--source", required=True, help="Source branch")
     pr_create.add_argument("--target", required=True, help="Target branch")
     pr_create.add_argument("--description", help="PR description")
+    pr_review = pr_subparsers.add_parser("review", help="Approve, request changes, or comment")
+    pr_review.add_argument("id", type=int, help="Pull request id")
+    _review_state = pr_review.add_mutually_exclusive_group(required=True)
+    _review_state.add_argument("--approve", action="store_true", help="Approve the change")
+    _review_state.add_argument("--request-changes", dest="request_changes",
+                               action="store_true", help="Block the merge until addressed")
+    _review_state.add_argument("--comment", action="store_true",
+                               help="Comment without approving or blocking")
+    pr_review.add_argument("-m", "--message", default=None, help="Review body")
+
+    pr_comment = pr_subparsers.add_parser("comment", help="Comment on one line of one file")
+    pr_comment.add_argument("id", type=int, help="Pull request id")
+    pr_comment.add_argument("--file", dest="file_path", help="Path being annotated")
+    pr_comment.add_argument("--line", type=int, help="1-based line number")
+    pr_comment.add_argument("--side", choices=("new", "old"), default="new",
+                            help="Annotate the proposed content or the base it replaces")
+    pr_comment.add_argument("--reply-to", dest="reply_to", type=int, default=None,
+                            help="Reply to a comment, inheriting its file and line")
+    pr_comment.add_argument("-m", "--message", required=True, help="Comment body")
+
+    pr_comments = pr_subparsers.add_parser("comments", help="Show inline comment threads")
+    pr_comments.add_argument("id", type=int, help="Pull request id")
+    pr_comments.add_argument("--unresolved", action="store_true",
+                             help="Only threads nobody has resolved")
+
+    pr_checks = pr_subparsers.add_parser("checks", help="Why this can or cannot be merged")
+    pr_checks.add_argument("id", type=int, help="Pull request id")
+
+    pr_owners = pr_subparsers.add_parser("owners", help="Code owners required to approve")
+    pr_owners.add_argument("id", type=int, help="Pull request id")
+
+    pr_from_fork = pr_subparsers.add_parser(
+        "from-fork", help="Propose this fork's branch back to the upstream repository")
+    pr_from_fork.add_argument("--into", dest="into", required=True,
+                              help="Upstream branch to propose into")
+    pr_from_fork.add_argument("--title", required=True, help="Pull request title")
+    pr_from_fork.add_argument("--source", default=None,
+                              help="Branch in this fork (defaults to the current branch)")
+    pr_from_fork.add_argument("--upstream", default=None,
+                              help="Upstream repository id, when it cannot be inferred")
+    pr_from_fork.add_argument("--description", default=None, help="Pull request description")
+
     pr_close = pr_subparsers.add_parser("close", help="Close a pull request")
     pr_close.add_argument("id", type=int, help="PR id")
     pr_merge = pr_subparsers.add_parser("merge", help="Merge a pull request")
@@ -5280,6 +5730,20 @@ def main():
                 prefer_server=getattr(args, "checkout_files_server", False),
             )
 
+    elif args.command == "merge-sessions":
+        fox.list_merge_sessions()
+
+    elif args.command == "merge" and (getattr(args, "resolve", False)
+                                      or getattr(args, "abort", False)):
+        fox.merge_resolve(
+            args.branch,
+            target_branch=getattr(args, "into", None),
+            session_id=getattr(args, "session_id", None),
+            submit=getattr(args, "submit", False),
+            directory=getattr(args, "merge_dir", None),
+            abort=getattr(args, "abort", False),
+        )
+
     elif args.command == "merge":
         fox.merge_branch(args.branch)
 
@@ -5392,6 +5856,12 @@ def main():
         elif args.release_command == "create":
             fox.create_release(args.version, tag=args.tag, title=args.title, notes=args.notes)
 
+    elif args.command == "fork":
+        fox.fork_repository(name=args.fork_name)
+
+    elif args.command == "forks":
+        fox.list_forks()
+
     elif args.command == "pr":
         if getattr(args, "pr_command", None) == "list" or args.pr_command is None:
             fox.list_pull_requests()
@@ -5401,6 +5871,35 @@ def main():
             fox.close_pull_request(args.id)
         elif args.pr_command == "merge":
             fox.merge_pull_request(args.id)
+        elif args.pr_command == "review":
+            if args.approve:
+                _state = "approved"
+            elif args.request_changes:
+                _state = "changes_requested"
+            else:
+                _state = "commented"
+            fox.review_pull_request(args.id, _state, body=args.message)
+        elif args.pr_command == "comment":
+            if not args.reply_to and (not args.file_path or args.line is None):
+                print("A new comment needs --file and --line; a reply needs --reply-to.")
+            else:
+                fox.comment_pull_request(
+                    args.id, args.message, file_path=args.file_path, line=args.line,
+                    side=args.side, reply_to=args.reply_to,
+                )
+        elif args.pr_command == "comments":
+            fox.list_pr_comments(args.id, unresolved_only=args.unresolved)
+        elif args.pr_command == "checks":
+            # Exit non-zero when blocked, so a script can gate on it.
+            if not fox.pr_checks(args.id):
+                sys.exit(1)
+        elif args.pr_command == "owners":
+            fox.pr_owners(args.id)
+        elif args.pr_command == "from-fork":
+            fox.create_pull_request_from_fork(
+                args.into, args.title, source_branch=args.source,
+                upstream_id=args.upstream, description=args.description,
+            )
         elif args.pr_command == "resolve":
             fox.pr_resolve(args.id, session_id=getattr(args, "session_id", None), submit=getattr(args, "submit", False), directory=getattr(args, "directory", None))
     

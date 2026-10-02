@@ -1,13 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   FiArrowLeft, FiCode, FiGitCommit, FiUsers, FiFileText,
-  FiLoader, FiAlertCircle, FiGitBranch, FiShield,
+  FiLoader, FiAlertCircle, FiGitBranch, FiShield, FiShare2,
 } from 'react-icons/fi'
 import api from '../utils/api'
 import FileTree from '../components/FileTree'
 import { ancestorsOf, normalizePath } from '../lib/fileTree'
 import CodeView from '../components/CodeView'
 import BranchProtectionPanel from '../components/BranchProtectionPanel'
+import CommitGraph from '../components/CommitGraph'
+import CommitDetail from '../components/CommitDetail'
 import { authorClass, blameSummary } from '../lib/blame'
 import GlassCard from '../components/ui/GlassCard'
 import Badge from '../components/ui/Badge'
@@ -25,6 +27,7 @@ import { cn } from '../lib/utils'
 const TABS = [
   { id: 'code', label: 'Code', icon: FiCode },
   { id: 'commits', label: 'Commits', icon: FiGitCommit },
+  { id: 'graph', label: 'Graph', icon: FiShare2 },
   { id: 'contributors', label: 'Contributors', icon: FiUsers },
   { id: 'protection', label: 'Protection', icon: FiShield },
 ]
@@ -78,6 +81,14 @@ export default function RepositoryDetail({ repo, onBack }) {
   const [paneNote, setPaneNote] = useState('')
 
   const [commits, setCommits] = useState([])
+  // The graph spans every branch, so it is loaded once rather than per branch.
+  const [graph, setGraph] = useState(null)
+  const [graphLoading, setGraphLoading] = useState(false)
+  const [graphError, setGraphError] = useState('')
+  const [selectedGraphCommit, setSelectedGraphCommit] = useState(null)
+  // The commit whose changes are open. Held here so the Back button returns to
+  // whichever tab the commit was opened from.
+  const [openCommitId, setOpenCommitId] = useState(null)
   const [commitsLoading, setCommitsLoading] = useState(false)
 
   useEffect(() => {
@@ -137,6 +148,26 @@ export default function RepositoryDetail({ repo, onBack }) {
     load()
     return () => { alive = false }
   }, [tab, repo.id, branch, commits.length])
+
+  useEffect(() => {
+    if (tab !== 'graph' || graph) return undefined
+    let alive = true
+    setGraphLoading(true)
+    setGraphError('')
+    const load = async () => {
+      try {
+        // No branch filter: the point of the graph is the branches next to each other.
+        const response = await api.getCommitGraph(repo.id, { limit: 300 })
+        if (alive) setGraph(response)
+      } catch (err) {
+        if (alive) setGraphError(err.message || 'Could not load the commit graph')
+      } finally {
+        if (alive) setGraphLoading(false)
+      }
+    }
+    load()
+    return () => { alive = false }
+  }, [tab, repo.id, graph])
 
   const paths = useMemo(() => Object.keys(files).sort(), [files])
   const currentFile = selectedFile ? files[selectedFile] : null
@@ -298,6 +329,16 @@ export default function RepositoryDetail({ repo, onBack }) {
         })}
       </div>
 
+      {openCommitId ? (
+        <CommitDetail
+          repo={repo}
+          commitId={openCommitId}
+          onBack={() => setOpenCommitId(null)}
+          onOpenCommit={(id) => setOpenCommitId(id)}
+        />
+      ) : (
+      <>
+
       {tab === 'code' && (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(220px,300px)_1fr]">
           <GlassCard className="max-h-[70vh] overflow-y-auto p-2" hover={false}>
@@ -417,7 +458,11 @@ export default function RepositoryDetail({ repo, onBack }) {
           ) : (
             <ol className="space-y-2">
               {commits.map((commit) => (
-                <li key={commit.id} className="rounded-xl border border-border bg-white/[0.03] p-3">
+                <li
+                  key={commit.id}
+                  onClick={() => setOpenCommitId(commit.id)}
+                  className="cursor-pointer rounded-xl border border-border bg-white/[0.03] p-3 transition hover:border-border-strong hover:bg-white/[0.06]"
+                >
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-mono text-[11px] text-accent">
                       {String(commit.id).slice(0, 8)}
@@ -437,7 +482,79 @@ export default function RepositoryDetail({ repo, onBack }) {
         </GlassCard>
       )}
 
+      {tab === 'graph' && (
+        <GlassCard className="p-4" hover={false}>
+          {graphLoading ? (
+            <p className="flex items-center justify-center gap-2 py-12 text-sm text-muted">
+              <FiLoader className="h-4 w-4 animate-spin" /> Building the graph…
+            </p>
+          ) : graphError ? (
+            <p className="flex items-start gap-2 py-8 text-sm text-danger-fg">
+              <FiAlertCircle className="mt-0.5 h-4 w-4 shrink-0" /> {graphError}
+            </p>
+          ) : (
+            <>
+              <div className="mb-3 flex flex-wrap items-baseline gap-2">
+                <h3 className="text-sm font-semibold text-ink">Commit graph</h3>
+                <span className="text-[11.5px] text-muted">
+                  {graph?.returned ?? 0} of {graph?.total ?? 0} commits across{' '}
+                  {(graph?.branches || []).length} branch(es)
+                </span>
+                {graph?.truncated && (
+                  <span className="text-[11.5px] text-warning-fg">
+                    — showing the most recent {graph?.limit}; older history is not drawn
+                  </span>
+                )}
+              </div>
+              <CommitGraph
+                commits={graph?.commits || []}
+                selectedCommitId={selectedGraphCommit?.id}
+                onSelectCommit={setSelectedGraphCommit}
+              />
+              {selectedGraphCommit && (
+                <div className="mt-4 rounded-xl border border-border bg-white/[0.03] p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-[11px] text-accent">
+                      {selectedGraphCommit.short_id}
+                    </span>
+                    {selectedGraphCommit.is_merge && <Badge variant="info">merge</Badge>}
+                    <span className="text-xs text-muted">
+                      {selectedGraphCommit.author} · {selectedGraphCommit.timestamp}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setOpenCommitId(selectedGraphCommit.id)}
+                      className="ml-auto rounded-lg border border-accent/40 bg-accent/10 px-2 py-0.5 text-[11px] text-ink hover:bg-accent/20"
+                    >
+                      View changes
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedGraphCommit(null)}
+                      className="text-[11px] text-muted hover:text-ink"
+                    >
+                      close
+                    </button>
+                  </div>
+                  <p className="mt-1 whitespace-pre-wrap break-words text-[13px] text-ink-soft">
+                    {selectedGraphCommit.message}
+                  </p>
+                  {selectedGraphCommit.parents?.length > 0 && (
+                    <p className="mt-2 font-mono text-[10.5px] text-muted">
+                      parents: {selectedGraphCommit.parents.map((p) => p.slice(0, 8)).join(', ')}
+                    </p>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </GlassCard>
+      )}
+
       {tab === 'protection' && <BranchProtectionPanel repo={repo} />}
+
+      </>
+      )}
 
       {tab === 'contributors' && (
         <GlassCard className="p-4" hover={false}>

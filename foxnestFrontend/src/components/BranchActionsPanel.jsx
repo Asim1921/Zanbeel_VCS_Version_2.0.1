@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { FiGitBranch, FiLoader, FiRefreshCw, FiCopy, FiUploadCloud, FiGitMerge, FiSettings } from 'react-icons/fi'
 import Button from './ui/Button'
 import api from '../utils/api'
+import MergeConflictResolverModal from './MergeConflictResolverModal'
 
 const SCOPE_OPTIONS = ['read', 'write', 'manage', 'team_lead']
 
@@ -23,6 +24,8 @@ const BranchActionsPanel = ({
   const [fromBranch, setFromBranch] = useState(selectedBranch || '')
   const [mergeSource, setMergeSource] = useState('')
   const [mergeTarget, setMergeTarget] = useState(selectedBranch || '')
+  // A conflicted branch merge opens a resolution session rather than stopping.
+  const [branchConflict, setBranchConflict] = useState(null)
   const [publishSource, setPublishSource] = useState('')
   const [publishTarget, setPublishTarget] = useState(selectedBranch || '')
   const [copySource, setCopySource] = useState('')
@@ -104,11 +107,29 @@ const BranchActionsPanel = ({
         onBranchesChanged?.()
       }
     } catch (e) {
+      const detail = typeof e.data?.detail === 'object' ? e.data.detail : null
+      const code = e.code || detail?.code || null
+      const conflicts = e.data?.conflicts || detail?.conflicts || []
+
       if (e.status === 409 && e.data?.pull_request_id) {
         setError(
           `Merge conflicts (${(e.data.conflicts || []).length} files). Open Pull Requests to resolve (PR #${e.data.pull_request_id}).`
         )
         onOpenPullRequests?.()
+      } else if (e.status === 409 && code === 'MERGE_CONFLICT') {
+        // A branch merge has no pull request to resolve through. Park the three sides
+        // in a session and open the resolver, rather than reporting the conflict and
+        // leaving the person who hit it with nowhere to go.
+        const bundle = await api.startBranchMergeConflictSession(
+          repo.id, mergeSource, mergeTarget
+        )
+        setBranchConflict({
+          sessionId: bundle?.session?.id,
+          expectedHeadCommitId: headFor(mergeTarget),
+        })
+        setMessage(
+          `${conflicts.length} conflicting file(s) between ${mergeSource} and ${mergeTarget}. Resolve them to finish the merge.`
+        )
       } else {
         throw e
       }
@@ -356,6 +377,21 @@ const BranchActionsPanel = ({
             Local CLI: fox push SRC:DST · fox checkout-files --from BRANCH path
           </p>
         </div>
+      )}
+
+      {branchConflict?.sessionId && (
+        <MergeConflictResolverModal
+          repo={repo}
+          prId={null}
+          sessionId={branchConflict.sessionId}
+          expectedHeadCommitId={branchConflict.expectedHeadCommitId}
+          onClose={() => setBranchConflict(null)}
+          onResolved={() => {
+            setBranchConflict(null)
+            setMessage(`Merged ${mergeSource} into ${mergeTarget}`)
+            onBranchesChanged?.()
+          }}
+        />
       )}
     </div>
   )

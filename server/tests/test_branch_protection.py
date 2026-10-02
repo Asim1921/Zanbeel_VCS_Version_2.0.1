@@ -137,6 +137,51 @@ class BranchProtectionTests(unittest.TestCase):
         finally:
             db.close()
 
+
+    def test_changing_mode_does_not_wipe_review_rules(self):
+        """A mode button must not silently delete a branch's approval requirement.
+
+        The rules field carries the review requirement now, so treating an omitted
+        rules field as "clear them" meant tightening a branch to frozen quietly
+        dropped the approvals it demanded.
+        """
+        response = self.client.put(
+            f'/api/repository/{self.repo_id}/branch-protection',
+            headers=self.auth,
+            json={'branch_pattern': 'main', 'mode': 'protected',
+                  'rules': {'required_approvals': 2}},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        # Change only the mode, exactly as the mode buttons do.
+        self.set_mode('frozen')
+
+        listing = self.client.get(
+            f'/api/repository/{self.repo_id}/branch-protection', headers=self.auth
+        ).json()
+        policy = next(p for p in listing['policies'] if p['branch_pattern'] == 'main')
+        self.assertEqual(policy['rules'].get('required_approvals'), 2)
+        self.assertEqual(listing['branches']['main']['review']['required_approvals'], 2)
+
+    def test_rules_can_still_be_cleared_explicitly(self):
+        """Sending an empty rules object is the deliberate way to clear them."""
+        self.client.put(
+            f'/api/repository/{self.repo_id}/branch-protection',
+            headers=self.auth,
+            json={'branch_pattern': 'main', 'mode': 'protected',
+                  'rules': {'required_approvals': 2}},
+        )
+        self.client.put(
+            f'/api/repository/{self.repo_id}/branch-protection',
+            headers=self.auth,
+            json={'branch_pattern': 'main', 'mode': 'protected', 'rules': {}},
+        )
+        listing = self.client.get(
+            f'/api/repository/{self.repo_id}/branch-protection', headers=self.auth
+        ).json()
+        policy = next(p for p in listing['policies'] if p['branch_pattern'] == 'main')
+        self.assertEqual(policy['rules'], {})
+
     # ------------------------------------------------- the mode decision matrix
 
     def test_mode_matrix_matches_specification(self):

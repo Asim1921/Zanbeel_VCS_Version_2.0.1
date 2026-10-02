@@ -25,7 +25,7 @@ relabelled as an ordinary push to slip past the rules.
 import hashlib
 import json
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -183,6 +183,36 @@ def _classify(db: Session, current_head: Optional[str], new_commit_id: Optional[
         return operation          # fast-forward: the tip is still reachable
     return OP_FORCE_UPDATE
 
+
+
+def classify_incoming_push(
+    db: Session,
+    *,
+    current_head: Optional[str],
+    parent_ids: Optional[List[str]],
+    branch_exists: bool,
+) -> str:
+    """The operation a push represents, before its commit has been stored.
+
+    ``_classify`` asks whether the current tip is an ancestor of the new commit, which
+    cannot be answered until that commit exists. But a push is a fast-forward exactly
+    when the current tip is already reachable from one of the incoming commit's
+    parents, and the parents are stored -- so the same question can be asked one step
+    earlier, early enough to refuse before anything is written.
+
+    Unknown parents fall through to ``force_update``: a push whose ancestry cannot be
+    established is the case that most needs the stricter rule, not the looser one.
+    """
+    if not branch_exists:
+        return OP_CREATE
+    if not current_head:
+        return OP_UPDATE
+    for parent in parent_ids or []:
+        if not parent:
+            continue
+        if parent == current_head or legacy_policies.is_ancestor(db, current_head, parent):
+            return OP_UPDATE
+    return OP_FORCE_UPDATE
 
 def check_reference_operation(
     db: Session,
@@ -389,6 +419,45 @@ def rename_reference(
     db.commit()
     return renamed
 
+
+
+def precheck_by_id(
+    db: Session,
+    *,
+    repository_id: str,
+    actor_username: Optional[str],
+    branch_name: str,
+    operation: str = OP_UPDATE,
+) -> None:
+    """Refuse a reference change before the caller writes anything.
+
+    Every path that lands content does the same two things in the same order: create
+    the commit, then move the reference. But ``create_commit*`` commits its own
+    transaction and moves ``repository.head_commit_id``, so a refusal arriving at step
+    two leaves the refused commit stored and the repository head pointing at it. The
+    branch is protected; the write is not.
+
+    Asking first costs one policy lookup and makes the refusal free. The authoritative
+    check still runs inside ``update_reference`` against the real commit id -- this one
+    cannot replace it, because the force-vs-update distinction needs a commit that does
+    not exist yet.
+    """
+    from database.crud import BranchCRUD, RepositoryCRUD, UserCRUD
+
+    repository = RepositoryCRUD.get_repository(db, repository_id)
+    if repository is None:
+        return  # The caller's own lookup will report this more usefully.
+    actor = UserCRUD.get_user_by_username(db, actor_username) if actor_username else None
+    branch = BranchCRUD.get_branch(db, repository_id, branch_name)
+
+    check_reference_operation(
+        db,
+        repository=repository,
+        actor=actor,
+        branch_name=branch_name,
+        operation=operation,
+        current_head=branch.head_commit_id if branch else None,
+    )
 
 def update_reference_by_id(
     db: Session,

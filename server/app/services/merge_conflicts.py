@@ -61,13 +61,53 @@ def open_session(
     pr: PullRequest,
     actor: User,
 ) -> MergeConflictSession:
-    """Compute the conflicts for a pull request and park them for manual resolution.
+    """Park a pull request's conflicts for manual resolution."""
+    return _open(
+        db, repo_id, actor,
+        source_branch=pr.source_branch,
+        target_branch=pr.target_branch,
+        pr=pr,
+    )
 
-    Reuses an existing open session when the branches have not moved, so reopening the
-    resolver does not discard work in progress.
+
+def open_branch_session(
+    db: Session,
+    repo_id: str,
+    actor: User,
+    source_branch: str,
+    target_branch: str,
+) -> MergeConflictSession:
+    """Park a direct branch merge's conflicts for manual resolution.
+
+    The same three sides as a pull request conflict, without one. A conflicted
+    `fox merge` previously reported the conflict and stopped, leaving the person who
+    hit it no way forward on the server at all.
     """
-    source = BranchCRUD.get_branch(db, repo_id, pr.source_branch)
-    target = BranchCRUD.get_branch(db, repo_id, pr.target_branch)
+    return _open(
+        db, repo_id, actor,
+        source_branch=source_branch,
+        target_branch=target_branch,
+        pr=None,
+    )
+
+
+def _open(
+    db: Session,
+    repo_id: str,
+    actor: User,
+    *,
+    source_branch: str,
+    target_branch: str,
+    pr: Optional[PullRequest] = None,
+) -> MergeConflictSession:
+    """Compute the conflicts between two branches and park all three sides.
+
+    Reuses an existing open session when neither branch has moved, so reopening the
+    resolver does not discard work in progress; retires it when one has, because the
+    parked sides then describe content that is no longer there.
+    """
+    source = BranchCRUD.get_branch(db, repo_id, source_branch)
+    target = BranchCRUD.get_branch(db, repo_id, target_branch)
     if not source or not target:
         raise ConflictError("Branch not found", 404)
 
@@ -78,16 +118,27 @@ def open_session(
     _merged, conflicts = _merge_trees(base_tree, ours_tree, theirs_tree)
 
     if not conflicts:
-        raise ConflictError("This pull request merges cleanly; no resolution needed.", 409)
-
-    existing = (
-        db.query(MergeConflictSession)
-        .filter(
-            MergeConflictSession.pull_request_id == pr.id,
-            MergeConflictSession.status == "open",
+        subject = "This pull request" if pr else f"'{source_branch}'"
+        raise ConflictError(
+            f"{subject} merges cleanly into '{target_branch}'; no resolution needed.", 409
         )
-        .first()
+
+    query = db.query(MergeConflictSession).filter(
+        MergeConflictSession.repository_id == repo_id,
+        MergeConflictSession.status == "open",
     )
+    if pr:
+        query = query.filter(MergeConflictSession.pull_request_id == pr.id)
+    else:
+        # A branch session is identified by the pair it reconciles, since it has no
+        # pull request to name it.
+        query = query.filter(
+            MergeConflictSession.pull_request_id.is_(None),
+            MergeConflictSession.source_branch == source_branch,
+            MergeConflictSession.target_branch == target_branch,
+        )
+    existing = query.first()
+
     if existing:
         if (existing.source_head_commit_id == source.head_commit_id
                 and existing.target_head_commit_id == target.head_commit_id):
@@ -99,10 +150,10 @@ def open_session(
 
     session = MergeConflictSession(
         repository_id=repo_id,
-        pull_request_id=pr.id,
-        source_branch=pr.source_branch,
-        target_branch=pr.target_branch,
-        base_commit_id=base_id or target.head_commit_id,
+        pull_request_id=pr.id if pr else None,
+        source_branch=source_branch,
+        target_branch=target_branch,
+        base_commit_id=base_id,
         source_head_commit_id=source.head_commit_id,
         target_head_commit_id=target.head_commit_id,
         status="open",
@@ -207,18 +258,37 @@ def resolve(
             f"current conflicts.", 409, {"code": "SESSION_STALE"},
         )
 
-    # The review gate applies here too: resolving conflicts must not be a way around it.
-    pr_for_gate = db.query(PullRequest).filter(
-        PullRequest.id == session.pull_request_id).first()
-    if pr_for_gate is not None and pr_for_gate.status == "open":
-        from app.services import pr_reviews
+    # The review gate applies here too: resolving conflicts must not be a way around
+    # it. A session with no pull request is a direct branch merge, and the target's own
+    # rules decide whether that may land -- without this, the resolver would be exactly
+    # the unreviewed door that branch merges are no longer allowed to be.
+    from app.services import merge_gate
+    from database.crud import RepositoryCRUD
 
-        repository = pr_for_gate.repository
-        if repository is not None:
-            try:
-                pr_reviews.enforce_merge_gate(db, repository, pr_for_gate)
-            except pr_reviews.ReviewError as exc:
-                raise ConflictError(exc.message, exc.status_code, exc.payload)
+    repository = RepositoryCRUD.get_repository(db, session.repository_id)
+    pr_for_gate = (
+        db.query(PullRequest).filter(PullRequest.id == session.pull_request_id).first()
+        if session.pull_request_id else None
+    )
+    if repository is not None:
+        try:
+            merge_gate.enforce(
+                db,
+                repository=repository,
+                target_branch=session.target_branch,
+                source_branch=session.source_branch,
+                actor=actor,
+                # A pull request that is no longer open cannot vouch for this merge, so
+                # it falls through to the branch's own rules rather than skipping them.
+                pull_request=(
+                    pr_for_gate
+                    if (pr_for_gate is not None and pr_for_gate.status == "open")
+                    else None
+                ),
+                operation="resolve",
+            )
+        except merge_gate.MergeGateError as exc:
+            raise ConflictError(exc.message, exc.status_code, exc.payload)
 
     target = BranchCRUD.get_branch(db, session.repository_id, session.target_branch)
     if expected_head_commit_id is not None and expected_head_commit_id != target.head_commit_id:
@@ -273,6 +343,14 @@ def resolve(
         entries.append(
             SimpleNamespace(file_path=path, file_hash=stored.hash, file_size=len(content))
         )
+
+    # Ask the branch before writing: create_commit_from_file_hashes() commits its own
+    # transaction, so refusing afterwards would leave the merge commit stored on a
+    # branch that never accepted it.
+    refs.precheck_by_id(
+        db, repository_id=session.repository_id, actor_username=actor.username,
+        branch_name=session.target_branch, operation=refs.OP_MERGE,
+    )
 
     commit = CommitCRUD.create_commit_from_file_hashes(
         db,

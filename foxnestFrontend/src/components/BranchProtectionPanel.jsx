@@ -90,6 +90,30 @@ export default function BranchProtectionPanel({ repo }) {
     }
   }
 
+  const setApprovals = async (branch, info, count) => {
+    setBusy(`${branch}:approvals`)
+    setError('')
+    setNotice('')
+    try {
+      // The mode is resent unchanged because the endpoint upserts the whole policy;
+      // the rules are what this control is actually editing.
+      await api.setBranchProtection(repo.id, branch, info.mode || 'open', null, {
+        ...(info.rules || {}),
+        required_approvals: count,
+      })
+      setNotice(
+        count > 0
+          ? `'${branch}' now requires ${count} approval(s) before anything lands on it.`
+          : `'${branch}' no longer requires approvals.`
+      )
+      await load()
+    } catch (err) {
+      setError(err.message || 'Could not change the review requirement')
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const requestUnlock = async (branch) => {
     const reason = window.prompt(
       `Why does '${branch}' need a temporary exception?\n\n` +
@@ -159,6 +183,37 @@ export default function BranchProtectionPanel({ repo }) {
                   </span>
                 )}
               </div>
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-[11.5px]">
+                <span className="text-muted">Requires</span>
+                <select
+                  value={info.review?.required_approvals ?? 0}
+                  disabled={busy === `${name}:approvals`}
+                  onChange={(e) => setApprovals(name, info, Number(e.target.value))}
+                  className="rounded-lg border border-border bg-white/[0.04] px-2 py-1 text-ink outline-none focus:border-accent/60 disabled:opacity-50"
+                >
+                  {[0, 1, 2, 3, 4, 5].map((n) => (
+                    <option key={n} value={n}>{n}</option>
+                  ))}
+                </select>
+                <span className="text-muted">
+                  approval(s){info.review?.require_code_owners ? ' plus code owners' : ''}
+                </span>
+                {info.requires_review && (
+                  <span className="text-info-fg">
+                    — merges must go through a reviewed pull request
+                  </span>
+                )}
+                {info.requires_review && info.mode === 'open' && (
+                  // Review rules gate merges, not pushes. A branch left open still
+                  // accepts a direct push, so requiring approvals here without also
+                  // setting Protected reads safer than it is.
+                  <span className="w-full text-warning-fg">
+                    This branch is still Open, so a direct push can bypass review
+                    entirely. Set it to Protected to require the pull request.
+                  </span>
+                )}
+              </div>
+
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {MODES.map((mode) => (
                   <button

@@ -34,7 +34,10 @@ from app.services.issues import _sync_issues_for_pr_created, _sync_issues_for_pr
 from app.services.merge import _merge_trees
 from app.services import refs
 from app.services.signing import sign_commit
-from app.services import codeowners, forks, merge_conflicts, pr_comments, pr_reviews
+from app.services import (
+    codeowners, forks, merge_conflicts, pr_comments, pr_files, pr_reviews,
+    review_notifications,
+)
 
 
 router = APIRouter()
@@ -119,6 +122,16 @@ async def create_pull_request(
             "author": current_user.username,
         },
     })
+
+    # CODEOWNERS blocks the merge on these people, so they have to be told they are
+    # required -- otherwise the gate is satisfiable in principle and stuck in practice.
+    try:
+        ownership = codeowners.required_owners(db, repository, pr)
+        review_notifications.review_requested_from_owners(
+            db, repository, pr, ownership.get("required", [])
+        )
+    except Exception:
+        pass
 
     return {
         "success": True,
@@ -282,6 +295,9 @@ async def merge_pull_request(
     )
     sign_commit(db, commit, current_user.username, current_user.id)
     PullRequestCRUD.mark_merged(db, pr, merge_commit_id=commit.id, reviewer_id=current_user.id)
+    review_notifications.pull_request_merged(
+        db, repository, pr, current_user, merge_commit_id=commit.id
+    )
 
     hook_service.dispatch(db, hook_service.EVENT_PR_MERGED, repo_id, {
         "repository": {"id": repo_id, "name": repository.name},
@@ -466,6 +482,10 @@ async def submit_pull_request_review(
     except pr_reviews.ReviewError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message)
 
+    review_notifications.review_submitted(
+        db, repository, pr, current_user, request.state
+    )
+
     ActivityCRUD.create_activity(
         db, current_user.id, "review_pull_request",
         f"{request.state.replace('_', ' ')} on PR #{pr.id} "
@@ -548,6 +568,8 @@ async def add_pull_request_comment(
     except pr_comments.CommentError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message)
 
+    review_notifications.comment_added(db, repository, pr, current_user, comment)
+
     return {"success": True, "comment_id": comment.id,
             **pr_comments.threads(db, repository, pr)}
 
@@ -620,6 +642,31 @@ async def delete_pull_request_comment(
         return {"success": True, **pr_comments.delete(db, pr, comment_id, current_user)}
     except pr_comments.CommentError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message)
+
+
+
+@router.get("/api/repository/{repo_id}/pull-requests/{pr_id}/files")
+async def list_pull_request_files(
+    repo_id: str,
+    pr_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The diff this pull request proposes, with comment threads already attached.
+
+    One request rather than one per file, and the rows carry line numbers, so a client
+    can render the review without re-deriving which line a comment belongs to.
+    """
+    repository = RepositoryCRUD.get_repository(db, repo_id)
+    if not repository:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    _require_repository_read_access(db, current_user, repository, "view pull request files")
+
+    pr = PullRequestCRUD.get_pull_request(db, repo_id, pr_id)
+    if not pr:
+        raise HTTPException(status_code=404, detail="Pull request not found")
+
+    return {"success": True, **pr_files.build(db, repository, pr)}
 
 
 @router.get("/api/repository/{repo_id}/pull-requests/{pr_id}/owners")

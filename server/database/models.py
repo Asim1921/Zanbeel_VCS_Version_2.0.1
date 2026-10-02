@@ -18,6 +18,16 @@ class User(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
     last_login_at = Column(DateTime, nullable=True)  # Updated on successful web/CLI login
     is_active = Column(Boolean, default=True)
+
+    # --- profile -----------------------------------------------------------------
+    # The avatar is a content hash into the existing blob store rather than bytes in
+    # a column: the store already deduplicates and the row stays small enough to load
+    # on every request that needs a username.
+    avatar_blob_hash = Column(String(64), nullable=True)
+    avatar_content_type = Column(String(64), nullable=True)
+    bio = Column(Text, nullable=True)
+    location = Column(String(100), nullable=True)
+    website = Column(String(200), nullable=True)
     
     # Relationships
     repositories = relationship("Repository", back_populates="owner")
@@ -213,10 +223,15 @@ class MergeConflictSession(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     repository_id = Column(String(16), ForeignKey("repositories.id"), nullable=False)
-    pull_request_id = Column(Integer, ForeignKey("pull_requests.id"), nullable=False)
+    # NULL for a conflict raised by a direct branch merge, which has no pull request.
+    # Those conflicts need the same three-sided resolution, and refusing them a session
+    # is what left `fox merge` reporting a conflict and stopping.
+    pull_request_id = Column(Integer, ForeignKey("pull_requests.id"), nullable=True)
     source_branch = Column(String(100), nullable=False)
     target_branch = Column(String(100), nullable=False)
-    base_commit_id = Column(String(40), ForeignKey("commits.id"), nullable=False)
+    # NULL when the two branches share no history: there is no merge base to record,
+    # but every conflicted path still has an ours and a theirs to reconcile.
+    base_commit_id = Column(String(40), ForeignKey("commits.id"), nullable=True)
     source_head_commit_id = Column(String(40), ForeignKey("commits.id"), nullable=False)
     target_head_commit_id = Column(String(40), ForeignKey("commits.id"), nullable=False)
     status = Column(String(20), default="open")        # open, resolved, aborted, stale

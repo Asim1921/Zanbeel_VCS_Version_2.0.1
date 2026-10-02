@@ -156,6 +156,47 @@ def matching_policies(
     return matched
 
 
+#: Review requirements live in a policy's ``rules_json`` alongside the operation rules,
+#: so "main needs two approvals and a code owner" is expressible per branch pattern
+#: rather than once per repository.
+REVIEW_APPROVALS_KEY = "required_approvals"
+REVIEW_OWNERS_KEY = "require_code_owners"
+REVIEW_CHECKS_KEY = "require_status_checks"
+REVIEW_KEYS = (REVIEW_APPROVALS_KEY, REVIEW_OWNERS_KEY, REVIEW_CHECKS_KEY)
+
+
+def _merge_rules(current: Dict[str, Any], incoming: Dict[str, Any]) -> None:
+    """Fold one policy's rules into the running total, most restrictive winning.
+
+    Plain ``update`` would let whichever row happened to be read last decide, so a
+    wildcard requiring no approvals could silently undo an exact-name rule requiring
+    two. The review keys therefore combine rather than overwrite: counts take the
+    higher, flags take True, and required checks take the union.
+    """
+    for key, value in incoming.items():
+        if key == REVIEW_APPROVALS_KEY:
+            try:
+                incoming_count = max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+            existing = current.get(key)
+            try:
+                existing_count = max(0, int(existing)) if existing is not None else 0
+            except (TypeError, ValueError):
+                existing_count = 0
+            current[key] = max(existing_count, incoming_count)
+        elif key == REVIEW_OWNERS_KEY:
+            current[key] = bool(current.get(key)) or bool(value)
+        elif key == REVIEW_CHECKS_KEY:
+            merged = list(current.get(key) or [])
+            for check in (value or []):
+                if check not in merged:
+                    merged.append(check)
+            current[key] = merged
+        else:
+            current[key] = value
+
+
 def resolve_effective_policy(
     db: Session, repository: Repository, branch_name: str
 ) -> EffectivePolicy:
@@ -177,7 +218,7 @@ def resolve_effective_policy(
         for operation in ALL_OPERATIONS:
             if rules.get(operation) == "deny":
                 effective.denied_operations.add(operation)
-        effective.rules.update(rules)
+        _merge_rules(effective.rules, rules)
         # Report the most specific match, which is the one a human edited for this branch.
         if effective.policy_id is None:
             effective.policy_id = row.id
@@ -192,6 +233,48 @@ def resolve_effective_policy(
 
     return effective
 
+
+
+def review_rules(db: Session, repository: Repository, branch_name: str) -> Dict[str, Any]:
+    """Review requirements in force for one branch.
+
+    Falls back to the repository-wide ``required_approvals`` when no policy pattern
+    carries one, so a repository configured before per-branch policies existed keeps
+    behaving exactly as it does today -- including the default of zero, which is what
+    makes turning review on a deliberate act rather than a surprise.
+    """
+    effective = resolve_effective_policy(db, repository, branch_name)
+
+    approvals = effective.rules.get(REVIEW_APPROVALS_KEY)
+    if approvals is None:
+        legacy = legacy_policies.get_branch_policy(repository)
+        approvals = legacy.get(REVIEW_APPROVALS_KEY, 0)
+    try:
+        approvals = max(0, int(approvals))
+    except (TypeError, ValueError):
+        approvals = 0
+
+    checks = effective.rules.get(REVIEW_CHECKS_KEY) or []
+    if not isinstance(checks, list):
+        checks = []
+
+    return {
+        "required_approvals": approvals,
+        "require_code_owners": bool(effective.rules.get(REVIEW_OWNERS_KEY)),
+        "require_status_checks": list(checks),
+        "mode": effective.mode,
+        "matched_patterns": list(effective.matched_patterns),
+    }
+
+
+def requires_review(db: Session, repository: Repository, branch_name: str) -> bool:
+    """Whether landing on this branch needs a reviewed pull request at all."""
+    rules = review_rules(db, repository, branch_name)
+    return bool(
+        rules["required_approvals"] > 0
+        or rules["require_code_owners"]
+        or rules["require_status_checks"]
+    )
 
 def describe(effective: EffectivePolicy) -> Dict[str, Any]:
     """Serialisable view for API responses and the CLI."""
