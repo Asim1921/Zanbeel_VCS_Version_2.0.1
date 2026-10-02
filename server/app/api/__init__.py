@@ -21,6 +21,7 @@ from app.api.routes import (
     issues,
     notifications,
     permissions,
+    profile,
     protection,
     pull_requests,
     releases,
@@ -41,6 +42,7 @@ from app.api.routes import (
 
 ROUTE_MODULES = (
     auth,
+    profile,
     notifications,
     admin,
     system,

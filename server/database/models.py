@@ -18,6 +18,16 @@ class User(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
     last_login_at = Column(DateTime, nullable=True)  # Updated on successful web/CLI login
     is_active = Column(Boolean, default=True)
+
+    # --- profile -----------------------------------------------------------------
+    # The avatar is a content hash into the existing blob store rather than bytes in
+    # a column: the store already deduplicates and the row stays small enough to load
+    # on every request that needs a username.
+    avatar_blob_hash = Column(String(64), nullable=True)
+    avatar_content_type = Column(String(64), nullable=True)
+    bio = Column(Text, nullable=True)
+    location = Column(String(100), nullable=True)
+    website = Column(String(200), nullable=True)
     
     # Relationships
     repositories = relationship("Repository", back_populates="owner")

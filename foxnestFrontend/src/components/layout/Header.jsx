@@ -1,8 +1,9 @@
-import { FiMenu, FiLogOut, FiBell, FiCheck, FiChevronDown, FiChevronUp, FiExternalLink, FiDownload } from 'react-icons/fi'
-import React, { useEffect, useMemo, useState } from 'react'
+import { FiMenu, FiLogOut, FiBell, FiCheck, FiChevronDown, FiChevronUp, FiExternalLink, FiDownload, FiUser, FiSettings } from 'react-icons/fi'
+import React, { useEffect, useState } from 'react'
 import Button from '../ui/Button'
 import Modal from '../ui/Modal'
 import api from '../../utils/api'
+import Avatar from '../Avatar'
 
 function getNotificationDisplayBody(n) {
   const t = (n?.type || '').toLowerCase()
@@ -36,10 +37,19 @@ const Header = ({ sidebarOpen, setSidebarOpen, activeTab, setActiveTab, currentU
   const [notifLoading, setNotifLoading] = useState(false)
   const [expandedNotifIds, setExpandedNotifIds] = useState(() => new Set())
 
-  const unreadCount = useMemo(
-    () => (notifications || []).filter((n) => !n.is_read).length,
-    [notifications]
-  )
+  // Counted server-side. Deriving it from the 50 notifications fetched below meant
+  // the badge quietly under-reported once there were more unread than that.
+  const [unreadCount, setUnreadCount] = useState(0)
+  const [accountOpen, setAccountOpen] = useState(false)
+
+  const refreshUnread = async () => {
+    try {
+      const res = await api.getUnreadNotificationCount()
+      setUnreadCount(res?.unread ?? 0)
+    } catch {
+      // A failed count must not blank a badge that was correct a moment ago.
+    }
+  }
 
   const loadNotifications = async () => {
     try {
@@ -47,6 +57,7 @@ const Header = ({ sidebarOpen, setSidebarOpen, activeTab, setActiveTab, currentU
       setNotifError(null)
       const res = await api.listNotifications({ unreadOnly: false, limit: 50 })
       setNotifications(res.notifications || [])
+      if (typeof res.unread === 'number') setUnreadCount(res.unread)
     } catch (err) {
       setNotifError(err.message || 'Unable to load notifications')
     } finally {
@@ -145,10 +156,18 @@ const Header = ({ sidebarOpen, setSidebarOpen, activeTab, setActiveTab, currentU
   }
 
   useEffect(() => {
-    loadNotifications()
-    const t = setInterval(loadNotifications, 30000)
+    // Poll the count, not the list: the badge only needs a number, and fetching
+    // fifty notifications every thirty seconds to derive one was the expensive way
+    // to get a figure that was wrong past fifty anyway.
+    refreshUnread()
+    const t = setInterval(refreshUnread, 30000)
     return () => clearInterval(t)
   }, [currentUser?.username])
+
+  // The full list is only needed when the panel is actually opened.
+  useEffect(() => {
+    if (notificationsOpen) loadNotifications()
+  }, [notificationsOpen])
 
   return (
     <header className="sticky top-0 z-10 px-3 pt-2 sm:px-4 sm:pt-3 md:px-6">
@@ -194,14 +213,76 @@ const Header = ({ sidebarOpen, setSidebarOpen, activeTab, setActiveTab, currentU
             )}
           </button>
 
-          <div className="flex items-center gap-2 rounded-full border border-border bg-cream-mid/80 py-1 pr-2 pl-1 sm:pr-3">
-            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-accent text-white">
-              <span className="text-xs font-semibold">{displayName.charAt(0).toUpperCase()}</span>
-            </div>
-            <div className="hidden min-w-0 md:block">
-              <p className="max-w-[120px] truncate text-sm font-medium leading-tight text-ink">{displayName}</p>
-              <p className="text-[11px] leading-tight text-muted">{role}</p>
-            </div>
+          {/* The avatar was a plain div, so there was no way into a profile at all. */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setAccountOpen((v) => !v)}
+              aria-haspopup="menu"
+              aria-expanded={accountOpen}
+              className="flex items-center gap-2 rounded-full border border-border bg-cream-mid/80 py-1 pr-2 pl-1 transition hover:border-border-strong sm:pr-3"
+            >
+              <Avatar
+                username={currentUser?.username}
+                fullName={currentUser?.full_name}
+                size="sm"
+              />
+              <div className="hidden min-w-0 md:block">
+                <p className="max-w-[120px] truncate text-left text-sm font-medium leading-tight text-ink">{displayName}</p>
+                <p className="text-left text-[11px] leading-tight text-muted">{role}</p>
+              </div>
+              <FiChevronDown className="hidden h-3.5 w-3.5 text-muted md:block" />
+            </button>
+
+            {accountOpen && (
+              <>
+                {/* Click anywhere else to dismiss, which is what people expect of a
+                    menu and what keeps it from needing a close button. */}
+                <div className="fixed inset-0 z-20" onClick={() => setAccountOpen(false)} />
+                <div
+                  role="menu"
+                  className="absolute right-0 z-30 mt-2 w-52 overflow-hidden rounded-xl border border-border bg-surface shadow-lg"
+                >
+                  <div className="border-b border-border px-3 py-2">
+                    <p className="truncate text-sm font-medium text-ink">{displayName}</p>
+                    <p className="truncate text-[11px] text-muted">@{currentUser?.username}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => { setAccountOpen(false); setActiveTab?.('profile') }}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-ink-soft transition hover:bg-cream-mid hover:text-ink"
+                  >
+                    <FiUser className="h-3.5 w-3.5" /> Your profile
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setAccountOpen(false); setActiveTab?.('notifications') }}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-ink-soft transition hover:bg-cream-mid hover:text-ink"
+                  >
+                    <FiBell className="h-3.5 w-3.5" /> Notifications
+                    {unreadCount > 0 && (
+                      <span className="ml-auto rounded-full bg-accent px-1.5 text-[10px] font-semibold text-[#04070e]">
+                        {unreadCount > 99 ? '99+' : unreadCount}
+                      </span>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setAccountOpen(false); setActiveTab?.('settings') }}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-ink-soft transition hover:bg-cream-mid hover:text-ink"
+                  >
+                    <FiSettings className="h-3.5 w-3.5" /> Settings
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setAccountOpen(false); onLogout?.() }}
+                    className="flex w-full items-center gap-2 border-t border-border px-3 py-2 text-left text-[13px] text-danger-fg transition hover:bg-cream-mid"
+                  >
+                    <FiLogOut className="h-3.5 w-3.5" /> Sign out
+                  </button>
+                </div>
+              </>
+            )}
           </div>
 
           <Button variant="primary" size="sm" onClick={onLogout} title="Sign out" className="!px-3">
@@ -224,7 +305,14 @@ const Header = ({ sidebarOpen, setSidebarOpen, activeTab, setActiveTab, currentU
         panelClassName="max-w-2xl"
       >
         <div>
-            <div className="mb-4 flex justify-end">
+            <div className="mb-4 flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => { setNotificationsOpen(false); setActiveTab?.('notifications') }}
+              >
+                See all
+              </Button>
               <Button variant="ghost" size="sm" onClick={loadNotifications} disabled={notifLoading}>
                 Refresh
               </Button>

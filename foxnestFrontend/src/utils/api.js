@@ -30,7 +30,12 @@ class FoxNestAPI {
       ...options,
     }
 
-    if (config.body && typeof config.body === 'object') {
+    // FormData is an object too, and stringifying it would send "[object FormData]".
+    // It also has to carry its own Content-Type, because only the browser knows the
+    // multipart boundary it generated.
+    if (config.body instanceof FormData) {
+      delete config.headers['Content-Type']
+    } else if (config.body && typeof config.body === 'object') {
       config.body = JSON.stringify(config.body)
     }
 
@@ -281,6 +286,58 @@ class FoxNestAPI {
     return this.request(`/repository/${repoId}/pull-requests/${prId}/merge`, {
       method: 'POST',
       body: expectedHeadCommitId ? { expected_head_commit_id: expectedHeadCommitId } : {},
+    })
+  }
+
+  // --- Profile ----------------------------------------------------------------
+
+  async getOwnProfile() {
+    return this.request('/profile', { timeout: 30000 })
+  }
+
+  async getUserProfile(username) {
+    return this.request(`/users/${encodeURIComponent(username)}/profile`, {
+      timeout: 30000,
+    })
+  }
+
+  async updateOwnProfile(fields) {
+    return this.request('/profile', { method: 'PUT', body: fields })
+  }
+
+  async uploadAvatar(file) {
+    const form = new FormData()
+    form.append('file', file)
+    return this.request('/profile/avatar', {
+      method: 'POST', body: form, timeout: 60000,
+    })
+  }
+
+  async deleteAvatar() {
+    return this.request('/profile/avatar', { method: 'DELETE' })
+  }
+
+  // The avatar is served through the API, so it carries the same auth as everything
+  // else; this is the URL an <img> points at.
+  avatarUrl(username) {
+    return `${this.baseURL}/users/${encodeURIComponent(username)}/avatar`
+  }
+
+  // --- Notifications ------------------------------------------------------------
+
+  // Counted server-side: deriving it from a page of results under-reported once
+  // there were more unread than the page held.
+  async getUnreadNotificationCount() {
+    return this.request('/notifications/unread-count')
+  }
+
+  async markAllNotificationsRead() {
+    return this.request('/notifications/mark-all-read', { method: 'POST', body: {} })
+  }
+
+  async markNotificationUnread(notificationId) {
+    return this.request(`/notifications/${notificationId}/unread`, {
+      method: 'POST', body: {},
     })
   }
 
@@ -562,10 +619,12 @@ class FoxNestAPI {
   }
 
   // In-app notifications
-  async listNotifications({ unreadOnly = false, limit = 50 } = {}) {
+  async listNotifications({ unreadOnly = false, limit = 50, offset = 0, type = null } = {}) {
     const qs = new URLSearchParams()
     if (unreadOnly) qs.append('unread_only', 'true')
     if (limit != null) qs.append('limit', String(limit))
+    if (offset) qs.append('offset', String(offset))
+    if (type) qs.append('type', type)
     const suffix = qs.toString() ? `?${qs.toString()}` : ''
     return this.request(`/notifications${suffix}`)
   }

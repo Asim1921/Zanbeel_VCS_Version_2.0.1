@@ -5,6 +5,8 @@ import UsersManagement from './pages/UsersManagement'
 import Repositories from './pages/Repositories'
 import RepositoryDetail from './pages/RepositoryDetail'
 import PullRequestDetail from './pages/PullRequestDetail'
+import Profile from './pages/Profile'
+import Notifications from './pages/Notifications'
 import Archive from './pages/Archive'
 import PendingApprovals from './pages/PendingApprovals'
 import PendingRepositories from './pages/PendingRepositories'
@@ -27,6 +29,8 @@ function App() {
   // { repo, prId } while a pull request is open for review. Held here rather than
   // inside Repositories so the review survives the list re-rendering underneath it.
   const [reviewing, setReviewing] = useState(null)
+  // Whose profile is open. null means your own; a username means someone else's.
+  const [profileUser, setProfileUser] = useState(null)
   const [currentUser, setCurrentUser] = useState(null)
   const [authLoading, setAuthLoading] = useState(true)
 
@@ -62,22 +66,28 @@ function App() {
   )
 
   useEffect(() => {
-    const allowedTabs = isAdmin
-      ? [
-          'dashboard',
-          'users-management',
-          'repositories',
-          'pending-approvals',
-          'pending-repositories',
-          'pending-user-registrations',
-          'password-reset',
-          'archive',
-          'settings',
-          'search',
-          'activity',
-          'operations',
-        ]
-      : ['dashboard', 'repositories', 'settings', 'search']
+    // Tabs everyone has, whatever their role. Keeping them in one list rather than
+    // repeating them in both branches is what stops a new page being reachable for
+    // an administrator and silently bounced to the dashboard for everyone else.
+    const commonTabs = [
+      'dashboard',
+      'repositories',
+      'profile',
+      'notifications',
+      'settings',
+      'search',
+    ]
+    const adminTabs = [
+      'users-management',
+      'pending-approvals',
+      'pending-repositories',
+      'pending-user-registrations',
+      'password-reset',
+      'archive',
+      'activity',
+      'operations',
+    ]
+    const allowedTabs = isAdmin ? [...commonTabs, ...adminTabs] : commonTabs
 
     if (!allowedTabs.includes(activeTab)) {
       setActiveTab('dashboard')
@@ -85,6 +95,11 @@ function App() {
     // Leaving the tab closes the browser, so returning to it lands on the list.
     if (activeTab !== 'repositories') {
       setBrowsingRepo(null)
+    }
+    // Same for a profile: coming back to the tab should show your own, not whoever
+    // you were last looking at.
+    if (activeTab !== 'profile') {
+      setProfileUser(null)
     }
   }, [activeTab, isAdmin])
 
@@ -137,6 +152,19 @@ function App() {
         ) : (
           <Repositories onBrowseRepo={setBrowsingRepo} onReviewPullRequest={setReviewing} />
         )
+      case 'profile':
+        return (
+          <Profile
+            username={profileUser}
+            onBack={profileUser ? () => setProfileUser(null) : undefined}
+            onOpenRepo={(repo) => {
+              setBrowsingRepo(repo)
+              setActiveTab('repositories')
+            }}
+          />
+        )
+      case 'notifications':
+        return <Notifications />
       case 'settings':
         return <Settings isAdmin={isAdmin} />
       case 'search':

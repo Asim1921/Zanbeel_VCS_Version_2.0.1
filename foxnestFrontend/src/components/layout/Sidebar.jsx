@@ -1,4 +1,5 @@
 import {
+  FiBell,
   FiUser,
   FiFolder,
   FiArchive,
@@ -31,6 +32,8 @@ const Sidebar = ({ isOpen, setIsOpen, activeTab, setActiveTab, currentUser }) =>
     { name: 'Dashboard', id: 'dashboard', icon: FiHome, description: 'Overview of your activities' },
     { name: 'Repositories', id: 'repositories', icon: FiFolder, description: 'Browse all repositories' },
     { name: 'Search', id: 'search', icon: FiSearch, description: 'Find repositories, commits and code' },
+    { name: 'Notifications', id: 'notifications', icon: FiBell, description: 'Everything you have been told' },
+    { name: 'Profile', id: 'profile', icon: FiUser, description: 'Your repositories, commits and details' },
     { name: 'Settings', id: 'settings', icon: FiSettings, description: 'Access tokens and SSH keys' },
   ]
 

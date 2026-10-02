@@ -392,6 +392,29 @@ def ensure_merge_conflict_branch_sessions():
         print(f"[warn] Unable to relax merge conflict sessions: {exc}")
 
 
+
+def ensure_user_profile_columns():
+    """Profile fields on users, added where they do not exist yet."""
+    columns = (
+        ("avatar_blob_hash", "ALTER TABLE users ADD COLUMN avatar_blob_hash VARCHAR(64)"),
+        ("avatar_content_type", "ALTER TABLE users ADD COLUMN avatar_content_type VARCHAR(64)"),
+        ("bio", "ALTER TABLE users ADD COLUMN bio TEXT"),
+        ("location", "ALTER TABLE users ADD COLUMN location VARCHAR(100)"),
+        ("website", "ALTER TABLE users ADD COLUMN website VARCHAR(200)"),
+    )
+    try:
+        with engine.begin() as connection:
+            existing = {
+                row[1] for row in connection.execute(text("PRAGMA table_info(users)"))
+            }
+            for name, statement in columns:
+                if name not in existing:
+                    connection.execute(text(statement))
+        print("[ok] User profile columns verified")
+    except Exception as exc:
+        print(f"[warn] Unable to add user profile columns: {exc}")
+
+
 def ensure_repositories_branch_policy_column():
     """Add repositories.branch_policy_json for branch protection rules.
 

@@ -33,6 +33,7 @@ from app.db.migrations import (
     ensure_ssh_key_tables,
     ensure_user_permissions_issue_id_column,
     ensure_user_permissions_show_in_web_ui_column,
+    ensure_user_profile_columns,
     ensure_users_last_login_at_column,
     ensure_users_password_hash_column,
     ensure_versioning_schema,
@@ -85,6 +86,7 @@ async def startup_event():
     create_tables()
     ensure_users_password_hash_column()
     ensure_users_last_login_at_column()
+    ensure_user_profile_columns()
     ensure_user_permissions_show_in_web_ui_column()
     ensure_user_permissions_issue_id_column()
     ensure_versioning_schema()

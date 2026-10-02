@@ -8,7 +8,8 @@
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "verify:graph": "node scripts/verify-commit-graph.mjs"
+    "verify:graph": "node scripts/verify-commit-graph.mjs",
+    "verify:nav": "node scripts/verify-navigation.mjs"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.13",

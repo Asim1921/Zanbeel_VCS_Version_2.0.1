@@ -36,6 +36,7 @@ from app.services import refs
 from app.services.signing import sign_commit
 from app.services import (
     codeowners, forks, merge_conflicts, pr_comments, pr_files, pr_reviews,
+    review_notifications,
 )
 
 
@@ -121,6 +122,16 @@ async def create_pull_request(
             "author": current_user.username,
         },
     })
+
+    # CODEOWNERS blocks the merge on these people, so they have to be told they are
+    # required -- otherwise the gate is satisfiable in principle and stuck in practice.
+    try:
+        ownership = codeowners.required_owners(db, repository, pr)
+        review_notifications.review_requested_from_owners(
+            db, repository, pr, ownership.get("required", [])
+        )
+    except Exception:
+        pass
 
     return {
         "success": True,
@@ -284,6 +295,9 @@ async def merge_pull_request(
     )
     sign_commit(db, commit, current_user.username, current_user.id)
     PullRequestCRUD.mark_merged(db, pr, merge_commit_id=commit.id, reviewer_id=current_user.id)
+    review_notifications.pull_request_merged(
+        db, repository, pr, current_user, merge_commit_id=commit.id
+    )
 
     hook_service.dispatch(db, hook_service.EVENT_PR_MERGED, repo_id, {
         "repository": {"id": repo_id, "name": repository.name},
@@ -468,6 +482,10 @@ async def submit_pull_request_review(
     except pr_reviews.ReviewError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message)
 
+    review_notifications.review_submitted(
+        db, repository, pr, current_user, request.state
+    )
+
     ActivityCRUD.create_activity(
         db, current_user.id, "review_pull_request",
         f"{request.state.replace('_', ' ')} on PR #{pr.id} "
@@ -549,6 +567,8 @@ async def add_pull_request_comment(
         )
     except pr_comments.CommentError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message)
+
+    review_notifications.comment_added(db, repository, pr, current_user, comment)
 
     return {"success": True, "comment_id": comment.id,
             **pr_comments.threads(db, repository, pr)}
