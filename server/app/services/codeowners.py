@@ -103,7 +103,9 @@ def owners_for(rules: List[OwnerRule], path: str) -> List[str]:
 
 def changed_paths(db: Session, repository: Repository, pr: PullRequest) -> List[str]:
     """Paths a pull request would change, relative to the merge base."""
-    source = BranchCRUD.get_branch(db, repository.id, pr.source_branch)
+    from app.services import pr_source
+
+    source = pr_source.branch(db, pr)
     target = BranchCRUD.get_branch(db, repository.id, pr.target_branch)
     if not source or not target:
         return []

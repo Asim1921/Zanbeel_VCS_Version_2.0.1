@@ -392,6 +392,50 @@ def ensure_merge_conflict_branch_sessions():
         print(f"[warn] Unable to relax merge conflict sessions: {exc}")
 
 
+def ensure_merge_conflict_resolution_columns():
+    """Columns for fork-aware sessions, saved drafts and conflict kinds.
+
+    Must run after ensure_merge_conflict_branch_sessions(): that rebuild copies a fixed
+    column list, so anything added before it would be dropped again.
+    """
+    tables = {
+        "merge_conflict_sessions": (
+            ("source_repository_id", "VARCHAR(16)"),
+            ("result_commit_id", "VARCHAR(40)"),
+            ("resolved_by_id", "INTEGER"),
+            ("resolved_at", "TIMESTAMP"),
+        ),
+        "merge_conflict_files": (
+            ("conflict_kind", "VARCHAR(20)"),
+            ("resolution", "VARCHAR(10)"),
+            ("resolved_by_id", "INTEGER"),
+            ("resolved_at", "TIMESTAMP"),
+        ),
+    }
+    try:
+        with engine.begin() as connection:
+            for table, columns in tables.items():
+                existing = {
+                    row[1] for row in connection.execute(text(f"PRAGMA table_info({table})"))
+                }
+                if not existing:
+                    continue  # The models create the table, columns included.
+                for name, ddl_type in columns:
+                    if name not in existing:
+                        connection.execute(
+                            text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl_type}")
+                        )
+            # Sessions resolved before drafts existed hold a resolved_file_hash but no
+            # resolution; give them one so "resolved" means the same thing everywhere.
+            connection.execute(text(
+                "UPDATE merge_conflict_files SET resolution = 'content' "
+                "WHERE resolution IS NULL AND resolved_file_hash IS NOT NULL"
+            ))
+        print("[ok] Merge conflict resolution columns verified")
+    except Exception as exc:
+        print(f"[warn] Unable to add merge conflict resolution columns: {exc}")
+
+
 
 def ensure_user_profile_columns():
     """Profile fields on users, added where they do not exist yet."""

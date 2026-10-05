@@ -20,11 +20,11 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
-from database.crud import BranchCRUD
 from database.models import (
     CommitFile, PullRequest, PullRequestComment, Repository, User,
 )
 
+from app.services import pr_source
 from app.services.paths import variants as path_variants
 
 
@@ -40,8 +40,7 @@ MAX_BODY = 20_000
 
 
 def _source_head(db: Session, repository: Repository, pr: PullRequest) -> Optional[str]:
-    branch = BranchCRUD.get_branch(db, repository.id, pr.source_branch)
-    return branch.head_commit_id if branch else None
+    return pr_source.head(db, pr)
 
 
 def _file_hash_at(db: Session, commit_id: Optional[str], path: str) -> Optional[str]:

@@ -18,8 +18,149 @@ import time
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from pathlib import Path
+import re
 import requests
 import urllib.parse
+
+
+# --- three-way merge ------------------------------------------------------------------
+# The same line-level diff3 merge the server runs (server/app/services/merge.py), so a
+# local `fox merge` and a server-side merge agree on what conflicts. Duplicated rather
+# than shared because this client ships as a single file.
+
+MERGE_MAX_LINES = 60000
+
+_MARKER_BLOCK = re.compile(
+    r"^<{7}(?: [^\n]*)?\r?\n.*?^={7}\r?\n.*?^>{7}(?: [^\n]*)?\r?$",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _decode_utf8(content):
+    if content is None:
+        return None
+    try:
+        return content.decode("utf-8")
+    except Exception:
+        return None
+
+
+def _split_lines(text):
+    """Lines with endings attached; ``"".join`` gives the exact text back."""
+    if not text:
+        return []
+    pieces = text.split("\n")
+    lines = [piece + "\n" for piece in pieces[:-1]]
+    if pieces[-1]:
+        lines.append(pieces[-1])
+    return lines
+
+
+def _alignment(base, side):
+    matcher = difflib.SequenceMatcher(None, base, side, autojunk=False)
+    mapping = {}
+    for base_start, side_start, size in matcher.get_matching_blocks():
+        for offset in range(size):
+            mapping[base_start + offset] = side_start + offset
+    return mapping
+
+
+def merge_regions(base, ours, theirs):
+    """diff3 merge of three line lists: [("clean", lines) | ("conflict", base, ours, theirs)]."""
+    regions = []
+
+    def settle(lines):
+        if not lines:
+            return
+        if regions and regions[-1][0] == "clean":
+            regions[-1][1].extend(lines)
+        else:
+            regions.append(("clean", list(lines)))
+
+    def reconcile(base_seg, ours_seg, theirs_seg):
+        if not (base_seg or ours_seg or theirs_seg):
+            return
+        if ours_seg == theirs_seg:
+            settle(ours_seg)
+        elif ours_seg == base_seg:
+            settle(theirs_seg)
+        elif theirs_seg == base_seg:
+            settle(ours_seg)
+        else:
+            regions.append(("conflict", list(base_seg), list(ours_seg), list(theirs_seg)))
+
+    if len(base) + len(ours) + len(theirs) > MERGE_MAX_LINES:
+        reconcile(base, ours, theirs)
+        return regions
+
+    to_ours = _alignment(base, ours)
+    to_theirs = _alignment(base, theirs)
+    b = o = t = 0
+    for index, line in enumerate(base):
+        if index not in to_ours or index not in to_theirs:
+            continue
+        o_at, t_at = to_ours[index], to_theirs[index]
+        reconcile(base[b:index], ours[o:o_at], theirs[t:t_at])
+        settle([line])
+        b, o, t = index + 1, o_at + 1, t_at + 1
+    reconcile(base[b:], ours[o:], theirs[t:])
+    return regions
+
+
+def merge_text(base, ours, theirs, labels=("ours", "base", "theirs")):
+    """Line-level merge of one text file. Returns (merged bytes, number of conflicts)."""
+    base_lines = _split_lines(_decode_utf8(base) or "")
+    ours_lines = _split_lines(_decode_utf8(ours) or "")
+    theirs_lines = _split_lines(_decode_utf8(theirs) or "")
+
+    eol = "\n"
+    for lines in (ours_lines, theirs_lines, base_lines):
+        ending = next((l for l in lines if l.endswith("\n")), None)
+        if ending is not None:
+            eol = "\r\n" if ending.endswith("\r\n") else "\n"
+            break
+
+    out = []
+
+    def emit_side(lines):
+        out.extend(lines)
+        if lines and not lines[-1].endswith("\n"):
+            out.append(eol)
+
+    conflicts = 0
+    for region in merge_regions(base_lines, ours_lines, theirs_lines):
+        if region[0] == "clean":
+            out.extend(region[1])
+            continue
+        conflicts += 1
+        _kind, base_seg, ours_seg, theirs_seg = region
+        if out and not out[-1].endswith("\n"):
+            out.append(eol)
+        out.append(f"<<<<<<< {labels[0]}{eol}")
+        emit_side(ours_seg)
+        out.append(f"||||||| {labels[1]}{eol}")
+        emit_side(base_seg)
+        out.append(f"======={eol}")
+        emit_side(theirs_seg)
+        out.append(f">>>>>>> {labels[2]}{eol}")
+    return "".join(out).encode("utf-8"), conflicts
+
+
+def conflict_kind(base, ours, theirs):
+    if ours is None or theirs is None:
+        return "modify_delete"
+    if _decode_utf8(ours) is None or _decode_utf8(theirs) is None:
+        return "binary"
+    if base is None:
+        return "add_add"
+    return "content"
+
+
+def has_conflict_markers(content):
+    """Whether content still holds a complete <<<<<<< / ======= / >>>>>>> block."""
+    text = _decode_utf8(content) if isinstance(content, bytes) else content
+    return bool(text) and _MARKER_BLOCK.search(text) is not None
+
 
 class FoxClient:
     def __init__(self):
@@ -35,7 +176,10 @@ class FoxClient:
         self.refs_dir = self.fox_dir / "refs"
         self.heads_dir = self.refs_dir / "heads"
         self.tags_dir = self.refs_dir / "tags"
-        self.merge_conflicts_file = self.fox_dir / "merge_conflicts.json"
+        # A local merge in progress, as Git records it: MERGE_HEAD names the commit being
+        # merged in, MERGE_STATE.json the rest (branches, conflicted and touched paths).
+        self.merge_head_file = self.fox_dir / "MERGE_HEAD"
+        self.merge_state_file = self.fox_dir / "MERGE_STATE.json"
         
         # Global credentials file (in user's home directory)
         self.global_config_dir = Path.home() / ".foxnest"
@@ -923,6 +1067,13 @@ class FoxClient:
         with open(self.index_file, "w") as f:
             json.dump(index, f, indent=2)
     
+    @staticmethod
+    def _content_hash_of_key(key):
+        """A commit's file map is keyed by content hash; a merge snapshot holding the
+        same content at two paths (two empty __init__.py, say) disambiguates the second
+        key as ``<hash>~<n>``. The content hash is the part before the tilde."""
+        return str(key).split("~", 1)[0]
+
     def update_index_from_commit(self, commit_files):
         """Update index from committed files"""
         index = {}
@@ -931,7 +1082,7 @@ class FoxClient:
             if Path(file_path).exists():
                 stat = Path(file_path).stat()
                 index[file_path] = {
-                    "hash": file_hash,
+                    "hash": self._content_hash_of_key(file_hash),
                     "mtime": stat.st_mtime,
                     "size": stat.st_size
                 }
@@ -1146,7 +1297,7 @@ class FoxClient:
             # Convert from hash-based storage to path-based for easy lookup
             path_to_hash = {}
             for file_hash, file_data in commit_files.items():
-                path_to_hash[file_data["path"]] = file_hash
+                path_to_hash[file_data["path"]] = self._content_hash_of_key(file_hash)
             
             return path_to_hash
         except:
@@ -1246,26 +1397,16 @@ class FoxClient:
         except Exception:
             return None
 
-    def _merge_text(self, base, ours, theirs):
-        base_text = self._try_decode_text(base) or ""
-        ours_text = self._try_decode_text(ours) or ""
-        theirs_text = self._try_decode_text(theirs) or ""
-        if ours_text == theirs_text:
-            return ours_text.encode("utf-8"), False
-        if base_text == ours_text:
-            return theirs_text.encode("utf-8"), False
-        if base_text == theirs_text:
-            return ours_text.encode("utf-8"), False
-        merged = (
-            "<<<<<<< OURS\n"
-            f"{ours_text}"
-            "\n=======\n"
-            f"{theirs_text}"
-            "\n>>>>>>> THEIRS\n"
-        )
-        return merged.encode("utf-8"), True
+    def _merge_text(self, base, ours, theirs, labels=("ours", "base", "theirs")):
+        merged, conflicts = merge_text(base, ours, theirs, labels)
+        return merged, conflicts > 0
 
-    def _merge_trees(self, base, ours, theirs):
+    def _merge_trees(self, base, ours, theirs, labels=("ours", "base", "theirs")):
+        """Merge three snapshots line by line. Returns (merged snapshot, conflicted paths).
+
+        A modify/delete conflict keeps the surviving side, as Git leaves it in the work
+        tree; a binary conflict keeps ours.
+        """
         merged = {}
         conflicts = []
         paths = set(base.keys()) | set(ours.keys()) | set(theirs.keys())
@@ -1278,26 +1419,27 @@ class FoxClient:
                 if our_content is not None:
                     merged[path] = our_content
                 continue
-
             if base_content == our_content:
                 if their_content is not None:
                     merged[path] = their_content
                 continue
-
             if base_content == their_content:
                 if our_content is not None:
                     merged[path] = our_content
                 continue
 
-            if self._try_decode_text(our_content) is not None and self._try_decode_text(their_content) is not None:
-                merged_content, has_conflict = self._merge_text(base_content, our_content, their_content)
-                merged[path] = merged_content
-                if has_conflict:
-                    conflicts.append(path)
-            else:
-                if our_content is not None:
-                    merged[path] = our_content
+            kind = conflict_kind(base_content, our_content, their_content)
+            if kind == "modify_delete":
+                merged[path] = our_content if our_content is not None else their_content
                 conflicts.append(path)
+            elif kind == "binary":
+                merged[path] = our_content
+                conflicts.append(path)
+            else:
+                content, conflicted = self._merge_text(base_content, our_content, their_content, labels)
+                merged[path] = content
+                if conflicted:
+                    conflicts.append(path)
 
         return merged, conflicts
 
@@ -1921,6 +2063,8 @@ class FoxClient:
     def checkout_branch(self, branch_name, force=False):
         if not self.check_repository("checkout"):
             return False
+        if self._refuse_during_merge("switch branches"):
+            return False
         self.ensure_refs()
         branch_ref = self.heads_dir / branch_name
         if not branch_ref.exists():
@@ -2267,10 +2411,139 @@ class FoxClient:
         print(f"Server error ({resp.status_code}): {detail}")
         return False
 
+    # --- local merge ------------------------------------------------------------------
+    # Git's model. A clean merge commits at once; a conflicted one writes the markers into
+    # the work tree and records the merge in progress, so `fox merge --continue` can make
+    # the two-parent commit and `fox merge --abort` can put everything back. Before this,
+    # a clean merge wrote files and never committed, and a conflicted one told you to
+    # "commit the merge" with nothing remembering it was a merge -- the commit got one
+    # parent and the next merge hit the same conflicts again.
+
+    def _merge_state(self):
+        if not self.merge_state_file.exists():
+            return None
+        try:
+            with open(self.merge_state_file, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            return state if isinstance(state, dict) else None
+        except Exception:
+            return None
+
+    def _save_merge_state(self, state):
+        with open(self.merge_state_file, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+        self.merge_head_file.write_text(state["source_commit"] + "\n")
+
+    def _clear_merge_state(self):
+        for path in (self.merge_state_file, self.merge_head_file):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _refuse_during_merge(self, action):
+        state = self._merge_state()
+        if not state:
+            return False
+        print(f"Cannot {action}: a merge of '{state.get('source_branch')}' into "
+              f"'{state.get('target_branch')}' is in progress.")
+        print("  Fix the conflicts, then:  fox merge --continue")
+        print("  Or undo the merge:        fox merge --abort")
+        return True
+
+    @staticmethod
+    def _merge_blockers(head_tree, merged_tree):
+        """Paths the merge would write over that hold uncommitted work (Git refuses too)."""
+        blockers = []
+        for path in sorted(set(head_tree) | set(merged_tree)):
+            if head_tree.get(path) == merged_tree.get(path):
+                continue  # the merge leaves this path alone
+            on_disk = Path(path)
+            if not on_disk.exists():
+                # Deleted locally, and the merge would bring it back.
+                if path in head_tree and path in merged_tree:
+                    blockers.append(path)
+                continue
+            try:
+                current = on_disk.read_bytes()
+            except Exception:
+                blockers.append(path)
+                continue
+            if path in head_tree:
+                if current != head_tree[path]:
+                    blockers.append(path)            # an uncommitted edit
+            elif current != merged_tree.get(path):
+                blockers.append(path)                # an untracked file in the way
+        return blockers
+
+    @staticmethod
+    def _write_tree_changes(old_tree, new_tree):
+        """Make the work tree go from old_tree to new_tree. Returns the paths touched."""
+        touched = []
+        for path in sorted(set(old_tree) | set(new_tree)):
+            if old_tree.get(path) == new_tree.get(path):
+                continue
+            target = Path(path)
+            if path in new_tree:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(new_tree[path])
+            elif target.exists():
+                target.unlink()
+            touched.append(path)
+        return touched
+
+    def _write_snapshot_commit(self, message, parents, tree):
+        """Record a commit whose content is exactly `tree`, on the current branch.
+
+        Merges cannot go through `commit()`: it commits only what is staged, on top of the
+        last commit in the file rather than HEAD, and cannot express a deletion.
+        """
+        config = self.load_config()
+        commit_id = hashlib.sha256(f"{message}{datetime.now().isoformat()}".encode()).hexdigest()[:16]
+        files = {}
+        for path in sorted(tree):
+            content = tree[path]
+            content_hash = hashlib.sha256(content).hexdigest()[:16]
+            self.store_object_compressed(content, content_hash)
+            key, n = content_hash, 1
+            while key in files:          # same content at two paths keeps both
+                key, n = f"{content_hash}~{n}", n + 1
+            files[key] = {"path": path, "content": base64.b64encode(content).decode()}
+
+        parents = [p for p in parents if p]
+        commits = self.load_commits()
+        commits.append({
+            "id": commit_id,
+            "message": message,
+            "author": config["username"],
+            "timestamp": datetime.now().isoformat(),
+            "parent": parents[0] if parents else None,
+            "parents": parents,
+            "files": files,
+        })
+        with open(self.commits_file, "w") as f:
+            json.dump(commits, f, indent=2)
+        self.update_head_commit(commit_id)
+        self.update_index_from_commit(files)
+        return commit_id
+
+    def _staged_entries(self):
+        entries = []
+        if self.staging_dir.exists():
+            for staging_file in self.staging_dir.glob("*"):
+                try:
+                    with open(staging_file, "r") as f:
+                        entries.append(json.load(f))
+                except Exception:
+                    continue
+        return entries
+
     def merge_branch(self, source_branch):
         if not self.check_repository("merge"):
             return False
         self.ensure_refs()
+        if self._refuse_during_merge("start another merge"):
+            return False
         current_branch = self.get_current_branch()
         if not current_branch:
             print("Cannot merge in detached HEAD state")
@@ -2283,33 +2556,207 @@ class FoxClient:
         if not source_ref.exists():
             print(f"Branch not found: {source_branch}")
             return False
+        if self._staged_entries():
+            print("Cannot merge with staged changes. Commit them first (fox commit -m \"...\").")
+            return False
 
         target_commit = self._read_ref(self.heads_dir / current_branch)
         source_commit = self._read_ref(source_ref)
-
-        base_commit = self._find_merge_base(target_commit, source_commit)
-        base_tree = self._commit_tree(base_commit)
-        target_tree = self._commit_tree(target_commit)
-        source_tree = self._commit_tree(source_commit)
-
-        merged_tree, conflicts = self._merge_trees(base_tree, target_tree, source_tree)
-
-        for file_path, content in merged_tree.items():
-            Path(file_path).parent.mkdir(parents=True, exist_ok=True)
-            with open(file_path, "wb") as f:
-                f.write(content)
-
-        if conflicts:
-            print("Merge conflicts detected in:")
-            for path in conflicts:
-                print(f"  {path}")
-            print("Resolve conflicts, then commit the merge.")
+        if not source_commit:
+            print(f"Branch '{source_branch}' has no commits")
             return False
 
-        merge_message = f"Merge branch '{source_branch}' into '{current_branch}'"
-        self.commit(merge_message, parents=[target_commit, source_commit])
-        print("Merge completed")
+        base_commit = self._find_merge_base(target_commit, source_commit)
+        target_tree = self._commit_tree(target_commit)
+
+        if source_commit == target_commit or base_commit == source_commit:
+            print("Already up to date.")
+            return True
+
+        if target_commit is None or base_commit == target_commit:
+            # Nothing on this branch the other lacks: move forward, no merge commit.
+            source_tree = self._commit_tree(source_commit)
+            blockers = self._merge_blockers(target_tree, source_tree)
+            if blockers:
+                self._print_merge_blockers(blockers)
+                return False
+            self._write_tree_changes(target_tree, source_tree)
+            self.update_head_commit(source_commit)
+            commit = self.get_commit_by_id(source_commit) or {}
+            self.update_index_from_commit(commit.get("files", {}))
+            print(f"Fast-forward {str(target_commit or '')[:12]}..{source_commit[:12]}")
+            return True
+
+        labels = (current_branch, "base", source_branch)
+        merged_tree, conflicts = self._merge_trees(
+            self._commit_tree(base_commit), target_tree, self._commit_tree(source_commit), labels)
+
+        blockers = self._merge_blockers(target_tree, merged_tree)
+        if blockers:
+            self._print_merge_blockers(blockers)
+            return False
+
+        touched = self._write_tree_changes(target_tree, merged_tree)
+        message = f"Merge branch '{source_branch}' into '{current_branch}'"
+
+        if not conflicts:
+            commit_id = self._write_snapshot_commit(message, [target_commit, source_commit], merged_tree)
+            print(f"Merge made by the three-way strategy: {commit_id}")
+            print(f"  {len(touched)} file(s) changed")
+            return True
+
+        base_tree = self._commit_tree(base_commit)
+        source_tree = self._commit_tree(source_commit)
+        for path in conflicts:
+            kind = conflict_kind(base_tree.get(path), target_tree.get(path), source_tree.get(path))
+            if kind == "modify_delete":
+                deleted_in = current_branch if path not in target_tree else source_branch
+                kept_from = source_branch if deleted_in == current_branch else current_branch
+                print(f"CONFLICT (modify/delete): {path} deleted in {deleted_in} and modified "
+                      f"in {kept_from}. Version {kept_from} of {path} left in tree.")
+            elif kind == "binary":
+                print(f"CONFLICT (binary): {path} -- this branch's version left in tree.")
+            elif kind == "add_add":
+                print(f"CONFLICT (add/add): Merge conflict in {path}")
+            else:
+                print(f"CONFLICT (content): Merge conflict in {path}")
+
+        self._save_merge_state({
+            "source_branch": source_branch,
+            "target_branch": current_branch,
+            "source_commit": source_commit,
+            "target_commit": target_commit,
+            "base_commit": base_commit,
+            "message": message,
+            "conflicts": sorted(conflicts),
+            "touched": touched,
+            "started_at": datetime.now().isoformat(),
+        })
+        print("Automatic merge failed; fix conflicts and then run:")
+        print("  fox merge --continue")
+        print("Or undo the merge with:")
+        print("  fox merge --abort")
+        return False
+
+    @staticmethod
+    def _print_merge_blockers(blockers):
+        print("Cannot merge: your local changes to these files would be overwritten:")
+        for path in blockers[:20]:
+            print(f"    {path}")
+        if len(blockers) > 20:
+            print(f"    ... and {len(blockers) - 20} more")
+        print("Commit them first (fox add ... && fox commit -m \"...\"), then merge again.")
+
+    def merge_continue(self, allow_markers=False):
+        """Finish a conflicted local merge with a two-parent commit."""
+        if not self.check_repository("merge"):
+            return False
+        state = self._merge_state()
+        if not state:
+            print("There is no merge in progress.")
+            return False
+        if self.get_head_commit_id() != state.get("target_commit"):
+            print(f"'{state.get('target_branch')}' has moved since the merge started; "
+                  f"run fox merge --abort and merge again.")
+            return False
+
+        # The merge result as computed, then each conflicted path exactly as it is on
+        # disk now -- edited, or deleted to take the deletion.
+        merged_tree, _conflicts = self._merge_trees(
+            self._commit_tree(state.get("base_commit")),
+            self._commit_tree(state["target_commit"]),
+            self._commit_tree(state["source_commit"]),
+            (state.get("target_branch", "ours"), "base", state.get("source_branch", "theirs")),
+        )
+        still_marked = []
+        for path in state.get("conflicts", []):
+            on_disk = Path(path)
+            if on_disk.exists():
+                content = on_disk.read_bytes()
+                merged_tree[path] = content
+                if has_conflict_markers(content):
+                    still_marked.append(path)
+            else:
+                merged_tree.pop(path, None)
+
+        if still_marked and not allow_markers:
+            print("These files still contain conflict markers:")
+            for path in still_marked:
+                print(f"    {path}")
+            print("Resolve them (or pass --allow-markers if the markers are meant to be there), "
+                  "then run fox merge --continue.")
+            return False
+
+        # Anything staged during the merge is part of it, as with `git add` mid-merge.
+        staged = self._staged_entries()
+        for entry in staged:
+            content = self.load_object_compressed(entry.get("hash", ""))
+            if content is None and Path(entry["path"]).exists():
+                content = Path(entry["path"]).read_bytes()
+            if content is not None:
+                merged_tree[entry["path"]] = content
+
+        commit_id = self._write_snapshot_commit(
+            state.get("message") or "Merge",
+            [state["target_commit"], state["source_commit"]],
+            merged_tree,
+        )
+        if staged and self.staging_dir.exists():
+            shutil.rmtree(self.staging_dir)
+            self.staging_dir.mkdir()
+        self._clear_merge_state()
+        print(f"Merge completed: {commit_id}")
+        print(f"  {len(state.get('conflicts', []))} conflicted file(s) resolved")
         return True
+
+    def merge_abort(self):
+        """Undo a conflicted local merge: the touched files go back to the branch tip."""
+        if not self.check_repository("merge"):
+            return False
+        state = self._merge_state()
+        if not state:
+            print("There is no merge in progress.")
+            return False
+        target_tree = self._commit_tree(state["target_commit"])
+        for path in state.get("touched", []):
+            on_disk = Path(path)
+            if path in target_tree:
+                on_disk.parent.mkdir(parents=True, exist_ok=True)
+                on_disk.write_bytes(target_tree[path])
+            elif on_disk.exists():
+                on_disk.unlink()
+        commit = self.get_commit_by_id(state["target_commit"]) or {}
+        self.update_index_from_commit(commit.get("files", {}))
+        self._clear_merge_state()
+        print(f"Merge of '{state.get('source_branch')}' aborted; "
+              f"'{state.get('target_branch')}' is back at {str(state['target_commit'])[:12]}.")
+        return True
+
+    def _print_merge_status(self):
+        """The unmerged-paths section of `fox status`, while a merge is in progress."""
+        state = self._merge_state()
+        if not state:
+            return
+        print(f"\nYou are merging '{state.get('source_branch')}' into "
+              f"'{state.get('target_branch')}'.")
+        print("  (fix conflicts and run \"fox merge --continue\")")
+        print("  (use \"fox merge --abort\" to abort the merge)")
+        unresolved, resolved = [], []
+        for path in state.get("conflicts", []):
+            on_disk = Path(path)
+            if on_disk.exists() and has_conflict_markers(on_disk.read_bytes()):
+                unresolved.append(path)
+            else:
+                resolved.append(path)
+        if unresolved:
+            print("\nUnmerged paths:")
+            for path in unresolved:
+                print(f"\033[31m        both modified:   {path}\033[0m")
+        if resolved:
+            print("\nResolved (will be committed by --continue):")
+            for path in resolved:
+                state_word = "deleted" if not Path(path).exists() else "resolved"
+                print(f"\033[32m        {state_word}:   {path}\033[0m")
 
     def _resolve_commit_ref_local(self, ref: str) -> Optional[str]:
         """Resolve commit id or unique local prefix to full commit id."""
@@ -2700,48 +3147,28 @@ class FoxClient:
             print(f"Merged PR #{pr_id} into {data.get('merge_commit_id')}")
             return True
         if response.status_code == 409:
-            data = response.json()
-            print("Merge conflicts detected:")
-            for path in data.get("conflicts", []):
-                print(f"  {path}")
-            session_id = data.get("session_id")
-            if session_id:
-                self._store_merge_conflict_session(pr_id, session_id)
-                print("\nTo resolve in CLI:")
-                print(f"  fox pr resolve {pr_id} --session {session_id}")
-                print(f"  fox pr resolve {pr_id} --session {session_id} --submit  # after editing .resolved files\n")
+            try:
+                data = response.json()
+            except Exception:
+                data = {}
+            if data.get("code") == "MERGE_CONFLICT":
+                print(data.get("message") or "This pull request has merge conflicts:")
+                for path in data.get("conflicts", []):
+                    print(f"  {path}")
+                # The server resolves on the pull request's own branch, as GitHub does.
+                print("\nResolve them (the resolution is committed to the PR's branch):")
+                print(f"  fox pr resolve {pr_id}")
+                blockers = data.get("review_blockers") or []
+                if blockers:
+                    print("\nAlso needed before it can merge (after resolving, since that "
+                          "makes earlier approvals stale):")
+                    for blocker in blockers:
+                        print(f"  - {blocker}")
+                return False
+            self._print_failure(response, f"merge PR #{pr_id}")
             return False
-        print(f"Error merging PR: {response.text}")
+        self._print_failure(response, f"merge PR #{pr_id}")
         return False
-
-    def _load_merge_conflicts_state(self):
-        if not self.merge_conflicts_file.exists():
-            return {}
-        try:
-            with open(self.merge_conflicts_file, "r") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
-
-    def _save_merge_conflicts_state(self, state: dict):
-        try:
-            self.fox_dir.mkdir(exist_ok=True)
-            with open(self.merge_conflicts_file, "w") as f:
-                json.dump(state, f, indent=2)
-        except Exception:
-            pass
-
-    def _store_merge_conflict_session(self, pr_id: int, session_id: int):
-        state = self._load_merge_conflicts_state()
-        state[str(pr_id)] = {"session_id": int(session_id), "updated_at": datetime.utcnow().isoformat()}
-        self._save_merge_conflicts_state(state)
-
-    def _get_merge_conflict_session(self, pr_id: int):
-        state = self._load_merge_conflicts_state()
-        entry = state.get(str(pr_id)) or {}
-        sid = entry.get("session_id")
-        return int(sid) if sid is not None else None
 
     # --- review workflow ---------------------------------------------------------
     # The server has carried reviews, inline comments and code owners since 2.0.1.
@@ -2758,19 +3185,31 @@ class FoxClient:
 
     @staticmethod
     def _print_failure(response, action):
-        """Report a refusal in the server's own words rather than a bare status code."""
+        """Report a refusal in the server's own words rather than a bare status code.
+
+        Understands both shapes the server uses: ``{"detail": {...}}`` and the flat
+        ``{"detail": "...", "code": ..., ...}`` the conflict endpoints return.
+        """
         try:
-            detail = response.json().get("detail")
+            body = response.json()
         except Exception:
-            detail = None
-        if isinstance(detail, dict):
-            code = detail.get("code")
-            message = detail.get("message") or detail.get("detail") or ""
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        detail = body.get("detail")
+        info = detail if isinstance(detail, dict) else body
+        message = (info.get("message") or info.get("detail")) if isinstance(detail, dict) \
+            else (detail or body.get("message") or "")
+        code = info.get("code") or body.get("code")
+        if message:
             print(f"Could not {action}: {message}" + (f" [{code}]" if code else ""))
-            for blocker in detail.get("blockers", []) or []:
-                print(f"  - {blocker}")
         else:
-            print(f"Could not {action}: HTTP {response.status_code} {detail or ''}".rstrip())
+            print(f"Could not {action}: HTTP {response.status_code}" + (f" [{code}]" if code else ""))
+        for blocker in info.get("blockers", []) or []:
+            print(f"  - {blocker}")
+        for key in ("unresolved", "paths"):
+            for path in info.get(key, []) or []:
+                print(f"  - {path}")
 
     @staticmethod
     def _print_gate(data):
@@ -2991,115 +3430,235 @@ class FoxClient:
         print(f"Opened pull request #{pr.get('id')} into {upstream}:{target_branch}.")
         return True
 
-    # --- branch merge conflict resolution -----------------------------------------
-    # A conflicted branch merge used to report the conflict and stop. Sessions belonged
-    # to pull requests, so there was nowhere to park the three sides of each file.
+    # --- resolving conflicts on the server -------------------------------------------
+    # One routine for both kinds of session. A pull request's resolution is committed to
+    # the pull request's own branch -- a merge of the target into it, as GitHub does --
+    # and the pull request then merges normally. A direct branch merge's lands on the
+    # target.
+    #
+    #   fox pr resolve 7                 open (or resume) and write the files to edit
+    #   fox pr resolve 7 --status        what is decided, on the server and locally
+    #   fox pr resolve 7 --submit        send the edited .resolved files and commit
+    #   fox pr resolve 7 --abort         discard the session
+    #   fox merge feature --resolve ...  the same for a direct branch merge
+    #
+    # The pull request version used to rewrite every .resolved file from the server's
+    # suggestion before reading them back on --submit, which threw away the edits and
+    # landed the conflict markers. An existing .resolved file is now never overwritten.
 
-    def _branch_conflict_dir(self, session_id):
-        return self.fox_dir / "merge-conflicts" / f"branch_session_{session_id}"
+    @staticmethod
+    def _safe_conflict_path(out_dir, path, suffix):
+        """Where a conflict file is written, or None for a path that would escape out_dir."""
+        parts = [p for p in str(path).replace("\\", "/").split("/") if p not in ("", ".")]
+        if not parts or any(p == ".." for p in parts) or ":" in parts[0]:
+            return None
+        return out_dir.joinpath(*parts[:-1], parts[-1] + suffix)
+
+    def _find_open_conflict_session(self, api_base, start_payload):
+        response = self._authed_get(api_base, timeout=30)
+        if response.status_code != 200:
+            return None
+        sessions = response.json().get("sessions") or []
+        if start_payload:
+            sessions = [
+                s for s in sessions
+                if s.get("source_branch") == start_payload["source_branch"]
+                and s.get("target_branch") == start_payload["target_branch"]
+            ]
+        return sessions[0]["id"] if sessions else None
+
+    def _resolve_on_server(self, *, api_base, start_payload, label, dir_name, command,
+                           merge_hint=None, session_id=None, submit=False, abort=False,
+                           status=False, directory=None, deletes=None, allow_markers=False):
+        if abort:
+            session_id = session_id or self._find_open_conflict_session(api_base, start_payload)
+            if session_id is None:
+                print(f"No open conflict session for {label}.")
+                return False
+            response = self._authed_post(f"{api_base}/{session_id}/abort", json={}, timeout=60)
+            if response.status_code != 200:
+                self._print_failure(response, "discard that session")
+                return False
+            print(f"Session {session_id} discarded. Neither branch was changed.")
+            return True
+
+        # Opening is idempotent: an open session for the same heads comes back unchanged,
+        # with every decision already saved (in the browser or from here).
+        if session_id is None:
+            response = self._authed_post(api_base, json=start_payload or {}, timeout=300)
+        else:
+            response = self._authed_get(f"{api_base}/{session_id}", timeout=120)
+        if response.status_code != 200:
+            self._print_failure(response, f"open the conflicts for {label}")
+            return False
+
+        bundle = response.json()
+        session = bundle.get("session") or {}
+        files = bundle.get("files") or []
+        session_id = session.get("id")
+        if session.get("status") != "open":
+            print(f"Session {session_id} is {session.get('status')}.")
+            return False
+        if session.get("stale_reason"):
+            print(f"Session {session_id} is out of date: {session['stale_reason']}")
+            print(f"Run `{command}` without --session to compute the conflicts again.")
+            return False
+
+        target, source = session.get("target_branch"), session.get("source_branch")
+        toward_source = session.get("lands_on") == "source"
+        out_dir = Path(directory) if directory else (
+            self.fox_dir / "merge-conflicts" / f"{dir_name}_session_{session_id}")
+
+        if submit:
+            return self._submit_resolution(api_base, session, files, out_dir, deletes,
+                                           allow_markers, merge_hint)
+
+        if not status:
+            self._write_conflict_files(out_dir, files)
+
+        if toward_source:
+            print(f"Session {session_id}: resolving {label} by merging '{target}' into "
+                  f"'{source}' (the commit goes to '{source}').")
+        else:
+            print(f"Session {session_id}: merging '{source}' into '{target}'.")
+        print(f"  .ours = {target} (target)   .theirs = {source} (source)   .base = common ancestor")
+        print(f"  files: {out_dir}\n")
+
+        for entry in files:
+            path = entry["path"]
+            resolved_file = self._safe_conflict_path(out_dir, path, ".resolved")
+            local = resolved_file.read_bytes() if resolved_file and resolved_file.exists() else None
+            if entry.get("resolution") == "delete" and local is None:
+                state = "decided: delete"
+            elif local is not None and has_conflict_markers(local):
+                state = "markers left"
+            elif local is not None or entry.get("resolved"):
+                state = "ready"
+            else:
+                state = "to do"
+            kind = entry.get("kind") or "content"
+            print(f"  [{state:>14}] {path}   ({kind})")
+            if kind == "modify_delete" and state != "decided: delete":
+                gone = target if entry.get("deleted_in") == "target" else source
+                print(f"                   deleted in {gone}; to take the deletion add --delete {path}")
+            if kind == "binary":
+                print("                   binary: .resolved starts as the target's version; "
+                      "copy .theirs over it to keep the source's")
+
+        print(f"\nEdit the .resolved files, then:  {command} --submit")
+        print(f"Or discard the session:          {command} --abort")
+        return True
+
+    def _write_conflict_files(self, out_dir, files):
+        for entry in files:
+            path = entry["path"]
+            for side in ("base", "ours", "theirs"):
+                target = self._safe_conflict_path(out_dir, path, f".{side}")
+                blob = entry.get(f"{side}_b64")
+                if target is None:
+                    print(f"  skipping unsafe path: {path}")
+                    break
+                if blob is not None:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(base64.b64decode(blob))
+            resolved_file = self._safe_conflict_path(out_dir, path, ".resolved")
+            if resolved_file is None or resolved_file.exists():
+                continue  # never overwrite what someone may have edited
+            if entry.get("resolution") == "delete":
+                continue
+            start = (entry.get("resolved_b64") if entry.get("resolution") == "content" else None) \
+                or entry.get("suggested_b64") or entry.get("ours_b64") or ""
+            resolved_file.parent.mkdir(parents=True, exist_ok=True)
+            resolved_file.write_bytes(base64.b64decode(start) if start else b"")
+
+    def _submit_resolution(self, api_base, session, files, out_dir, deletes, allow_markers,
+                           merge_hint):
+        known = {entry["path"] for entry in files}
+        deletes = {str(d).replace("\\", "/").strip("/") for d in (deletes or [])}
+        unknown = sorted(deletes - known)
+        if unknown:
+            print("Not conflicted in this session: " + ", ".join(unknown))
+            return False
+
+        resolutions, missing, marked = {}, [], []
+        for entry in files:
+            path = entry["path"]
+            if path in deletes:
+                resolutions[path] = None
+                continue
+            resolved_file = self._safe_conflict_path(out_dir, path, ".resolved")
+            if resolved_file is not None and resolved_file.exists():
+                content = resolved_file.read_bytes()
+                if has_conflict_markers(content):
+                    marked.append(path)
+                resolutions[path] = base64.b64encode(content).decode("ascii")
+            elif not entry.get("resolved"):
+                missing.append(path)
+            # else: decided on the server already (in the browser) -- that decision stands
+
+        if missing:
+            print("No resolution for: " + ", ".join(missing))
+            print(f"Run without --submit to write the files to {out_dir}")
+            return False
+        if marked and not allow_markers:
+            print("These .resolved files still contain conflict markers:")
+            for path in marked:
+                print(f"    {path}")
+            print("Finish them, or pass --allow-markers if the markers are meant to be there.")
+            return False
+
+        toward_source = session.get("lands_on") == "source"
+        response = self._authed_post(
+            f"{api_base}/{session.get('id')}/resolve",
+            json={
+                "resolutions": resolutions,
+                "allow_markers": bool(allow_markers),
+                "expected_head_commit_id": session.get(
+                    "source_head_commit_id" if toward_source else "target_head_commit_id"),
+            },
+            timeout=300,
+        )
+        if response.status_code != 200:
+            self._print_failure(response, "commit the resolution")
+            return False
+
+        out = response.json()
+        commit = str(out.get("merge_commit_id") or "")[:12]
+        if out.get("lands_on") == "source":
+            print(f"Committed the resolution to '{out.get('commit_branch')}' as {commit} "
+                  f"(merged '{session.get('target_branch')}' into it).")
+            if out.get("next_step"):
+                print(out["next_step"])
+            if merge_hint:
+                print(f"Once approved:  {merge_hint}")
+            print(f"Your local '{out.get('commit_branch')}' is now behind the server: fox pull")
+        else:
+            print(f"Merged '{session.get('source_branch')}' into "
+                  f"'{session.get('target_branch')}' as {commit}.")
+        print(f"Resolved {out.get('resolved_files')} file(s)"
+              + (f", deleted {', '.join(out['deleted_files'])}" if out.get("deleted_files") else "")
+              + ".")
+        return True
 
     def merge_resolve(self, source_branch, target_branch=None, session_id=None,
-                      submit=False, directory=None, abort=False):
-        """Start, work through, or submit a branch merge resolution.
-
-          1) fox merge <source> --resolve          opens the session and writes the files
-          2) edit the *.resolved files it lists
-          3) fox merge <source> --resolve --submit completes the merge
-        """
+                      submit=False, directory=None, abort=False, status=False,
+                      deletes=None, allow_markers=False):
+        """Resolve a conflicted direct branch merge on the server."""
         if not self.check_repository("merge"):
             return False
         target_branch = target_branch or self.get_current_branch()
         base = self._repo_api("/branches/conflicts")
         if not base:
             return False
-
-        if abort:
-            if session_id is None:
-                print("Which session? Pass --session <id>.")
-                return False
-            response = self._authed_post(f"{base}/{session_id}/abort", json={}, timeout=60)
-            if response.status_code != 200:
-                self._print_failure(response, "abort that session")
-                return False
-            print(f"Session {session_id} aborted. Neither branch was changed.")
-            return True
-
-        if session_id is None:
-            # Opening is idempotent: an existing session for this pair comes back
-            # unchanged, so re-running this does not discard work already done.
-            response = self._authed_post(
-                base,
-                json={"source_branch": source_branch, "target_branch": target_branch},
-                timeout=300,
-            )
-            if response.status_code != 200:
-                self._print_failure(response, "open a resolution session")
-                return False
-            bundle = response.json()
-            session_id = bundle.get("session", {}).get("id")
-        else:
-            response = self._authed_get(f"{base}/{session_id}", timeout=120)
-            if response.status_code != 200:
-                self._print_failure(response, "read that session")
-                return False
-            bundle = response.json()
-
-        session = bundle.get("session") or {}
-        files = bundle.get("files") or []
-        if session.get("stale_reason"):
-            print(f"This session is stale: {session['stale_reason']}")
-            print("Re-run without --session to compute the conflicts again.")
-            return False
-
-        out_dir = Path(directory) if directory else self._branch_conflict_dir(session_id)
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        if not submit:
-            print(f"Session {session_id}: merging '{session.get('source_branch')}' into "
-                  f"'{session.get('target_branch')}'")
-            print(f"{len(files)} conflicted file(s). Edit the .resolved files, then run "
-                  f"the same command with --submit.\n")
-            for entry in files:
-                safe = entry["path"].replace("/", "__").replace(chr(92), "__")
-                for side in ("base", "ours", "theirs"):
-                    blob = entry.get(f"{side}_b64")
-                    if blob is not None:
-                        (out_dir / f"{safe}.{side}").write_bytes(base64.b64decode(blob))
-                # The suggested merge carries conflict markers, so it is the sensible
-                # thing to start editing rather than a blank file.
-                suggested = entry.get("suggested_b64") or entry.get("theirs_b64") or ""
-                resolved_path = out_dir / f"{safe}.resolved"
-                if not resolved_path.exists():
-                    resolved_path.write_bytes(base64.b64decode(suggested) if suggested else b"")
-                print(f"  {entry['path']}")
-                print(f"    edit: {resolved_path}")
-            print(f"\nWhen every file is reconciled:")
-            print(f"  fox merge {source_branch} --resolve --submit --session {session_id}")
-            return True
-
-        resolutions = {}
-        for entry in files:
-            safe = entry["path"].replace("/", "__").replace(chr(92), "__")
-            resolved_path = out_dir / f"{safe}.resolved"
-            if not resolved_path.exists():
-                print(f"Missing resolved file for {entry['path']}: {resolved_path}")
-                return False
-            resolutions[entry["path"]] = base64.b64encode(
-                resolved_path.read_bytes()).decode("utf-8")
-
-        response = self._authed_post(
-            f"{base}/{session_id}/resolve",
-            json={"resolutions": resolutions},
-            timeout=300,
+        return self._resolve_on_server(
+            api_base=base,
+            start_payload={"source_branch": source_branch, "target_branch": target_branch},
+            label=f"'{source_branch}' into '{target_branch}'",
+            dir_name="branch",
+            command=f"fox merge {source_branch} --resolve",
+            session_id=session_id, submit=submit, abort=abort, status=status,
+            directory=directory, deletes=deletes, allow_markers=allow_markers,
         )
-        if response.status_code != 200:
-            self._print_failure(response, "complete that merge")
-            return False
-        out = response.json()
-        print(f"Merged '{session.get('source_branch')}' into "
-              f"'{session.get('target_branch')}' as {str(out.get('merge_commit_id'))[:12]}.")
-        print(f"Resolved {out.get('resolved_files')} file(s).")
-        return True
 
     def list_merge_sessions(self):
         base = self._repo_api("/branches/conflicts")
@@ -3114,115 +3673,31 @@ class FoxClient:
             print("No open branch merge sessions.")
             return True
         for s in sessions:
+            stale = "  (out of date)" if s.get("stale_reason") else ""
             print(f"#{s['id']}  {s['source_branch']} -> {s['target_branch']}  "
-                  f"{s['unresolved']}/{s['files']} unresolved")
+                  f"{s.get('resolved', 0)}/{s.get('files', 0)} resolved"
+                  f"{'  by ' + s['created_by'] if s.get('created_by') else ''}{stale}")
         return True
 
-    def pr_resolve(self, pr_id: int, session_id: Optional[int] = None, submit: bool = False, directory: Optional[str] = None):
-        """
-        Download merge conflicts (base/ours/theirs) to disk and optionally submit resolutions.
-
-        Workflow:
-          1) fox pr merge <id>  (if conflict prints session id)
-          2) fox pr resolve <id> --session <sid>
-             -> edit *.resolved files under .fox/merge-conflicts/pr_<id>_session_<sid>/
-          3) fox pr resolve <id> --session <sid> --submit
-        """
+    def pr_resolve(self, pr_id: int, session_id: Optional[int] = None, submit: bool = False,
+                   directory: Optional[str] = None, abort: bool = False, status: bool = False,
+                   deletes=None, allow_markers: bool = False):
+        """Resolve a pull request's conflicts; the commit goes to the pull request's branch."""
         if not self.check_repository("pr"):
             return False
-        config = self.load_config()
-        if not config or not config.get("repo_id"):
-            print("Repository not linked to server. Push first.")
+        base = self._repo_api(f"/pull-requests/{pr_id}/conflicts")
+        if not base:
             return False
-        server_url = self._resolve_server_url()
-
-        if session_id is None:
-            session_id = self._get_merge_conflict_session(pr_id)
-        if session_id is None:
-            print("Missing session id. Use:")
-            print(f"  fox pr resolve {pr_id} --session <session_id>")
-            return False
-
-        base_dir = Path(directory) if directory else (self.fox_dir / "merge-conflicts" / f"pr_{pr_id}_session_{session_id}")
-        base_dir.mkdir(parents=True, exist_ok=True)
-
-        # Fetch conflict bundle
-        resp = self._authed_get(
-            f"{server_url}/api/repository/{config['repo_id']}/pull-requests/{pr_id}/conflicts/{session_id}",
-            timeout=120,
+        return self._resolve_on_server(
+            api_base=base,
+            start_payload=None,
+            label=f"PR #{pr_id}",
+            dir_name=f"pr_{pr_id}",
+            command=f"fox pr resolve {pr_id}",
+            merge_hint=f"fox pr merge {pr_id}",
+            session_id=session_id, submit=submit, abort=abort, status=status,
+            directory=directory, deletes=deletes, allow_markers=allow_markers,
         )
-        if resp.status_code != 200:
-            print(f"Error fetching merge conflicts ({resp.status_code}): {resp.text}")
-            return False
-        data = resp.json()
-        files = data.get("files", []) or []
-        if not files:
-            print("No conflict files returned.")
-            return False
-
-        # Write base/ours/theirs + resolved template
-        for f in files:
-            rel = f.get("path")
-            if not rel:
-                continue
-            safe_path = rel.replace("\\", "/")
-            target_dir = base_dir / os.path.dirname(safe_path)
-            target_dir.mkdir(parents=True, exist_ok=True)
-
-            def write_b64(suffix: str, b64: Optional[str]):
-                if b64 is None:
-                    return
-                try:
-                    content = base64.b64decode(b64.encode("utf-8"))
-                except Exception:
-                    content = b""
-                with open(base_dir / f"{safe_path}.{suffix}", "wb") as out:
-                    out.write(content)
-
-            write_b64("base", f.get("base_b64"))
-            write_b64("ours", f.get("ours_b64"))
-            write_b64("theirs", f.get("theirs_b64"))
-
-            # resolved starts from suggested if present, else ours
-            resolved_b64 = f.get("suggested_b64") or f.get("ours_b64")
-            if resolved_b64 is not None:
-                write_b64("resolved", resolved_b64)
-
-        print(f"Downloaded conflicts to: {base_dir}")
-        print("Edit the *.resolved files, then submit with:")
-        print(f"  fox pr resolve {pr_id} --session {session_id} --submit\n")
-
-        if not submit:
-            return True
-
-        # Build resolutions from *.resolved files
-        resolutions = {}
-        for f in files:
-            rel = f.get("path")
-            if not rel:
-                continue
-            safe_path = rel.replace("\\", "/")
-            resolved_path = base_dir / f"{safe_path}.resolved"
-            if not resolved_path.exists():
-                print(f"Missing resolved file: {resolved_path}")
-                return False
-            content = resolved_path.read_bytes()
-            resolutions[safe_path] = base64.b64encode(content).decode("utf-8")
-
-        submit_resp = self._authed_post(
-            f"{server_url}/api/repository/{config['repo_id']}/pull-requests/{pr_id}/conflicts/{session_id}/resolve",
-            json={"resolutions": resolutions},
-            timeout=300,
-        )
-        if submit_resp.status_code != 200:
-            print(f"Resolve failed ({submit_resp.status_code}): {submit_resp.text}")
-            return False
-        out = submit_resp.json()
-        if out.get("success"):
-            print(f"Resolved and merged PR #{pr_id}. Merge commit: {out.get('merge_commit_id')}")
-            return True
-        print(f"Resolve failed: {out}")
-        return False
     
     @staticmethod
     def staging_key(filepath):
@@ -3371,7 +3846,10 @@ class FoxClient:
         """Commit staged changes"""
         if not self.check_repository("commit"):
             return False
-        
+        # A plain commit here would record the merge with one parent and lose it.
+        if self._refuse_during_merge("commit"):
+            return False
+
         config = self.load_config()
         
         # Check if there are staged files
@@ -3436,10 +3914,16 @@ class FoxClient:
             with open(self.commits_file, "r") as f:
                 commits = json.load(f)
 
-        # Merge last commit snapshot with staged updates/additions
+        # Merge the parent's snapshot with staged updates/additions. The parent is HEAD,
+        # not the last commit in the file: after committing on another branch that is a
+        # different branch's snapshot, and its files leaked into this branch's commit --
+        # which then made every later merge between the two compare the wrong trees.
         merged_files_by_path = {}
-        if commits:
-            last_commit_files = commits[-1].get("files", {})
+        parent_commit = self.get_commit_by_id(parent) if parent else None
+        if parent_commit is None and parent and commits:
+            parent_commit = commits[-1]   # HEAD not in the local history: old behaviour
+        if parent_commit:
+            last_commit_files = parent_commit.get("files", {})
             for file_hash, file_data in last_commit_files.items():
                 # Carried-forward paths are normalised to match the staged ones. Older
                 # commits hold OS-native separators, and without this a file changed
@@ -4263,7 +4747,9 @@ class FoxClient:
             print(f"Current commit: {head}{branch_display}")
         else:
             print("No commits yet")
-        
+
+        self._print_merge_status()
+
         # Get staged files
         staged_files = {}
         staged_file_paths = set()
@@ -4950,7 +5436,10 @@ def print_extended_help():
     print("  branch                  List, create, or delete branches")
     print("  checkout <branch>       Switch branches (refuses if it would discard changes)")
     print("  checkout-files          Restore specific paths from another branch/commit (HEAD unchanged)")
-    print("  merge <branch>          Merge a branch into current")
+    print("  merge <branch>          Merge a branch into current (line-level, three-way)")
+    print("  merge --continue        Commit a conflicted merge once the conflicts are fixed")
+    print("  merge --abort           Undo a conflicted merge")
+    print("  merge <b> --resolve     Resolve a server-side branch merge's conflicts")
     print("  compare <from> <to>     Diff files between two branches or commits (server)")
     print("  file-history <path>     List file revisions on server (--lines N-M for line slice history)")
     print("  delete-commit <id>      Remove current branch tip (unpushed = local; pushed = server+local)")
@@ -4970,6 +5459,7 @@ def print_extended_help():
     print("  pr comments <id>        Show inline comment threads")
     print("  pr checks <id>          Why a pull request can or cannot be merged")
     print("  pr owners <id>          Code owners whose approval is required")
+    print("  pr resolve <id>         Resolve a PR's conflicts (committed to the PR's branch)")
     print("  pr from-fork            Propose a fork's branch back upstream")
     print("  fork [--as <name>]      Create your own copy of this repository")
     print("  forks                   List forks of this repository")
@@ -5001,6 +5491,9 @@ def print_extended_help():
     print("  fox checkout-files --from feature/login README.md src/app.py")
     print("  fox checkout-files --from abc1234 --server README.md   # force server branch by name")
     print("  fox merge feature/login")
+    print("  fox merge --continue           # after fixing the conflicted files")
+    print("  fox pr resolve 7               # writes .resolved files to edit")
+    print("  fox pr resolve 7 --submit      # commits the resolution to the PR's branch")
     print("  fox compare main feature/login")
     print("  fox compare main feature/login --path src/app.py")
     print("  fox compare abc1234 def5678 --json")
@@ -5259,14 +5752,28 @@ def main():
     )
 
     # Merge command
-    merge_parser = subparsers.add_parser("merge", help="Merge a branch into current")
-    merge_parser.add_argument("branch", help="Source branch")
+    merge_parser = subparsers.add_parser(
+        "merge", help="Merge a branch into current",
+        description="fox merge <branch> merges locally; on conflict fix the files and run "
+                    "fox merge --continue, or undo with fox merge --abort. "
+                    "fox merge <branch> --resolve resolves a server-side branch merge instead.")
+    merge_parser.add_argument("branch", nargs="?", default=None,
+                              help="Source branch (not needed with --continue / --abort)")
+    merge_parser.add_argument("--continue", dest="merge_continue", action="store_true",
+                              help="Finish a conflicted local merge with a two-parent commit")
+    merge_parser.add_argument("--abort", action="store_true",
+                              help="Undo a conflicted local merge; with --resolve, discard the server session")
+    merge_parser.add_argument("--allow-markers", dest="allow_markers", action="store_true",
+                              help="Accept files that intentionally contain conflict-marker text")
     merge_parser.add_argument("--resolve", action="store_true",
                               help="Resolve a conflicted merge on the server")
     merge_parser.add_argument("--submit", action="store_true",
                               help="With --resolve: submit the edited .resolved files")
-    merge_parser.add_argument("--abort", action="store_true",
-                              help="With --resolve: discard the session, merging nothing")
+    merge_parser.add_argument("--status", dest="resolve_status", action="store_true",
+                              help="With --resolve: show what is decided without writing files")
+    merge_parser.add_argument("--delete", dest="delete_paths", action="append", default=None,
+                              metavar="PATH",
+                              help="With --resolve --submit: resolve PATH by deleting it (repeatable)")
     merge_parser.add_argument("--session", dest="session_id", type=int, default=None,
                               help="Resolution session id")
     merge_parser.add_argument("--into", dest="into", default=None,
@@ -5518,11 +6025,18 @@ def main():
     pr_close.add_argument("id", type=int, help="PR id")
     pr_merge = pr_subparsers.add_parser("merge", help="Merge a pull request")
     pr_merge.add_argument("id", type=int, help="PR id")
-    pr_resolve = pr_subparsers.add_parser("resolve", help="Resolve merge conflicts for a PR (download/edit/submit)")
+    pr_resolve = pr_subparsers.add_parser(
+        "resolve", help="Resolve a PR's merge conflicts (committed to the PR's branch)")
     pr_resolve.add_argument("id", type=int, help="PR id")
-    pr_resolve.add_argument("--session", type=int, dest="session_id", help="Merge conflict session id (from merge response)")
+    pr_resolve.add_argument("--session", type=int, dest="session_id", help="Resolution session id (found automatically)")
     pr_resolve.add_argument("--dir", dest="directory", help="Directory to store conflict files (default: .fox/merge-conflicts/...)")
-    pr_resolve.add_argument("--submit", action="store_true", help="Submit *.resolved files and finalize merge")
+    pr_resolve.add_argument("--submit", action="store_true", help="Send the edited .resolved files and commit the resolution")
+    pr_resolve.add_argument("--status", dest="resolve_status", action="store_true", help="Show what is decided without writing files")
+    pr_resolve.add_argument("--abort", action="store_true", help="Discard the resolution session")
+    pr_resolve.add_argument("--delete", dest="delete_paths", action="append", default=None, metavar="PATH",
+                            help="With --submit: resolve PATH by deleting it (repeatable)")
+    pr_resolve.add_argument("--allow-markers", dest="allow_markers", action="store_true",
+                            help="Accept files that intentionally contain conflict-marker text")
     
     # Set command (for setting origin and username)
     set_parser = subparsers.add_parser("set", help="Set repository configuration")
@@ -5733,19 +6247,38 @@ def main():
     elif args.command == "merge-sessions":
         fox.list_merge_sessions()
 
-    elif args.command == "merge" and (getattr(args, "resolve", False)
-                                      or getattr(args, "abort", False)):
-        fox.merge_resolve(
+    elif args.command == "merge" and getattr(args, "resolve", False):
+        if not args.branch:
+            print("Which branch? fox merge <branch> --resolve")
+            sys.exit(2)
+        ok = fox.merge_resolve(
             args.branch,
             target_branch=getattr(args, "into", None),
             session_id=getattr(args, "session_id", None),
             submit=getattr(args, "submit", False),
             directory=getattr(args, "merge_dir", None),
             abort=getattr(args, "abort", False),
+            status=getattr(args, "resolve_status", False),
+            deletes=getattr(args, "delete_paths", None),
+            allow_markers=getattr(args, "allow_markers", False),
         )
+        if not ok:
+            sys.exit(1)
+
+    elif args.command == "merge" and getattr(args, "merge_continue", False):
+        if not fox.merge_continue(allow_markers=getattr(args, "allow_markers", False)):
+            sys.exit(1)
+
+    elif args.command == "merge" and getattr(args, "abort", False):
+        if not fox.merge_abort():
+            sys.exit(1)
 
     elif args.command == "merge":
-        fox.merge_branch(args.branch)
+        if not args.branch:
+            print("Which branch? fox merge <branch>   (or --continue / --abort)")
+            sys.exit(2)
+        if not fox.merge_branch(args.branch):
+            sys.exit(1)
 
     elif args.command == "compare":
         fox.compare(
@@ -5901,7 +6434,18 @@ def main():
                 upstream_id=args.upstream, description=args.description,
             )
         elif args.pr_command == "resolve":
-            fox.pr_resolve(args.id, session_id=getattr(args, "session_id", None), submit=getattr(args, "submit", False), directory=getattr(args, "directory", None))
+            ok = fox.pr_resolve(
+                args.id,
+                session_id=getattr(args, "session_id", None),
+                submit=getattr(args, "submit", False),
+                directory=getattr(args, "directory", None),
+                abort=getattr(args, "abort", False),
+                status=getattr(args, "resolve_status", False),
+                deletes=getattr(args, "delete_paths", None),
+                allow_markers=getattr(args, "allow_markers", False),
+            )
+            if not ok:
+                sys.exit(1)
     
     elif args.command == "gc":
         fox.gc()

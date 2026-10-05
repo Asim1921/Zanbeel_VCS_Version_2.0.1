@@ -79,9 +79,24 @@ class RebaseRequest(BaseModel):
 
 
 class ResolveConflictsRequest(BaseModel):
-    # {file_path: base64 content} -- every conflicted path must be present.
-    resolutions: Dict[str, str]
+    # {file_path: base64 content, or null to delete the file}. Paths already decided
+    # through the per-file endpoint may be left out; every conflicted path must end up
+    # decided one way or the other.
+    resolutions: Optional[Dict[str, Optional[str]]] = None
+    # Guards the branch the commit is written to: the pull request's source branch, or
+    # the target of a direct branch merge.
     expected_head_commit_id: Optional[str] = None
+    # Set when a file legitimately contains conflict-marker text; otherwise a resolution
+    # that still has markers is refused.
+    allow_markers: bool = False
+
+
+class SaveConflictResolutionRequest(BaseModel):
+    """Decide one conflicted file without completing the merge."""
+    path: str
+    content_b64: Optional[str] = None
+    delete: bool = False
+    clear: bool = False
 
 
 class BranchPolicyRequest(BaseModel):

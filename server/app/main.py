@@ -23,6 +23,7 @@ from app.db.migrations import (
     ensure_commit_statuses_table,
     ensure_fork_columns,
     ensure_merge_conflict_branch_sessions,
+    ensure_merge_conflict_resolution_columns,
     ensure_merge_conflict_tables,
     ensure_password_reset_otp_table,
     ensure_pull_request_comments_table,
@@ -96,6 +97,8 @@ async def startup_event():
     ensure_merge_conflict_tables()
     # Must follow the create above: it rebuilds that table to relax a constraint.
     ensure_merge_conflict_branch_sessions()
+    # And this must follow the rebuild, which would otherwise drop the new columns.
+    ensure_merge_conflict_resolution_columns()
     ensure_pull_request_reviews_table()
     ensure_pull_request_comments_table()
     ensure_fork_columns()

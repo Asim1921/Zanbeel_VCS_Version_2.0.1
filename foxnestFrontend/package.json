@@ -9,7 +9,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "verify:graph": "node scripts/verify-commit-graph.mjs",
-    "verify:nav": "node scripts/verify-navigation.mjs"
+    "verify:nav": "node scripts/verify-navigation.mjs",
+    "verify:conflicts": "node scripts/verify-conflicts.mjs"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.13",

@@ -20,12 +20,13 @@ from database.models import MergeConflictSession, User
 from app.core.dependencies import get_actor_user, get_current_user
 from app.core.errors import _raise_head_mismatch
 from app.core.permissions import (
-    _require_repository_read_access, can_manage_repository, require_repository_access,
+    _require_repository_read_access, can_manage_repository, can_write_repository,
+    require_repository_access,
 )
 from app.schemas import (
     AddPullRequestCommentRequest, CrossRepoPullRequestRequest, MergePullRequestRequest,
     PullRequestCreateRequest, ResolveCommentRequest, ResolveConflictsRequest,
-    SubmitReviewRequest,
+    SaveConflictResolutionRequest, SubmitReviewRequest,
 )
 from app.services.branches import _normalize_branch_name
 from app.services import webhooks as hook_service
@@ -35,7 +36,7 @@ from app.services.merge import _merge_trees
 from app.services import refs
 from app.services.signing import sign_commit
 from app.services import (
-    codeowners, forks, merge_conflicts, pr_comments, pr_files, pr_reviews,
+    codeowners, forks, merge_conflicts, pr_comments, pr_files, pr_reviews, pr_source,
     review_notifications,
 )
 
@@ -64,6 +65,7 @@ async def list_pull_requests(
                 "title": pr.title,
                 "description": pr.description,
                 "source_branch": pr.source_branch,
+                "source_repository_id": pr_source.repository_id(pr),
                 "target_branch": pr.target_branch,
                 "status": pr.status,
                 "created_by": pr.created_by.username if pr.created_by else None,
@@ -167,8 +169,10 @@ async def get_pull_request(
             "title": pr.title,
             "description": pr.description,
             "source_branch": pr.source_branch,
+            "source_repository_id": pr_source.repository_id(pr),
             "target_branch": pr.target_branch,
             "status": pr.status,
+            "created_by": pr.created_by.username if pr.created_by else None,
             "merge_commit_id": pr.merge_commit_id
         }
     }
@@ -220,17 +224,9 @@ async def merge_pull_request(
     if pr.status != "open":
         raise HTTPException(status_code=400, detail=f"Pull request is {pr.status}")
 
-    # Review gate. Checked before any merge work so an unapproved pull request is
-    # refused rather than merged and reported afterwards.
-    try:
-        pr_reviews.enforce_merge_gate(db, repository, pr)
-    except pr_reviews.ReviewError as exc:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"success": False, "detail": exc.message, **exc.payload},
-        )
-
-    source_branch = BranchCRUD.get_branch(db, repo_id, pr.source_branch)
+    # The source branch of a fork's pull request lives in the fork. Looking it up here
+    # merged a same-named upstream branch instead and dropped the fork's work.
+    source_branch = pr_source.branch(db, pr)
     target_branch = BranchCRUD.get_branch(db, repo_id, pr.target_branch)
     if not source_branch or not target_branch:
         raise HTTPException(status_code=404, detail="Branch not found")
@@ -246,7 +242,16 @@ async def merge_pull_request(
     source_tree = _get_commit_tree(db, source_branch.head_commit_id)
     merged_tree, conflicts = _merge_trees(base_tree, target_tree, source_tree)
 
+    # Conflicts are reported before the review gate, as GitHub does. Resolving them
+    # changes the branch and makes every approval stale, so asking for approval first
+    # only sends reviewers to approve something that has to be reviewed again. Nothing
+    # has been written yet either way; the review state rides along so it is not hidden.
     if conflicts:
+        message = (
+            f"'{pr.source_branch}' has conflicts with '{pr.target_branch}' that must be "
+            f"resolved before this pull request can merge."
+        )
+        review = pr_reviews.summarize(db, repository, pr)
         return JSONResponse(
             status_code=409,
             content={
@@ -255,14 +260,27 @@ async def merge_pull_request(
                 "status": "conflicts",
                 "source_branch": source_branch.name,
                 "target_branch": target_branch.name,
-                "message": "Merge has conflicts that require manual resolution.",
+                "message": message,
+                "detail": message,
                 "conflicts": sorted(conflicts),
                 # Where to go next. Previously this was a dead end: the conflicts were
                 # reported and nothing could act on them.
                 "resolve_url": (
                     f"/api/repository/{repo_id}/pull-requests/{pr.id}/conflicts"
                 ),
+                "resolve_hint": f"fox pr resolve {pr.id}",
+                "review_blockers": review.get("blockers", []),
             }
+        )
+
+    # Review gate. Checked before anything is written, so an unapproved pull request is
+    # refused rather than merged and reported afterwards.
+    try:
+        pr_reviews.enforce_merge_gate(db, repository, pr)
+    except pr_reviews.ReviewError as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"success": False, "detail": exc.message, **exc.payload},
         )
 
     commit_id = hashlib.sha256(
@@ -331,6 +349,21 @@ async def merge_pull_request(
     }
 
 
+# --- conflict resolution ------------------------------------------------------------
+# GitHub's model: resolving a pull request's conflicts commits a merge of the target into
+# the pull request's *own* branch. So the person resolving needs to be able to push to
+# that branch -- usually the author -- rather than to manage the target repository, and
+# the resolved content then goes through review like any other change to the branch.
+
+def conflict_error_response(exc: "merge_conflicts.ConflictError") -> JSONResponse:
+    """Every conflict endpoint refuses in the same shape: {success, detail, code, ...}."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"success": False, "detail": exc.message, "message": exc.message,
+                 **exc.payload},
+    )
+
+
 def _load_session(db, repo_id: str, pr_id: int, session_id: int):
     session = (
         db.query(MergeConflictSession)
@@ -346,6 +379,75 @@ def _load_session(db, repo_id: str, pr_id: int, session_id: int):
     return session
 
 
+def _load_pull_request(db, repo_id: str, pr_id: int, current_user: User):
+    repository = RepositoryCRUD.get_repository(db, repo_id)
+    if not repository:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    _require_repository_read_access(db, current_user, repository, "view merge conflicts")
+    pr = PullRequestCRUD.get_pull_request(db, repo_id, pr_id)
+    if not pr:
+        raise HTTPException(status_code=404, detail="Pull request not found")
+    return repository, pr
+
+
+def _require_can_resolve(db, current_user: User, repository, pr) -> None:
+    """Resolving writes to the pull request's source branch, so it needs push access there."""
+    source_repository = pr_source.repository(db, pr)
+    if source_repository is None:
+        raise HTTPException(status_code=404, detail="Source repository not found")
+    actor = get_actor_user(db, current_user.username)
+    if can_write_repository(db, actor, source_repository):
+        return
+    if pr_source.is_cross_repository(pr):
+        message = (
+            f"Resolving conflicts commits to '{pr.source_branch}' in the fork "
+            f"'{source_repository.name}'. Only someone who can push to that fork -- "
+            f"usually the pull request's author -- can resolve them."
+        )
+    else:
+        message = (
+            f"Resolving conflicts commits to '{pr.source_branch}', and you cannot push to "
+            f"'{repository.name}'."
+        )
+    raise HTTPException(status_code=403, detail=message)
+
+
+@router.get("/api/repository/{repo_id}/pull-requests/{pr_id}/mergeability")
+async def get_pull_request_mergeability(
+    repo_id: str,
+    pr_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Whether the pull request merges cleanly, and if not which files conflict.
+
+    Answered without merging (and cached per pair of heads), so a pull request can say
+    "this branch has conflicts that must be resolved" before anyone presses Merge.
+    """
+    _repository, pr = _load_pull_request(db, repo_id, pr_id, current_user)
+    result = merge_conflicts.mergeability(db, repo_id, pr)
+    source_repository = pr_source.repository(db, pr)
+    result["can_resolve"] = bool(
+        source_repository is not None and pr.status == "open"
+        and can_write_repository(db, get_actor_user(db, current_user.username),
+                                 source_repository)
+    )
+    return {"success": True, **result}
+
+
+@router.get("/api/repository/{repo_id}/pull-requests/{pr_id}/conflicts")
+async def list_merge_conflict_sessions(
+    repo_id: str,
+    pr_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Open resolution sessions for this pull request, so one can be resumed."""
+    _load_pull_request(db, repo_id, pr_id, current_user)
+    return {"success": True,
+            "sessions": merge_conflicts.list_open(db, repo_id, pull_request_id=pr_id)}
+
+
 @router.post("/api/repository/{repo_id}/pull-requests/{pr_id}/conflicts")
 async def start_merge_conflict_session(
     repo_id: str,
@@ -355,26 +457,19 @@ async def start_merge_conflict_session(
 ):
     """Open (or reuse) a session for resolving this pull request's conflicts by hand.
 
-    An existing open session is returned unchanged so reopening the resolver does not
-    discard work in progress; if a branch has moved, the stale session is retired and a
+    An existing open session is returned unchanged so reopening the resolver keeps the
+    decisions already saved; if a branch has moved, the stale session is retired and a
     fresh one computed.
     """
-    repository = RepositoryCRUD.get_repository(db, repo_id)
-    if not repository:
-        raise HTTPException(status_code=404, detail="Repository not found")
-    require_repository_access(db, current_user.username, repository,
-                              "resolve merge conflicts in", required_scope="manage")
-
-    pr = PullRequestCRUD.get_pull_request(db, repo_id, pr_id)
-    if not pr:
-        raise HTTPException(status_code=404, detail="Pull request not found")
+    repository, pr = _load_pull_request(db, repo_id, pr_id, current_user)
     if pr.status != "open":
         raise HTTPException(status_code=400, detail=f"Pull request is {pr.status}")
+    _require_can_resolve(db, current_user, repository, pr)
 
     try:
         session = merge_conflicts.open_session(db, repo_id, pr, current_user)
     except merge_conflicts.ConflictError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+        return conflict_error_response(exc)
 
     return {"success": True, **merge_conflicts.get_bundle(db, session)}
 
@@ -387,14 +482,33 @@ async def get_merge_conflicts(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """All three sides of every conflicted file, plus a conflict-marked suggested merge."""
-    repository = RepositoryCRUD.get_repository(db, repo_id)
-    if not repository:
-        raise HTTPException(status_code=404, detail="Repository not found")
-    _require_repository_read_access(db, current_user, repository, "view merge conflicts")
-
+    """All three sides of every conflicted file, a suggested merge and saved decisions."""
+    _load_pull_request(db, repo_id, pr_id, current_user)
     session = _load_session(db, repo_id, pr_id, session_id)
     return {"success": True, **merge_conflicts.get_bundle(db, session)}
+
+
+@router.put("/api/repository/{repo_id}/pull-requests/{pr_id}/conflicts/{session_id}/files")
+async def save_merge_conflict_resolution(
+    repo_id: str,
+    pr_id: int,
+    session_id: int,
+    request: SaveConflictResolutionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Save the decision for one file -- new content, delete, or clear -- without merging."""
+    repository, pr = _load_pull_request(db, repo_id, pr_id, current_user)
+    _require_can_resolve(db, current_user, repository, pr)
+    session = _load_session(db, repo_id, pr_id, session_id)
+    try:
+        result = merge_conflicts.save_resolution(
+            db, session, request.path, current_user,
+            content_b64=request.content_b64, delete=request.delete, clear=request.clear,
+        )
+    except merge_conflicts.ConflictError as exc:
+        return conflict_error_response(exc)
+    return {"success": True, **result}
 
 
 @router.post("/api/repository/{repo_id}/pull-requests/{pr_id}/conflicts/{session_id}/resolve")
@@ -402,33 +516,30 @@ async def resolve_merge_conflicts(
     repo_id: str,
     pr_id: int,
     session_id: int,
-    request: ResolveConflictsRequest,
+    request: Optional[ResolveConflictsRequest] = Body(default=None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Apply the supplied resolutions and complete the merge.
+    """Commit the resolution to the pull request's source branch.
 
-    Every conflicted path must be resolved; a partial submission is refused rather than
-    merged with the remainder guessed. Refuses outright if either branch moved while the
-    conflicts were being worked through.
+    Every conflicted path must be decided -- here or saved earlier; a partial resolution
+    is refused rather than merged with the remainder guessed. Refuses outright if either
+    branch moved while the conflicts were being worked through. The pull request itself
+    is not merged: its branch now merges cleanly, and goes through review and the normal
+    merge like any other change.
     """
-    repository = RepositoryCRUD.get_repository(db, repo_id)
-    if not repository:
-        raise HTTPException(status_code=404, detail="Repository not found")
-    require_repository_access(db, current_user.username, repository,
-                              "resolve merge conflicts in", required_scope="manage")
-
+    repository, pr = _load_pull_request(db, repo_id, pr_id, current_user)
+    _require_can_resolve(db, current_user, repository, pr)
     session = _load_session(db, repo_id, pr_id, session_id)
+    request = request or ResolveConflictsRequest()
     try:
         result = merge_conflicts.resolve(
-            db, session, request.resolutions or {}, current_user,
+            db, session, request.resolutions, current_user,
             expected_head_commit_id=request.expected_head_commit_id,
+            allow_markers=request.allow_markers,
         )
     except merge_conflicts.ConflictError as exc:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"success": False, "detail": exc.message, **exc.payload},
-        )
+        return conflict_error_response(exc)
     return {"success": True, **result}
 
 
@@ -441,17 +552,16 @@ async def abort_merge_conflicts(
     db: Session = Depends(get_db),
 ):
     """Discard a resolution session. Neither branch is touched."""
-    repository = RepositoryCRUD.get_repository(db, repo_id)
-    if not repository:
-        raise HTTPException(status_code=404, detail="Repository not found")
-    require_repository_access(db, current_user.username, repository,
-                              "resolve merge conflicts in", required_scope="manage")
+    repository, pr = _load_pull_request(db, repo_id, pr_id, current_user)
+    # Whoever could resolve it may abandon it, and so may the target's maintainers.
+    if not can_manage_repository(db, get_actor_user(db, current_user.username), repository):
+        _require_can_resolve(db, current_user, repository, pr)
 
     session = _load_session(db, repo_id, pr_id, session_id)
     try:
         return {"success": True, **merge_conflicts.abort(db, session, current_user)}
     except merge_conflicts.ConflictError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+        return conflict_error_response(exc)
 
 
 @router.post("/api/repository/{repo_id}/pull-requests/{pr_id}/reviews")

@@ -239,6 +239,16 @@ class MergeConflictSession(Base):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
+    # The repository holding source_branch. NULL means repository_id; set for a pull
+    # request from a fork, whose branch -- and therefore whose resolution commit -- lives
+    # in the fork.
+    source_repository_id = Column(String(16), ForeignKey("repositories.id"), nullable=True)
+    # What the resolution produced: the merge commit, on the source branch for a pull
+    # request (as GitHub does) and on the target branch for a direct branch merge.
+    result_commit_id = Column(String(40), nullable=True)
+    resolved_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+
     repository = relationship("Repository", foreign_keys=[repository_id])
     pull_request = relationship("PullRequest", foreign_keys=[pull_request_id])
     created_by = relationship("User", foreign_keys=[created_by_id])
@@ -259,6 +269,14 @@ class MergeConflictFile(Base):
     theirs_file_hash = Column(String(40), ForeignKey("file_objects.hash"))
     resolved_file_hash = Column(String(40), ForeignKey("file_objects.hash"))
     is_binary = Column(Boolean, default=False)
+    # content, add_add, modify_delete or binary -- which decision the file needs.
+    conflict_kind = Column(String(20), nullable=True)
+    # The saved decision: NULL while unresolved, "content" (resolved_file_hash holds the
+    # bytes) or "delete". Saved per file so progress survives closing the resolver and
+    # several people can share one session.
+    resolution = Column(String(10), nullable=True)
+    resolved_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
 
     session = relationship("MergeConflictSession", back_populates="files")
 
