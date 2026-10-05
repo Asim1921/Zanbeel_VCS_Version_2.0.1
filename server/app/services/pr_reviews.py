@@ -32,8 +32,9 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 import branch_policies
-from database.crud import BranchCRUD
 from database.models import PullRequest, PullRequestReview, Repository, User
+
+from app.services import pr_source
 
 VALID_STATES = ("approved", "changes_requested", "commented")
 
@@ -91,13 +92,14 @@ def submit(
             {"code": "SELF_APPROVAL"},
         )
 
-    source = BranchCRUD.get_branch(db, repository.id, pr.source_branch)
     review = PullRequestReview(
         pull_request_id=pr.id,
         reviewer_id=reviewer.id,
         state=state,
         body=(body or "").strip() or None,
-        commit_id=source.head_commit_id if source else None,
+        # Pinned to the branch the pull request really proposes, which for a fork is
+        # in the fork -- not to a same-named branch here.
+        commit_id=pr_source.head(db, pr),
     )
     db.add(review)
     db.commit()
@@ -127,8 +129,7 @@ def _latest_per_reviewer(db: Session, pr_id: int) -> Dict[int, PullRequestReview
 
 def summarize(db: Session, repository: Repository, pr: PullRequest) -> Dict[str, Any]:
     """Review state for a pull request, including whether it may be merged."""
-    source = BranchCRUD.get_branch(db, repository.id, pr.source_branch)
-    head = source.head_commit_id if source else None
+    head = pr_source.head(db, pr)
 
     latest = _latest_per_reviewer(db, pr.id)
     approvals, stale_approvals, changes_requested = [], [], []

@@ -2,7 +2,8 @@
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from database.crud import ActivityCRUD, BranchCRUD, CommitCRUD, RepositoryCRUD
@@ -17,7 +18,7 @@ from app.core.permissions import (
 from app.schemas import (
     BranchCreateRequest, BranchHeadUpdateRequest, BranchMergeRequest,
     BranchPolicyRequest, BranchPublishRequest, BranchRenameRequest, CopyFilesRequest,
-    ResolveConflictsRequest,
+    ResolveConflictsRequest, SaveConflictResolutionRequest,
 )
 from app.services import branch_ops, merge_conflicts, refs
 from app.services.branches import _get_default_branch, _normalize_branch_name
@@ -357,6 +358,15 @@ async def copy_files_between_branches(
 # belonged to pull requests, so there was nowhere to park the three sides. These are
 # the same session endpoints, addressed by branch pair rather than by pull request.
 
+def _conflict_error(exc: "merge_conflicts.ConflictError") -> JSONResponse:
+    """The same refusal shape as the pull request conflict endpoints."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"success": False, "detail": exc.message, "message": exc.message,
+                 **exc.payload},
+    )
+
+
 def _load_branch_session(db: Session, repo_id: str, session_id: int):
     session = (
         db.query(MergeConflictSession)
@@ -414,7 +424,7 @@ async def start_branch_merge_conflict_session(
             target_branch=request.target_branch,
         )
     except merge_conflicts.ConflictError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+        return _conflict_error(exc)
 
     return {"success": True, **merge_conflicts.get_bundle(db, session)}
 
@@ -436,20 +446,15 @@ async def get_branch_merge_conflicts(
     return {"success": True, **merge_conflicts.get_bundle(db, session)}
 
 
-@router.post("/api/repository/{repo_id}/branches/conflicts/{session_id}/resolve")
-async def resolve_branch_merge_conflicts(
+@router.put("/api/repository/{repo_id}/branches/conflicts/{session_id}/files")
+async def save_branch_merge_resolution(
     repo_id: str,
     session_id: int,
-    request: ResolveConflictsRequest,
+    request: SaveConflictResolutionRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Apply the resolutions and complete the branch merge.
-
-    Every conflicted path must be resolved; a partial submission is refused rather than
-    merged with the remainder guessed. The target branch's review rules still apply --
-    resolving conflicts is not a way to land unreviewed content.
-    """
+    """Save the decision for one file -- new content, delete, or clear -- without merging."""
     repository = RepositoryCRUD.get_repository(db, repo_id)
     if not repository:
         raise HTTPException(status_code=404, detail="Repository not found")
@@ -458,13 +463,45 @@ async def resolve_branch_merge_conflicts(
 
     session = _load_branch_session(db, repo_id, session_id)
     try:
+        result = merge_conflicts.save_resolution(
+            db, session, request.path, current_user,
+            content_b64=request.content_b64, delete=request.delete, clear=request.clear,
+        )
+    except merge_conflicts.ConflictError as exc:
+        return _conflict_error(exc)
+    return {"success": True, **result}
+
+
+@router.post("/api/repository/{repo_id}/branches/conflicts/{session_id}/resolve")
+async def resolve_branch_merge_conflicts(
+    repo_id: str,
+    session_id: int,
+    request: Optional[ResolveConflictsRequest] = Body(default=None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Apply the resolutions and complete the branch merge.
+
+    Every conflicted path must be decided, here or saved earlier; a partial resolution is
+    refused rather than merged with the remainder guessed. The target branch's review
+    rules still apply -- resolving conflicts is not a way to land unreviewed content.
+    """
+    repository = RepositoryCRUD.get_repository(db, repo_id)
+    if not repository:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    require_repository_access(db, current_user.username, repository,
+                              "resolve merge conflicts in", required_scope="manage")
+
+    session = _load_branch_session(db, repo_id, session_id)
+    request = request or ResolveConflictsRequest()
+    try:
         result = merge_conflicts.resolve(
             db, session, request.resolutions, current_user,
             expected_head_commit_id=request.expected_head_commit_id,
+            allow_markers=request.allow_markers,
         )
     except merge_conflicts.ConflictError as exc:
-        raise HTTPException(status_code=exc.status_code,
-                            detail={"message": exc.message, **exc.payload})
+        return _conflict_error(exc)
     return {"success": True, **result}
 
 
@@ -486,7 +523,7 @@ async def abort_branch_merge_conflicts(
     try:
         result = merge_conflicts.abort(db, session, current_user)
     except merge_conflicts.ConflictError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+        return _conflict_error(exc)
     return {"success": True, **result}
 
 
@@ -501,29 +538,5 @@ async def list_branch_merge_sessions(
     if not repository:
         raise HTTPException(status_code=404, detail="Repository not found")
     _require_repository_read_access(db, current_user, repository, "view merge conflicts")
-
-    rows = (
-        db.query(MergeConflictSession)
-        .filter(
-            MergeConflictSession.repository_id == repo_id,
-            MergeConflictSession.pull_request_id.is_(None),
-            MergeConflictSession.status == "open",
-        )
-        .order_by(MergeConflictSession.id.desc())
-        .all()
-    )
-    return {
-        "success": True,
-        "sessions": [
-            {
-                "id": row.id,
-                "source_branch": row.source_branch,
-                "target_branch": row.target_branch,
-                "status": row.status,
-                "files": len(row.files),
-                "unresolved": sum(1 for f in row.files if not f.resolved_file_hash),
-                "created_at": row.created_at.isoformat() if row.created_at else None,
-            }
-            for row in rows
-        ],
-    }
+    return {"success": True,
+            "sessions": merge_conflicts.list_open(db, repo_id, branch_only=True)}

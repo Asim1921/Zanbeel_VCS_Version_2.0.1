@@ -32,8 +32,9 @@ def build(db: Session, repository: Repository, pr: PullRequest) -> Dict[str, Any
     from app.services import codeowners, pr_comments
 
     # A fork's branch lives in the fork, not here; the commits are reachable either way.
-    source_repo_id = pr.source_repository_id or pr.repository_id
-    source_head = _branch_head(db, source_repo_id, pr.source_branch)
+    from app.services import pr_source
+
+    source_head = pr_source.head(db, pr)
     target_head = _branch_head(db, repository.id, pr.target_branch)
     base = _find_merge_base(db, target_head, source_head) if (target_head and source_head) else None
 

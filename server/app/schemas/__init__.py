@@ -57,6 +57,7 @@ from app.schemas.versioning import (
     ResolveCommentRequest,
     ResolveConflictsRequest,
     RevertRequest,
+    SaveConflictResolutionRequest,
     SubmitReviewRequest,
     TagCreateRequest,
 )
@@ -110,6 +111,7 @@ __all__ = [
     "ReleaseCreateRequest",
     "ResolveConflictsRequest",
     "RevertRequest",
+    "SaveConflictResolutionRequest",
     "SubmitReviewRequest",
     "TagCreateRequest",
 ]

@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import {
   FiArrowLeft, FiGitPullRequest, FiFileText, FiGitCommit, FiMessageSquare,
-  FiCheck, FiX, FiAlertCircle, FiLoader, FiShield, FiUsers,
+  FiCheck, FiAlertCircle, FiAlertTriangle, FiGitMerge, FiLoader, FiShield, FiUsers,
 } from 'react-icons/fi'
 import api from '../utils/api'
 import { getSessionUsername } from '../utils/session'
 import ReviewDiff from '../components/ReviewDiff'
+import MergeConflictResolverModal from '../components/MergeConflictResolverModal'
 import GlassCard from '../components/ui/GlassCard'
 import Badge from '../components/ui/Badge'
 import Button from '../components/ui/Button'
@@ -32,9 +33,46 @@ const STATE_LABEL = {
   commented: { text: 'commented', variant: 'default' },
 }
 
-function MergePanel({ summary, onMerge, merging, canAct }) {
+function ConflictPanel({ mergeability, pr, onResolve, opening }) {
+  if (!mergeability || mergeability.state !== 'conflicts') return null
+  const files = mergeability.conflicts || []
+  return (
+    <GlassCard className="p-4" hover={false}>
+      <div className="mb-2 flex items-center gap-2">
+        <FiAlertTriangle className="h-4 w-4 text-warning-fg" />
+        <h3 className="text-sm font-semibold text-ink">This branch has conflicts that must be resolved</h3>
+      </div>
+      <ul className="mb-3 max-h-32 space-y-0.5 overflow-auto">
+        {files.map((path) => (
+          <li key={path} className="truncate font-mono text-[11.5px] text-warning-fg">{path}</li>
+        ))}
+      </ul>
+      {mergeability.can_resolve ? (
+        <>
+          <Button type="button" onClick={onResolve} loading={opening} className="w-full">
+            <FiGitMerge className="h-4 w-4" />
+            {mergeability.open_session_id ? 'Continue resolving' : 'Resolve conflicts'}
+          </Button>
+          <p className="mt-2 text-[11px] text-muted">
+            The resolution is committed to <span className="font-mono">{pr?.source_branch}</span>;
+            approvals given before it will need renewing.
+          </p>
+        </>
+      ) : (
+        <p className="text-[11.5px] text-muted">
+          Only someone who can push to <span className="font-mono">{pr?.source_branch}</span>{' '}
+          can resolve these — usually the author. Or merge{' '}
+          <span className="font-mono">{pr?.target_branch}</span> into it locally and push.
+        </p>
+      )}
+    </GlassCard>
+  )
+}
+
+function MergePanel({ summary, mergeability, onMerge, merging, canAct }) {
   if (!summary) return null
-  const ok = summary.can_merge
+  const conflicted = mergeability?.state === 'conflicts'
+  const ok = summary.can_merge && !conflicted
   const owners = summary.code_owners || {}
 
   return (
@@ -46,7 +84,14 @@ function MergePanel({ summary, onMerge, merging, canAct }) {
         </h3>
       </div>
 
-      {!ok && (
+      {conflicted && (
+        <p className="mb-2 flex items-start gap-2 text-[12.5px] text-warning-fg">
+          <FiAlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          conflicts with {mergeability.target_branch} must be resolved
+        </p>
+      )}
+
+      {!summary.can_merge && (
         <ul className="mb-3 space-y-1.5">
           {(summary.blockers || []).map((blocker, i) => (
             <li key={i} className="flex items-start gap-2 text-[12.5px] text-warning-fg">
@@ -164,6 +209,9 @@ export default function PullRequestDetail({ repo, prId, onBack }) {
   const [merging, setMerging] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [mergeability, setMergeability] = useState(null)
+  const [resolverSession, setResolverSession] = useState(null)
+  const [openingResolver, setOpeningResolver] = useState(false)
 
   const me = getSessionUsername()
 
@@ -171,15 +219,17 @@ export default function PullRequestDetail({ repo, prId, onBack }) {
     setLoading(true)
     setError('')
     try {
-      const [detail, reviewData, files] = await Promise.all([
+      const [detail, reviewData, files, mergeState] = await Promise.all([
         api.getPullRequest(repo.id, prId),
         api.listReviews(repo.id, prId),
         api.getPullRequestFiles(repo.id, prId).catch(() => null),
+        api.getPullRequestMergeability(repo.id, prId).catch(() => null),
       ])
       setPr(detail.pull_request || detail)
       setReviews(reviewData.reviews || [])
       setSummary(reviewData)
       setBundle(files)
+      setMergeability(mergeState)
     } catch (err) {
       setError(err.message || 'Could not load this pull request')
     } finally {
@@ -233,13 +283,32 @@ export default function PullRequestDetail({ repo, prId, onBack }) {
     setMerging(true)
     setError('')
     try {
-      await api.mergePullRequest(repo.id, prId, summary?.source_head_commit_id || null)
+      // The guard is the *target* head -- the branch a merge moves. Sending the source
+      // head here made every merge from this page fail with HEAD_MISMATCH.
+      await api.mergePullRequest(repo.id, prId, mergeability?.target_head_commit_id || null)
       setNotice('Merged.')
       await load()
     } catch (err) {
+      if (err?.data?.code === 'MERGE_CONFLICT' || err?.code === 'MERGE_CONFLICT') {
+        await load()
+      }
       setError(err.message || 'Merge failed')
     } finally {
       setMerging(false)
+    }
+  }
+
+  const openResolver = async () => {
+    setOpeningResolver(true)
+    setError('')
+    setNotice('')
+    try {
+      const opened = await api.startMergeConflictSession(repo.id, prId)
+      setResolverSession(opened?.session?.id || null)
+    } catch (err) {
+      setError(err.message || 'Could not open the conflict resolver')
+    } finally {
+      setOpeningResolver(false)
     }
   }
 
@@ -366,8 +435,17 @@ export default function PullRequestDetail({ repo, prId, onBack }) {
 
           <div className="space-y-4">
             {status === 'open' && (
+              <ConflictPanel
+                mergeability={mergeability}
+                pr={pr}
+                onResolve={openResolver}
+                opening={openingResolver}
+              />
+            )}
+            {status === 'open' && (
               <MergePanel
                 summary={summary}
+                mergeability={mergeability}
                 onMerge={merge}
                 merging={merging}
                 canAct={status === 'open'}
@@ -432,6 +510,25 @@ export default function PullRequestDetail({ repo, prId, onBack }) {
             </ol>
           )}
         </GlassCard>
+      )}
+
+      {resolverSession && (
+        <MergeConflictResolverModal
+          repo={repo}
+          prId={prId}
+          sessionId={resolverSession}
+          onClose={() => {
+            setResolverSession(null)
+            // Decisions are saved as they are made, so the panel should now offer to
+            // continue the session rather than start one.
+            api.getPullRequestMergeability(repo.id, prId).then(setMergeability).catch(() => {})
+          }}
+          onResolved={async (result) => {
+            setResolverSession(null)
+            await load()
+            setNotice(result?.next_step || 'Conflicts resolved.')
+          }}
+        />
       )}
     </div>
   )

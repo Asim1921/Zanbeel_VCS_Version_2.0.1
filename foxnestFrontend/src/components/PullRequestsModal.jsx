@@ -14,9 +14,12 @@ const PullRequestsModal = ({ repo, onClose, onReview }) => {
   const [submitting, setSubmitting] = useState(false)
   const [mergingId, setMergingId] = useState(null)
   const [error, setError] = useState(null)
+  const [notice, setNotice] = useState(null)
   const [mergeConflict, setMergeConflict] = useState(null)
   const [resolverSession, setResolverSession] = useState(null)
   const [openingResolver, setOpeningResolver] = useState(false)
+  // Per open PR: does it merge cleanly? Asked up front so conflicts show before Merge.
+  const [mergeability, setMergeability] = useState({})
 
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
@@ -48,6 +51,16 @@ const PullRequestsModal = ({ repo, onClose, onReview }) => {
 
       setPullRequests(prs)
       setBranches(bs)
+
+      const open = prs.filter((pr) => pr.status === 'open')
+      const answers = await Promise.allSettled(
+        open.map((pr) => api.getPullRequestMergeability(repo.id, pr.id))
+      )
+      const next = {}
+      answers.forEach((answer, i) => {
+        if (answer.status === 'fulfilled') next[open[i].id] = answer.value
+      })
+      setMergeability(next)
 
       const mainBranch = bs.find((b) => b.name === 'main')
       setTargetBranch(mainBranch?.name || bs[0]?.name || '')
@@ -88,9 +101,13 @@ const PullRequestsModal = ({ repo, onClose, onReview }) => {
     try {
       setMergingId(pr.id)
       setError(null)
+      setNotice(null)
       setMergeConflict(null)
-      const expectedHead = branchHeadByName[pr.target_branch] || null
+      // The merge guards the *target* head: that is the branch it moves.
+      const expectedHead = mergeability[pr.id]?.target_head_commit_id
+        || branchHeadByName[pr.target_branch] || null
       await api.mergePullRequest(repo.id, pr.id, expectedHead)
+      setNotice(`Merged PR #${pr.id}.`)
       await loadData()
     } catch (err) {
       const data = err?.data || {}
@@ -114,18 +131,15 @@ const PullRequestsModal = ({ repo, onClose, onReview }) => {
   }
 
   // A conflicted merge is no longer a dead end: park the three sides of each
-  // conflicted file and hand them to the resolver.
-  const handleResolveConflicts = async () => {
-    if (!mergeConflict) return
+  // conflicted file and hand them to the resolver. Reopening resumes saved decisions.
+  const handleResolveConflicts = async (prId) => {
+    if (!prId) return
     try {
       setOpeningResolver(true)
       setError(null)
-      const bundle = await api.startMergeConflictSession(repo.id, mergeConflict.prId)
-      setResolverSession({
-        prId: mergeConflict.prId,
-        sessionId: bundle?.session?.id,
-        expectedHead: branchHeadByName[mergeConflict.target] || null,
-      })
+      setNotice(null)
+      const bundle = await api.startMergeConflictSession(repo.id, prId)
+      setResolverSession({ prId, sessionId: bundle?.session?.id })
     } catch (err) {
       setError(err.message || 'Could not open the conflict resolver')
     } finally {
@@ -177,6 +191,12 @@ const PullRequestsModal = ({ repo, onClose, onReview }) => {
             </div>
           )}
 
+          {notice && !error && (
+            <div className="mb-4 rounded-lg border border-success-fg/20 bg-success-fg/10 px-3 py-2 text-sm text-success-fg">
+              {notice}
+            </div>
+          )}
+
           {mergeConflict && (
             <div className="mb-4 rounded-xl border border-warning-fg/40 bg-warning-bg p-4">
               <p className="text-warning-fg font-semibold mb-1">Merge conflict detected (PR #{mergeConflict.prId})</p>
@@ -190,14 +210,14 @@ const PullRequestsModal = ({ repo, onClose, onReview }) => {
               </div>
               <div className="flex items-center gap-3 mt-3">
                 <Button
-                  onClick={handleResolveConflicts}
+                  onClick={() => handleResolveConflicts(mergeConflict.prId)}
                   disabled={openingResolver}
                   className="text-sm"
                 >
                   {openingResolver ? 'Opening…' : 'Resolve conflicts'}
                 </Button>
                 <p className="text-xs text-warning-fg/80">
-                  Or fix them on the branches, push, and merge again.
+                  The resolution is committed to {mergeConflict.source}. Or merge {mergeConflict.target} into it locally and push.
                 </p>
               </div>
             </div>
@@ -261,8 +281,27 @@ const PullRequestsModal = ({ repo, onClose, onReview }) => {
                             Created by {pr.created_by || 'unknown'}
                           </p>
                         </div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center justify-end gap-2">
                           {statusBadge(pr.status)}
+                          {pr.status === 'open' && mergeability[pr.id]?.state === 'conflicts' && (
+                            <Badge variant="warning" className="text-[11px]">
+                              {mergeability[pr.id].conflicts.length} conflicting file{mergeability[pr.id].conflicts.length === 1 ? '' : 's'}
+                            </Badge>
+                          )}
+                          {pr.status === 'open' && ['clean', 'up_to_date'].includes(mergeability[pr.id]?.state) && (
+                            <Badge variant="default" className="text-[11px]">No conflicts</Badge>
+                          )}
+                          {pr.status === 'open' && mergeability[pr.id]?.state === 'conflicts' && mergeability[pr.id]?.can_resolve && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="text-warning-fg border border-warning-fg/30"
+                              disabled={openingResolver}
+                              onClick={() => handleResolveConflicts(pr.id)}
+                            >
+                              {mergeability[pr.id]?.open_session_id ? 'Continue resolving' : 'Resolve conflicts'}
+                            </Button>
+                          )}
                           {typeof onReview === 'function' && (
                             <Button
                               variant="ghost"
@@ -296,15 +335,21 @@ const PullRequestsModal = ({ repo, onClose, onReview }) => {
 
       {resolverSession && (
         <MergeConflictResolverModal
-          repoId={repo.id}
+          repo={repo}
           prId={resolverSession.prId}
           sessionId={resolverSession.sessionId}
-          expectedHeadCommitId={resolverSession.expectedHead}
-          onClose={() => setResolverSession(null)}
-          onResolved={async () => {
+          onClose={() => {
+            const prId = resolverSession.prId
+            setResolverSession(null)
+            api.getPullRequestMergeability(repo.id, prId)
+              .then((state) => setMergeability((prev) => ({ ...prev, [prId]: state })))
+              .catch(() => {})
+          }}
+          onResolved={async (result) => {
             setResolverSession(null)
             setMergeConflict(null)
             await loadData()
+            setNotice(result?.next_step || 'Conflicts resolved.')
           }}
         />
       )}

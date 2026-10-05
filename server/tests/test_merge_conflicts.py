@@ -121,8 +121,10 @@ class MergeConflictTests(unittest.TestCase):
     def test_suggested_merge_carries_conflict_markers(self):
         bundle = merge_conflicts.get_bundle(self.db, self.open_session())
         suggested = base64.b64decode(bundle["files"][0]["suggested_b64"]).decode()
-        self.assertIn("<<<<<<< OURS", suggested)
-        self.assertIn(">>>>>>> THEIRS", suggested)
+        # Labelled with the branches, as Git does, and with the common ancestor shown.
+        self.assertIn("<<<<<<< main", suggested)
+        self.assertIn("||||||| base", suggested)
+        self.assertIn(">>>>>>> feature", suggested)
 
     def test_non_conflicted_files_are_not_included(self):
         bundle = merge_conflicts.get_bundle(self.db, self.open_session())
@@ -150,34 +152,42 @@ class MergeConflictTests(unittest.TestCase):
 
     # ---------------- resolving ----------------
 
-    def test_resolution_merges_and_moves_the_branch(self):
+    def test_resolution_is_committed_to_the_pull_request_branch(self):
+        """GitHub's model: the target is merged into the PR's branch, not the reverse."""
         session = self.open_session()
         result = merge_conflicts.resolve(
             self.db, session, {"a.txt": b64("RECONCILED")}, self.user)
 
-        self.assertEqual(result["status"], "merged")
+        self.assertEqual(result["status"], "resolved")
+        self.assertEqual(result["commit_branch"], "feature")
         tree = self.tree_text(result["merge_commit_id"])
         self.assertEqual(tree["a.txt"], "RECONCILED")
         self.assertEqual(tree["shared.txt"], "untouched")   # clean parts came through
-        self.assertEqual(self.head("main"), result["merge_commit_id"])
+        self.assertEqual(self.head("feature"), result["merge_commit_id"])
+        self.assertEqual(self.head("main"), "ours")         # the target is untouched
 
-    def test_merge_commit_records_both_parents(self):
+    def test_merge_commit_records_both_parents_source_first(self):
         session = self.open_session()
         result = merge_conflicts.resolve(
             self.db, session, {"a.txt": b64("X")}, self.user)
 
-        parents = {
+        parents = [
             row.parent_commit_id for row in
-            self.db.query(CommitParent).filter(
-                CommitParent.commit_id == result["merge_commit_id"]).all()
-        }
-        self.assertEqual(parents, {"ours", "theirs"})
+            self.db.query(CommitParent)
+            .filter(CommitParent.commit_id == result["merge_commit_id"])
+            .order_by(CommitParent.parent_order).all()
+        ]
+        # First parent is the branch written to, as for any merge commit.
+        self.assertEqual(parents, ["theirs", "ours"])
 
-    def test_pull_request_is_marked_merged(self):
+    def test_pull_request_stays_open_until_merged_normally(self):
         session = self.open_session()
         merge_conflicts.resolve(self.db, session, {"a.txt": b64("X")}, self.user)
         self.db.refresh(self.pr)
-        self.assertEqual(self.pr.status, "merged")
+        self.assertEqual(self.pr.status, "open")
+        # ...and it now merges cleanly.
+        self.assertEqual(
+            merge_conflicts.mergeability(self.db, "r1", self.pr)["state"], "clean")
 
     def test_session_is_marked_resolved(self):
         session = self.open_session()

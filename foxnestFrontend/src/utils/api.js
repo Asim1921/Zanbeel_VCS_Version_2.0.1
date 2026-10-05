@@ -371,6 +371,13 @@ class FoxNestAPI {
     })
   }
 
+  // payload: { path, content_b64 } | { path, delete: true } | { path, clear: true }
+  async saveBranchMergeResolution(repoId, sessionId, payload) {
+    return this.request(`/repository/${repoId}/branches/conflicts/${sessionId}/files`, {
+      method: 'PUT', body: payload, timeout: 60000,
+    })
+  }
+
   async listBranchMergeSessions(repoId) {
     return this.request(`/repository/${repoId}/branches/conflicts`)
   }
@@ -460,34 +467,57 @@ class FoxNestAPI {
     return this.request(`/activities?limit=${limit}`)
   }
 
-  // Merge conflict resolution. A conflicted merge returns code MERGE_CONFLICT with a
-  // resolve_url; startMergeConflictSession() parks the three sides of each conflicted
-  // file so they can be reconciled by hand.
+  // Merge conflict resolution, GitHub's way: the resolution is committed to the pull
+  // request's own branch (a merge of the target into it), after which the pull request
+  // merges normally. A conflicted merge returns code MERGE_CONFLICT with a resolve_url.
+
+  // Whether the PR merges cleanly, answered without merging: { state, mergeable,
+  // conflicts, open_session_id, can_resolve, target_head_commit_id, ... }.
+  async getPullRequestMergeability(repoId, prId) {
+    return this.request(`/repository/${repoId}/pull-requests/${prId}/mergeability`, {
+      timeout: 60000,
+    })
+  }
+
+  async listMergeConflictSessions(repoId, prId) {
+    return this.request(`/repository/${repoId}/pull-requests/${prId}/conflicts`)
+  }
+
   async startMergeConflictSession(repoId, prId) {
     return this.request(`/repository/${repoId}/pull-requests/${prId}/conflicts`, {
       method: 'POST',
       body: {},
+      timeout: 120000,
     })
   }
 
   async getMergeConflicts(repoId, prId, sessionId) {
-    return this.request(`/repository/${repoId}/pull-requests/${prId}/conflicts/${sessionId}`)
+    return this.request(`/repository/${repoId}/pull-requests/${prId}/conflicts/${sessionId}`, {
+      timeout: 60000,
+    })
   }
 
-  async resolveMergeConflicts(repoId, prId, sessionId, payload) {
+  // payload: { path, content_b64 } | { path, delete: true } | { path, clear: true }
+  async saveMergeConflictResolution(repoId, prId, sessionId, payload) {
     return this.request(
-      `/repository/${repoId}/pull-requests/${prId}/conflicts/${sessionId}/resolve`,
-      { method: 'POST', body: payload, timeout: 60000 }
+      `/repository/${repoId}/pull-requests/${prId}/conflicts/${sessionId}/files`,
+      { method: 'PUT', body: payload, timeout: 60000 }
     )
   }
 
-  async abortMergeConflicts(repoId, prId, sessionId, expectedHeadCommitId = null) {
+  // payload: { resolutions?, expected_head_commit_id?, allow_markers? }. Decisions saved
+  // per file count, so an empty payload completes a fully decided session.
+  async resolveMergeConflicts(repoId, prId, sessionId, payload = {}) {
+    return this.request(
+      `/repository/${repoId}/pull-requests/${prId}/conflicts/${sessionId}/resolve`,
+      { method: 'POST', body: payload, timeout: 120000 }
+    )
+  }
+
+  async abortMergeConflicts(repoId, prId, sessionId) {
     return this.request(
       `/repository/${repoId}/pull-requests/${prId}/conflicts/${sessionId}/abort`,
-      {
-        method: 'POST',
-        body: expectedHeadCommitId ? { expected_head_commit_id: expectedHeadCommitId } : {},
-      }
+      { method: 'POST', body: {} }
     )
   }
 

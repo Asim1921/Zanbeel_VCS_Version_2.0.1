@@ -26,6 +26,8 @@ const BranchActionsPanel = ({
   const [mergeTarget, setMergeTarget] = useState(selectedBranch || '')
   // A conflicted branch merge opens a resolution session rather than stopping.
   const [branchConflict, setBranchConflict] = useState(null)
+  // Unfinished branch merges, so an interrupted resolution can be picked up again.
+  const [openSessions, setOpenSessions] = useState([])
   const [publishSource, setPublishSource] = useState('')
   const [publishTarget, setPublishTarget] = useState(selectedBranch || '')
   const [copySource, setCopySource] = useState('')
@@ -43,6 +45,13 @@ const BranchActionsPanel = ({
     setCopyPath(selectedFilePath || '')
   }, [selectedBranch, selectedFilePath])
 
+  const loadOpenSessions = () => {
+    if (!repo?.id) return
+    api.listBranchMergeSessions(repo.id)
+      .then((res) => setOpenSessions(res?.sessions || []))
+      .catch(() => setOpenSessions([]))
+  }
+
   useEffect(() => {
     if (!expanded || !repo?.id) return
     let cancelled = false
@@ -51,7 +60,9 @@ const BranchActionsPanel = ({
       setPolicyDraft(res.policy)
       setYourScope(res.your_scope || 'read')
     }).catch(() => {})
+    loadOpenSessions()
     return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expanded, repo?.id])
 
   const branchNames = (branches || []).map((b) => b.name || b)
@@ -123,10 +134,8 @@ const BranchActionsPanel = ({
         const bundle = await api.startBranchMergeConflictSession(
           repo.id, mergeSource, mergeTarget
         )
-        setBranchConflict({
-          sessionId: bundle?.session?.id,
-          expectedHeadCommitId: headFor(mergeTarget),
-        })
+        setBranchConflict({ sessionId: bundle?.session?.id })
+        loadOpenSessions()
         setMessage(
           `${conflicts.length} conflicting file(s) between ${mergeSource} and ${mergeTarget}. Resolve them to finish the merge.`
         )
@@ -261,6 +270,26 @@ const BranchActionsPanel = ({
               </select>
               <Button size="sm" onClick={handleMerge} disabled={busy}>Merge</Button>
             </div>
+            {openSessions.length > 0 && (
+              <div className="mt-3 space-y-1.5">
+                <p className="text-xs text-muted">Unfinished merges</p>
+                {openSessions.map((s) => (
+                  <div key={s.id} className="flex flex-wrap items-center justify-between gap-2 rounded border border-warning-fg/30 bg-warning-fg/[0.06] px-3 py-1.5 text-xs">
+                    <span className="font-mono text-ink">
+                      {s.source_branch} → {s.target_branch}
+                      <span className="ml-2 font-sans text-muted">
+                        {s.resolved} of {s.files} resolved{s.created_by ? ` · started by ${s.created_by}` : ''}
+                        {s.stale_reason ? ' · out of date' : ''}
+                      </span>
+                    </span>
+                    <Button size="sm" variant="secondary" disabled={busy}
+                      onClick={() => setBranchConflict({ sessionId: s.id })}>
+                      Resume
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
 
           <section>
@@ -384,11 +413,16 @@ const BranchActionsPanel = ({
           repo={repo}
           prId={null}
           sessionId={branchConflict.sessionId}
-          expectedHeadCommitId={branchConflict.expectedHeadCommitId}
-          onClose={() => setBranchConflict(null)}
-          onResolved={() => {
+          onClose={() => {
             setBranchConflict(null)
-            setMessage(`Merged ${mergeSource} into ${mergeTarget}`)
+            loadOpenSessions()
+          }}
+          onResolved={(result) => {
+            setBranchConflict(null)
+            setMessage(
+              `Merged into ${result?.commit_branch || mergeTarget} as ${String(result?.merge_commit_id || '').slice(0, 12)}`
+            )
+            loadOpenSessions()
             onBranchesChanged?.()
           }}
         />
