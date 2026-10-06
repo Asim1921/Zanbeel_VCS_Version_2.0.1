@@ -11,8 +11,11 @@ from database.database import get_db
 from database.models import User
 
 from app.config import PASSWORD_SETUP_KEY
-from app.core.dependencies import get_current_user
+from app.core.dependencies import (
+    AUTH_SESSION, assert_password_session, auth_scheme, current_access_token, get_current_user,
+)
 from app.core.security import create_access_token, hash_password, verify_password
+from app.services import access_tokens as token_service
 from app.services import password_reset, rate_limit
 from app.schemas import (
     BootstrapPasswordRequest, ChangePasswordRequest, ForgotPasswordRequest, LoginRequest,
@@ -84,8 +87,39 @@ async def login(request: LoginRequest, http_request: Request, db: Session = Depe
         }
     }
 
+def _describe_credential(http_request: Request, db: Session) -> dict:
+    """What the caller is signed in with -- so a client can say "you are using the
+    read-only token 'ci-runner', expiring Friday" instead of guessing."""
+    scheme = auth_scheme(http_request)
+    token = current_access_token(http_request)
+    if scheme == AUTH_SESSION or token is None:
+        return {"type": "session", "scopes": None}
+
+    info = token_service.serialize(token)
+    described = {
+        "type": scheme,
+        "token_id": token.id,
+        "name": token.name,
+        "prefix": token.prefix,
+        "scopes": info["scopes"],
+        "expires_at": info["expires_at"],
+        "last_used_at": info["last_used_at"],
+    }
+    if token.ssh_key_id is not None:
+        from database.models import SSHKey
+        key = db.query(SSHKey).filter(SSHKey.id == token.ssh_key_id).first()
+        if key:
+            described["ssh_key"] = {"id": key.id, "title": key.title,
+                                    "fingerprint": key.fingerprint}
+    return described
+
+
 @router.get("/api/auth/me")
-async def auth_me(current_user: User = Depends(get_current_user)):
+async def auth_me(
+    http_request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     return {
         "success": True,
         "user": {
@@ -96,11 +130,15 @@ async def auth_me(current_user: User = Depends(get_current_user)):
             "role": current_user.role,
             "team_lead_id": current_user.team_lead_id,
             "is_active": current_user.is_active
-        }
+        },
+        "credential": _describe_credential(http_request, db),
     }
 
 @router.post("/api/auth/change-password")
-async def change_password(request: ChangePasswordRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+async def change_password(request: ChangePasswordRequest, http_request: Request, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # An account with no password yet has no current password to check, so without
+    # this a token could set one -- and with it, take the account.
+    assert_password_session(http_request, "Changing your password")
     if not request.new_password or len(request.new_password) < 8:
         raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
 

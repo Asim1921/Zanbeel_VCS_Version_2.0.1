@@ -8,11 +8,11 @@ a self-service endpoint quietly growing a role field.
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.core.dependencies import get_current_user
+from app.core.dependencies import assert_password_session, get_current_user
 from app.services import profiles
 from database.crud import UserCRUD
 from database.database import get_db
@@ -63,12 +63,24 @@ async def get_user_profile(
 @router.put("/api/profile")
 async def update_own_profile(
     request: ProfileUpdateRequest,
+    http_request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Change your own details. Role and account status are deliberately not here."""
+    """Change your own details. Role and account status are deliberately not here.
+
+    The email address is where password resets go, so changing it needs a password
+    sign-in: otherwise any token could redirect the reset and take the account.
+    Sending the current address back unchanged is fine from any credential.
+    """
+    fields = request.model_dump(exclude_unset=True)
+    # None leaves the address alone (profiles.update_profile skips it), so only a
+    # real change needs the password.
+    new_email = fields.get("email")
+    if new_email is not None and new_email.strip() != (current_user.email or ""):
+        assert_password_session(http_request, "Changing your email address")
     try:
-        user = profiles.update_profile(db, current_user, request.model_dump(exclude_unset=True))
+        user = profiles.update_profile(db, current_user, fields)
     except profiles.ProfileError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message)
     return {"success": True, "user": profiles.identity(user, viewer=user)}

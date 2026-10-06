@@ -19,6 +19,7 @@
 
 const vscode = require('vscode');
 const cp = require('child_process');
+const os = require('os');
 const path = require('path');
 
 const TOKEN_KEY = 'zanbeel.accessToken';
@@ -340,8 +341,9 @@ async function commandSignIn(context) {
     token = await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: 'Signing in to Zanbeel…' },
       async () => {
+        const base = server.replace(/\/+$/, '');
         try {
-          const response = await fetch(`${server.replace(/\/+$/, '')}/api/auth/login`, {
+          const response = await fetch(`${base}/api/auth/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username, password }),
@@ -355,7 +357,34 @@ async function commandSignIn(context) {
             vscode.window.showErrorMessage(`Zanbeel sign-in failed: ${detail}`);
             return null;
           }
-          return body.access_token || null;
+          if (!body.access_token) return null;
+
+          // Keep a token named after this machine rather than the password
+          // session: it shows up under Settings → Access tokens, can be revoked
+          // on its own, and is what Sign Out revokes. The session is discarded.
+          const minted = await fetch(`${base}/api/tokens`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${body.access_token}`,
+            },
+            body: JSON.stringify({
+              name: `VS Code on ${os.hostname()}`.slice(0, 100),
+              scopes: ['repo:write'],
+              expires_in_days: 90,
+            }),
+          });
+          if (minted.ok) {
+            const created = await minted.json();
+            return created.token || null;
+          }
+          // A server from before access tokens: fall back to the session.
+          if (minted.status === 404 || minted.status === 405) return body.access_token;
+          const detail = (await minted.json().catch(() => ({}))).detail;
+          vscode.window.showErrorMessage(
+            `Signed in, but could not create an access token: ${detail || `HTTP ${minted.status}`}`
+          );
+          return null;
         } catch (err) {
           vscode.window.showErrorMessage(`Could not reach ${server}: ${err.message}`);
           return null;
@@ -407,6 +436,22 @@ async function commandSignIn(context) {
 }
 
 async function commandSignOut(context) {
+  // Revoke on the server first: a sign-out that leaves the token valid is only
+  // a sign-out from this window. Best effort -- an unreachable server must not
+  // stop someone signing out locally.
+  const token = await context.secrets.get(TOKEN_KEY);
+  const server = (config().get('serverUrl') || '').trim().replace(/\/+$/, '');
+  if (token && token.startsWith('fxp_') && server) {
+    try {
+      const response = await fetch(`${server}/api/tokens/current`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      log(response.ok ? 'Revoked the access token on the server' : `Token revoke: HTTP ${response.status}`);
+    } catch (err) {
+      log(`Could not revoke the token on the server: ${err.message}`);
+    }
+  }
   await context.secrets.delete(TOKEN_KEY);
   await context.secrets.delete(USER_KEY);
   await injectEnvironment(context);

@@ -903,6 +903,10 @@ class AccessToken(Base):
     last_used_at = Column(DateTime, nullable=True)
     revoked_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
+    # Set when the token was issued by an SSH sign-in: it carries that key's
+    # scopes and is deleted with the key. Null for tokens a person created.
+    ssh_key_id = Column(Integer, ForeignKey("ssh_keys.id", ondelete="CASCADE"),
+                        nullable=True, index=True)
 
     user = relationship("User", foreign_keys=[user_id])
 
@@ -927,6 +931,10 @@ class SSHKey(Base):
     key_type = Column(String(30), nullable=False)          # ssh-rsa, ssh-ed25519, ecdsa-...
     public_key = Column(Text, nullable=False)              # full OpenSSH line
     fingerprint = Column(String(80), nullable=False, unique=True, index=True)
+    # What a sign-in with this key may do, in access-token scopes. Keys are
+    # machine credentials, so they are scoped like tokens rather than handing
+    # out the account's full powers.
+    scopes = Column(String(200), nullable=False, default="repo:write")
     last_used_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 

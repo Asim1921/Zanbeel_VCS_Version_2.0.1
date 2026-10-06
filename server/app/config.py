@@ -69,6 +69,11 @@ if PASSWORD_SETUP_KEY in _INSECURE_SETUP_KEYS:
 TOKEN_EXPIRY_HOURS = int(os.getenv("FOXNEST_TOKEN_EXPIRY_HOURS", "12"))
 PWD_ITERATIONS = int(os.getenv("FOXNEST_PASSWORD_ITERATIONS", "200000"))
 
+# An SSH sign-in yields an access token bound to the key that signed it: scoped
+# like the key, revoked when the key is removed, and short-lived because the
+# client can always sign a fresh challenge. Eight hours is a working day.
+SSH_SESSION_HOURS = max(1, int(os.getenv("FOXNEST_SSH_SESSION_HOURS") or "8"))
+
 
 logger = logging.getLogger("foxnest.versioning")
 

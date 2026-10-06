@@ -27,10 +27,14 @@ package the CLI needs (`requests`) if it is missing.
 
 ## Signing in
 
-**Zanbeel: Sign In** from the Command Palette. The token is stored in the OS
-keychain through VS Code's `SecretStorage` and handed to terminals as
+**Zanbeel: Sign In** from the Command Palette. Signing in with a password uses
+it once, to create an access token named "VS Code on *your machine*"
+(`repo:write`, 90 days); the password itself is not kept. You can also paste a
+token you made under Settings → Access tokens. Either way the token is stored in
+the OS keychain through VS Code's `SecretStorage` and handed to terminals as
 `FOXNEST_TOKEN`, so it is never written to `~/.foxnest/credentials.json` in the
-clear.
+clear. **Zanbeel: Sign Out** revokes the token on the server as well as
+forgetting it.
 
 Note that any process you start from a VS Code terminal can read that variable.
 Turn it off with `zanbeel.injectToken` if that is not acceptable, and use

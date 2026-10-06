@@ -4,14 +4,16 @@ from datetime import datetime
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from database.crud import ActivityCRUD, UserCRUD, UserEngagementCRUD
 from database.database import get_db
 from database.models import User
 
-from app.core.dependencies import get_current_user, require_admin_user
+from app.core.dependencies import (
+    assert_password_session, get_current_user, has_admin_powers, require_admin_user,
+)
 from app.core.pagination import paginate_query
 from app.core.security import hash_password
 
@@ -142,18 +144,26 @@ async def create_user(request: dict, current_user: User = Depends(require_admin_
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @router.put("/api/users/{username}")
-async def update_user(username: str, request: dict, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Update user information"""
+async def update_user(username: str, request: dict, http_request: Request, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Update user information.
+
+    Editing someone else is administration, so a token needs the admin scope for it,
+    not just an admin owner. Changing any email needs a password sign-in: the address
+    is where password resets go.
+    """
     try:
         user = UserCRUD.get_user_by_username(db, username)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
         is_self = current_user.username == username
-        is_admin = getattr(current_user, "role", "developer") in ["team_lead", "admin"]
+        is_admin = has_admin_powers(http_request, current_user)
         if not is_self and not is_admin:
             raise HTTPException(status_code=403, detail="You can only update your own profile")
-        
+
+        if "email" in request and (request["email"] or "") != (user.email or ""):
+            assert_password_session(http_request, "Changing an email address")
+
         if "email" in request:
             user.email = request["email"]
         if "full_name" in request:

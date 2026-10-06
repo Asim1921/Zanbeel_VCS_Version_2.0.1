@@ -20,12 +20,12 @@ KDF would only add latency to every authenticated request.
 import hashlib
 import hmac
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 from sqlalchemy.orm import Session
 
-from database.models import AccessToken, User
+from database.models import AccessToken, SSHKey, User
 
 # Chosen so a token is visually unmistakable in a log or a paste, and so the
 # auth dependency can tell a token from a session credential without a lookup.
@@ -73,6 +73,21 @@ def normalise_scopes(scopes: Optional[Iterable[str]]) -> List[str]:
         return [SCOPE_REPO_READ]
 
     return [scope for scope in VALID_SCOPES if scope in cleaned]
+
+
+def is_privileged(user: User) -> bool:
+    return (getattr(user, "role", None) or "developer") in ("team_lead", "admin")
+
+
+def check_scopes_allowed(user: User, scopes: Sequence[str]) -> None:
+    """A credential must never be able to do more than the person who created it.
+
+    Without this, a developer could mint an admin-scoped token (or register an
+    admin-scoped key) and escalate. Shared by tokens and SSH keys so the two
+    cannot drift apart.
+    """
+    if SCOPE_ADMIN in scopes and not is_privileged(user):
+        raise ValueError("Only team leads and admins may grant the 'admin' scope")
 
 
 def expand_scopes(scopes: Sequence[str]) -> set:
@@ -129,11 +144,7 @@ def create_token(
         raise ValueError("Token name is required")
 
     requested = normalise_scopes(scopes)
-
-    # A token must never be able to do more than the person who created it.
-    # Without this, a developer could mint an admin-scoped token and escalate.
-    if SCOPE_ADMIN in requested and getattr(user, "role", "developer") not in ("team_lead", "admin"):
-        raise ValueError("Only team leads and admins may create admin-scoped tokens")
+    check_scopes_allowed(user, requested)
 
     plaintext, prefix, token_hash = generate_token()
 
@@ -202,23 +213,124 @@ def revoke_token(db: Session, token: AccessToken) -> AccessToken:
     return token
 
 
-def list_tokens(db: Session, user_id: int, include_revoked: bool = False) -> List[AccessToken]:
-    """Every token belonging to a user, newest first."""
+def list_tokens(
+    db: Session,
+    user_id: int,
+    include_revoked: bool = False,
+    include_ssh_sessions: bool = False,
+) -> List[AccessToken]:
+    """Every token belonging to a user, newest first.
+
+    Tokens issued by SSH sign-ins are left out unless asked for: they come and go
+    with every sign-in, and they are managed through the key that issued them.
+    """
     query = db.query(AccessToken).filter(AccessToken.user_id == user_id)
     if not include_revoked:
         query = query.filter(AccessToken.revoked_at.is_(None))
-    return query.order_by(AccessToken.created_at.desc()).all()
+    if not include_ssh_sessions:
+        query = query.filter(AccessToken.ssh_key_id.is_(None))
+    return query.order_by(AccessToken.created_at.desc(), AccessToken.id.desc()).all()
+
+
+def is_live(token: AccessToken, now: Optional[datetime] = None) -> bool:
+    now = now or datetime.utcnow()
+    return token.revoked_at is None and not (token.expires_at and token.expires_at < now)
+
+
+# ---------------------------------------------------------------------------
+# Tokens issued by SSH sign-in
+# ---------------------------------------------------------------------------
+
+
+def issue_ssh_session(db: Session, user: User, key: SSHKey, hours: int) -> Tuple[AccessToken, str]:
+    """Mint the token an SSH sign-in hands back.
+
+    It is an ordinary access token in every way that matters for enforcement --
+    same prefix, same scope checks -- so key-based sign-in cannot open a door the
+    token rules do not already guard. What differs is its lifetime (short: the
+    client can always sign again) and its tie to the key (removing the key ends it).
+
+    The key's scopes are re-checked against the user's role at every sign-in, so a
+    team lead demoted to developer stops getting admin-scoped sessions from an old key.
+    """
+    scopes = [s for s in scopes_of_key(key) if s in VALID_SCOPES] or [SCOPE_REPO_READ]
+    if not is_privileged(user):
+        scopes = [s for s in scopes if s != SCOPE_ADMIN] or [SCOPE_REPO_READ]
+
+    # Spent sessions of this key are no use to anyone; keep the table from growing
+    # by one row per sign-in forever.
+    now = datetime.utcnow()
+    for stale in (
+        db.query(AccessToken)
+        .filter(AccessToken.ssh_key_id == key.id)
+        .all()
+    ):
+        if not is_live(stale, now):
+            db.delete(stale)
+
+    plaintext, prefix, token_hash = generate_token()
+    token = AccessToken(
+        user_id=user.id,
+        name=f"SSH sign-in: {key.title}"[:100],
+        prefix=prefix,
+        token_hash=token_hash,
+        scopes=",".join(scopes),
+        expires_at=now + timedelta(hours=hours),
+        ssh_key_id=key.id,
+    )
+    db.add(token)
+    db.commit()
+    db.refresh(token)
+    return token, plaintext
+
+
+def scopes_of_key(key: SSHKey) -> List[str]:
+    raw = (getattr(key, "scopes", None) or SCOPE_REPO_WRITE).split(",")
+    return [scope.strip() for scope in raw if scope.strip()]
+
+
+def live_session_count(db: Session, key_id: int) -> int:
+    now = datetime.utcnow()
+    return sum(
+        1 for token in db.query(AccessToken).filter(AccessToken.ssh_key_id == key_id).all()
+        if is_live(token, now)
+    )
+
+
+def delete_ssh_sessions(db: Session, key_id: int) -> int:
+    """Remove every token a key issued. The caller commits."""
+    return (
+        db.query(AccessToken)
+        .filter(AccessToken.ssh_key_id == key_id)
+        .delete(synchronize_session=False)
+    )
+
+
+def revoke_all_for_user(db: Session, user_id: int) -> int:
+    """Revoke every live token a user holds, personal and SSH-issued alike."""
+    now = datetime.utcnow()
+    count = 0
+    for token in db.query(AccessToken).filter(
+        AccessToken.user_id == user_id, AccessToken.revoked_at.is_(None)
+    ).all():
+        token.revoked_at = now
+        count += 1
+    db.commit()
+    return count
 
 
 def serialize(token: AccessToken) -> dict:
     """Public representation. Never includes the secret or its hash."""
     now = datetime.utcnow()
     expired = bool(token.expires_at and token.expires_at < now)
+    ssh_key_id = getattr(token, "ssh_key_id", None)
     return {
         "id": token.id,
         "name": token.name,
         "prefix": token.prefix,
         "scopes": scopes_of(token),
+        "kind": "ssh" if ssh_key_id else "personal",
+        "ssh_key_id": ssh_key_id,
         "created_at": token.created_at.isoformat() if token.created_at else None,
         "expires_at": token.expires_at.isoformat() if token.expires_at else None,
         "last_used_at": token.last_used_at.isoformat() if token.last_used_at else None,

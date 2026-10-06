@@ -44,7 +44,7 @@ const Sidebar = ({ isOpen, setIsOpen, activeTab, setActiveTab, currentUser }) =>
     { name: 'Pending Approvals', id: 'pending-approvals', icon: FiClock, description: 'Review pending commits' },
     { name: 'Pending Repositories', id: 'pending-repositories', icon: FiFolder, description: 'Review pending repository requests' },
     { name: 'Pending Users', id: 'pending-user-registrations', icon: FiUser, description: 'Review account requests' },
-    { name: 'Operations', id: 'operations', icon: FiHardDrive, description: 'Lockouts, backups and schema health' },
+    { name: 'Operations', id: 'operations', icon: FiHardDrive, description: 'Lockouts, credentials, backups and schema health' },
     { name: 'Archive', id: 'archive', icon: FiArchive, description: 'Archived projects' },
   ]
 

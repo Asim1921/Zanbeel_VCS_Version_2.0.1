@@ -15,8 +15,11 @@ import sys
 import zlib
 import difflib
 import time
+import socket
+import subprocess
+import tempfile
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
 import requests
@@ -162,6 +165,204 @@ def has_conflict_markers(content):
     return bool(text) and _MARKER_BLOCK.search(text) is not None
 
 
+# --- SSH signatures -------------------------------------------------------------------
+# `fox login --ssh` proves it holds a private key by signing the server's one-time
+# challenge as an OpenSSH SSHSIG -- the format `ssh-keygen -Y sign` writes, verified by
+# server/app/services/sshsig.py. The namespace is fixed here and never taken from the
+# server: it is what makes a signature produced for Zanbeel worthless anywhere else (an
+# SSH login, a signed git commit), so no server can use this client as a signing oracle.
+
+SSHSIG_NAMESPACE = "zanbeel-auth"
+DEFAULT_SSH_KEYS = ("id_ed25519", "id_ecdsa", "id_rsa")
+
+
+class SSHSignError(Exception):
+    """The challenge could not be signed; the message says what to do about it."""
+
+
+def _ssh_string(data):
+    return len(data).to_bytes(4, "big") + data
+
+
+def _ssh_mpint(value):
+    if value == 0:
+        return _ssh_string(b"")
+    # One extra byte keeps the sign bit clear, as the SSH wire format requires.
+    return _ssh_string(value.to_bytes((value.bit_length() + 8) // 8, "big"))
+
+
+def _armor_sshsig(blob):
+    body = base64.b64encode(blob).decode("ascii")
+    lines = [body[i:i + 70] for i in range(0, len(body), 70)]
+    return "-----BEGIN SSH SIGNATURE-----\n" + "\n".join(lines) + "\n-----END SSH SIGNATURE-----\n"
+
+
+def sshsig_sign_with_key(private_key, message, namespace=SSHSIG_NAMESPACE):
+    """SSHSIG over ``message`` made with a `cryptography` private key object."""
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
+    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+
+    public_line = private_key.public_key().public_bytes(
+        serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH
+    )
+    public_blob = base64.b64decode(public_line.split()[1])
+    signed = (
+        b"SSHSIG"
+        + _ssh_string(namespace.encode("utf-8"))
+        + _ssh_string(b"")
+        + _ssh_string(b"sha512")
+        + _ssh_string(hashlib.sha512(message).digest())
+    )
+
+    if isinstance(private_key, ed25519.Ed25519PrivateKey):
+        signature = _ssh_string(b"ssh-ed25519") + _ssh_string(private_key.sign(signed))
+    elif isinstance(private_key, rsa.RSAPrivateKey):
+        raw = private_key.sign(signed, padding.PKCS1v15(), hashes.SHA512())
+        signature = _ssh_string(b"rsa-sha2-512") + _ssh_string(raw)
+    elif isinstance(private_key, ec.EllipticCurvePrivateKey):
+        curves = {
+            256: (b"ecdsa-sha2-nistp256", hashes.SHA256),
+            384: (b"ecdsa-sha2-nistp384", hashes.SHA384),
+            521: (b"ecdsa-sha2-nistp521", hashes.SHA512),
+        }
+        if private_key.curve.key_size not in curves:
+            raise SSHSignError(f"Unsupported ECDSA curve: {private_key.curve.name}")
+        name, hash_cls = curves[private_key.curve.key_size]
+        r, s = decode_dss_signature(private_key.sign(signed, ec.ECDSA(hash_cls())))
+        signature = _ssh_string(name) + _ssh_string(_ssh_mpint(r) + _ssh_mpint(s))
+    else:
+        raise SSHSignError(f"Unsupported key type: {type(private_key).__name__}")
+
+    blob = (
+        b"SSHSIG"
+        + (1).to_bytes(4, "big")
+        + _ssh_string(public_blob)
+        + _ssh_string(namespace.encode("utf-8"))
+        + _ssh_string(b"")
+        + _ssh_string(b"sha512")
+        + _ssh_string(signature)
+    )
+    return _armor_sshsig(blob)
+
+
+def find_ssh_keygen():
+    found = shutil.which("ssh-keygen")
+    if found:
+        return found
+    if os.name == "nt":
+        bundled = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "OpenSSH" / "ssh-keygen.exe"
+        if bundled.exists():
+            return str(bundled)
+    return None
+
+
+def sshsig_sign_with_ssh_keygen(key_path, message, namespace=SSHSIG_NAMESPACE, interactive=True):
+    """Have OpenSSH make the signature.
+
+    Covers what Python alone cannot: passphrase-protected keys (ssh-keygen asks for the
+    passphrase itself), keys held only by ssh-agent (point --key at the .pub file), and
+    hardware-backed keys. The private key never passes through this process.
+    """
+    exe = find_ssh_keygen()
+    if not exe:
+        raise SSHSignError(
+            "This key needs ssh-keygen (OpenSSH) to sign, and it was not found on PATH. "
+            "Install OpenSSH, or load the key into ssh-agent."
+        )
+    with tempfile.TemporaryDirectory(prefix="fox-ssh-") as tmp:
+        challenge = Path(tmp) / "challenge"
+        challenge.write_bytes(message)
+        try:
+            # At a terminal ssh-keygen's stderr is left alone: its passphrase prompt is
+            # written there, and a captured prompt is one the user never sees.
+            result = subprocess.run(
+                [exe, "-Y", "sign", "-n", namespace, "-f", str(key_path), str(challenge)],
+                stdin=None if interactive else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=None if interactive else subprocess.PIPE,
+                timeout=180,
+            )
+        except subprocess.TimeoutExpired:
+            raise SSHSignError("ssh-keygen did not finish signing within 3 minutes")
+        signature = Path(str(challenge) + ".sig")
+        if result.returncode != 0 or not signature.exists():
+            detail = (result.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+            hint = "" if interactive else (
+                " (a passphrase-protected key needs a terminal, or load it into ssh-agent "
+                "and pass --key <key>.pub)"
+            )
+            raise SSHSignError(
+                "ssh-keygen could not sign the challenge"
+                + (f": {detail[-1]}" if detail else "") + hint
+            )
+        return signature.read_text(encoding="ascii")
+
+
+def sign_ssh_challenge(key_path, message, interactive=True, read_passphrase=None):
+    """Sign ``message`` with the key at ``key_path``. Returns (armored signature, how).
+
+    Unencrypted keys are signed here with `cryptography`; everything else is handed to
+    ssh-keygen. ``read_passphrase`` is the last resort for an encrypted key when
+    ssh-keygen is unavailable (it needs the optional bcrypt package).
+    """
+    key_path = Path(key_path)
+    try:
+        data = key_path.read_bytes()
+    except OSError as exc:
+        raise SSHSignError(f"Could not read {key_path}: {exc}")
+
+    # A public key means "the private half is in ssh-agent".
+    if data.lstrip().startswith((b"ssh-", b"ecdsa-", b"sk-")):
+        return sshsig_sign_with_ssh_keygen(key_path, message, interactive=interactive), "ssh-agent"
+
+    try:
+        from cryptography.exceptions import UnsupportedAlgorithm
+        from cryptography.hazmat.primitives import serialization
+    except ImportError:
+        return sshsig_sign_with_ssh_keygen(key_path, message, interactive=interactive), "ssh-keygen"
+
+    loaders = (serialization.load_ssh_private_key, serialization.load_pem_private_key)
+    encrypted = False
+    for loader in loaders:
+        try:
+            private_key = loader(data, password=None)
+            return sshsig_sign_with_key(private_key, message), "fox"
+        except TypeError:
+            encrypted = True  # needs a passphrase
+            break
+        except (ValueError, UnsupportedAlgorithm):
+            continue
+
+    if find_ssh_keygen():
+        return sshsig_sign_with_ssh_keygen(key_path, message, interactive=interactive), "ssh-keygen"
+    if encrypted and read_passphrase:
+        passphrase = read_passphrase(f"Passphrase for {key_path.name}: ")
+        for loader in loaders:
+            try:
+                private_key = loader(data, password=(passphrase or "").encode("utf-8"))
+                return sshsig_sign_with_key(private_key, message), "fox"
+            except (ImportError, UnsupportedAlgorithm) as exc:
+                if "bcrypt" in str(exc).lower() or isinstance(exc, ImportError):
+                    raise SSHSignError(
+                        "Unlocking this key needs ssh-keygen (OpenSSH) or the 'bcrypt' "
+                        "package (pip install bcrypt)")
+                continue
+            except (ValueError, TypeError):
+                continue
+        raise SSHSignError(f"Could not unlock {key_path.name}: wrong passphrase?")
+    raise SSHSignError(f"{key_path.name} is not a private key this client can read")
+
+
+def ssh_fingerprint(public_line):
+    """OpenSSH SHA256 fingerprint of a public key line, or None."""
+    try:
+        blob = base64.b64decode(public_line.split()[1])
+    except Exception:
+        return None
+    return "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
+
+
 class FoxClient:
     def __init__(self):
         self.fox_dir = Path(".fox")
@@ -259,18 +460,109 @@ class FoxClient:
             print(f"Linked to remote repository: {repo_id}")
         return repo_id
 
+    # ------------------------------------------------------------------------------
+    # Credentials
+    #
+    # ~/.foxnest/credentials.json holds one credential:
+    #   access_token  the bearer value sent with every request
+    #   auth_method   "token"   a personal access token -- what `fox login` saves. Named
+    #                           after this machine, scoped, and revocable on its own, so a
+    #                           lost laptop costs one token rather than a password change.
+    #                 "ssh"     a short-lived token from an SSH sign-in, renewed by signing
+    #                           a fresh challenge with the same key whenever it runs out.
+    #                 "session" a password session saved by an older client.
+    #   token_id, token_name, scopes, expires_at, ssh_key_path, ssh_key_id  bookkeeping.
+    # The password is never stored; it is sent only to exchange it for a token.
+    # FOXNEST_TOKEN, when set, is used instead of the file (CI runners, the VS Code
+    # extension), and FOXNEST_SERVER instead of the configured origin.
+    # ------------------------------------------------------------------------------
+
+    CREDENTIAL_FIELDS = (
+        "access_token", "token", "auth_token", "accessToken", "auth_method",
+        "token_id", "token_name", "scopes", "expires_at", "ssh_key_id",
+    )
+    LOGIN_TOKEN_DAYS = 90
+    CREDENTIAL_REQUIRED_HEADER = "X-Zanbeel-Credential-Required"
+
+    @staticmethod
+    def _env_token():
+        return (os.environ.get("FOXNEST_TOKEN") or "").strip()
+
+    @staticmethod
+    def _interactive():
+        try:
+            return bool(sys.stdin) and sys.stdin.isatty()
+        except Exception:
+            return False
+
+    def _read_secret(self, prompt):
+        """A password or passphrase: hidden at a terminal, one line of stdin otherwise.
+
+        Reading stdin when it is not a terminal is what lets a script pipe the password
+        in (`echo ... | fox token create ci`) instead of putting it on the command line.
+        """
+        if self._interactive():
+            import getpass
+            try:
+                return getpass.getpass(prompt)
+            except Exception:
+                pass
+        try:
+            return (sys.stdin.readline() if sys.stdin else "").rstrip("\r\n")
+        except Exception:
+            return ""
+
+    def _ask(self, prompt, default=None):
+        try:
+            value = input(f"{prompt} [{default}]: " if default else f"{prompt}: ").strip()
+        except EOFError:
+            value = ""
+        return value or default
+
+    @staticmethod
+    def _parse_time(value):
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            return None
+
+    def _credential_expired(self, cfg, skew_seconds=60):
+        expires = self._parse_time(cfg.get("expires_at"))
+        # The server's timestamps are naive UTC. datetime.utcnow() would match them but
+        # prints a DeprecationWarning to the user's terminal on Python 3.12+.
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        return bool(expires and expires <= now + timedelta(seconds=skew_seconds))
+
+    def _saved_token(self, cfg=None):
+        cfg = cfg if cfg is not None else (self.load_global_config() or {})
+        return cfg.get('access_token') or cfg.get('token') or cfg.get('auth_token') or cfg.get('accessToken')
+
+    def _store_credential(self, server_url, username, token, method, **details):
+        """Replace whatever credential was saved with this one."""
+        cfg = self.load_global_config() or {}
+        for field in self.CREDENTIAL_FIELDS:
+            cfg.pop(field, None)
+        cfg.update({"username": username, "origin_url": server_url,
+                    "access_token": token, "auth_method": method})
+        cfg.update({k: v for k, v in details.items() if v is not None})
+        return self.save_global_config(cfg)
+
     def has_auth_token(self):
-        """True if global credentials contain a non-empty access token."""
+        """True if a credential is available (FOXNEST_TOKEN or the credentials file)."""
         return bool(self.get_auth_headers())
 
     def ensure_authenticated(self, interactive=True):
-        """Ensure an access token is available; optionally prompt for login."""
+        """Ensure a credential is available; optionally prompt for login."""
         if self.has_auth_token():
             return True
         if not interactive:
             return False
-        print(f"No access token in {self.global_config_file}")
-        print("Run: fox login")
+        print(f"Not signed in (no credential in {self.global_config_file}).")
+        if not self._interactive():
+            print("Run: fox login   -- or set FOXNEST_TOKEN to an access token")
+            return False
         return self.login()
 
     @staticmethod
@@ -296,10 +588,24 @@ class FoxClient:
         return (response.text or "").strip() or f"HTTP {response.status_code}"
 
     def get_auth_headers(self):
-        """Return Authorization headers if an access token is present in global config."""
+        """Authorization header for the current credential.
+
+        FOXNEST_TOKEN wins over the credentials file. An SSH sign-in that has run out is
+        renewed here by signing a fresh challenge with the same key, so every command --
+        not only the ones that retry on 401 -- sends a live token.
+        """
+        env_token = self._env_token()
+        if env_token:
+            return {"Authorization": f"Bearer {env_token}"}
+
         cfg = self.load_global_config() or {}
-        # support multiple possible token key names
-        token = cfg.get('access_token') or cfg.get('token') or cfg.get('auth_token') or cfg.get('accessToken')
+        if (cfg.get("auth_method") == "ssh" and self._credential_expired(cfg)
+                and not getattr(self, "_ssh_renewal_tried", False)):
+            self._ssh_renewal_tried = True
+            if self.ssh_login(quiet=True):
+                cfg = self.load_global_config() or {}
+
+        token = self._saved_token(cfg)
         if token:
             return {"Authorization": f"Bearer {token}"}
         return {}
@@ -336,195 +642,627 @@ class FoxClient:
                 return str(value).strip()
         return None
 
-    def login(self, username=None, password=None):
-        """Prompt for username/password, call server login, and save token to global config."""
-        server_url = self._resolve_server_url()
-        global_cfg = self.load_global_config() or {}
-
-        if not username:
-            default_username = global_cfg.get("username")
-            if default_username:
-                entered = input(f"Username [{default_username}]: ").strip()
-                username = entered or default_username
-            else:
-                username = input("Username: ")
-        if not password:
-            # Use getpass to avoid echoing password
-            try:
-                import getpass
-                password = getpass.getpass("Password: ")
-            except Exception:
-                password = input("Password: ")
-
-        print(f"Logging in to: {server_url}")
+    def _password_sign_in(self, server_url, username, password):
+        """POST /api/auth/login. Returns (session token, user dict) or None, printing why."""
         try:
             response = requests.post(
                 f"{server_url}/api/auth/login",
                 json={"username": username, "password": password},
-                timeout=30
+                timeout=30,
             )
         except requests.exceptions.RequestException as e:
             print(f"Network error during login: {e}")
-            return False
-
+            return None
         if response.status_code == 200:
-            try:
-                data = response.json()
-                if data.get('success') and data.get('access_token'):
-                    token = data['access_token']
-                    cfg = self.load_global_config() or {}
-                    cfg['username'] = username
-                    cfg['access_token'] = token
-                    cfg['origin_url'] = server_url
-                    if self.save_global_config(cfg):
-                        print(f"Login successful. Token saved to: {self.global_config_file}")
-                        return True
-                    else:
-                        print("Login succeeded but failed to save token to global config")
-                        return False
-                else:
-                    print(f"Login failed: {data.get('message') or data.get('error') or 'Unknown error'}")
-                    return False
-            except Exception as e:
-                print(f"Failed to parse login response: {e}")
-                return False
-        elif response.status_code in (401, 403):
-            try:
-                data = response.json()
-                print(f"Authentication failed: {data.get('detail') or data.get('error') or response.text}")
-            except Exception:
-                print(f"Authentication failed (HTTP {response.status_code})")
-            return False
+            data = response.json()
+            if data.get("success") and data.get("access_token"):
+                return data["access_token"], data.get("user") or {"username": username}
+            print(f"Login failed: {data.get('message') or data.get('error') or 'Unknown error'}")
+            return None
+        if response.status_code in (401, 403, 429):
+            print(f"Authentication failed: {self._response_error_message(response)}")
         else:
             print(f"HTTP error during login: {response.status_code}")
+        return None
+
+    def login(self, username=None, password=None, scopes=None, expires_in_days=None):
+        """Sign this machine in with a password.
+
+        The password is used once, to create an access token named after this machine,
+        and only the token is saved. Team leads' tokens include the admin scope, so the
+        admin commands keep working; pass scopes to narrow it.
+        """
+        server_url = self._resolve_server_url()
+        global_cfg = self.load_global_config() or {}
+
+        if not username:
+            username = self._ask("Username", global_cfg.get("username"))
+        if not username:
+            print("A username is required.")
+            return False
+        if not password:
+            password = self._read_secret("Password: ")
+        if not password:
+            print("A password is required.")
             return False
 
-    def logout(self):
-        """Remove access token from global config"""
-        cfg = self.load_global_config() or {}
-        removed = False
-        for key in ('access_token', 'token', 'auth_token', 'accessToken'):
-            if key in cfg:
-                del cfg[key]
-                removed = True
-        if self.save_global_config(cfg):
-            if removed:
-                print(f"Logged out. Token removed from: {self.global_config_file}")
-            else:
-                print("No token found in global config")
+        print(f"Logging in to: {server_url}")
+        signed_in = self._password_sign_in(server_url, username, password)
+        if not signed_in:
+            return False
+        session, user = signed_in
+        username = user.get("username") or username
+        session_headers = {"Authorization": f"Bearer {session}"}
+
+        privileged = (user.get("role") or "developer") in ("team_lead", "admin")
+        wanted = list(scopes or (["repo:write", "admin"] if privileged else ["repo:write"]))
+        days = self.LOGIN_TOKEN_DAYS if expires_in_days is None else int(expires_in_days)
+        payload = {"name": f"fox CLI on {socket.gethostname()}"[:100], "scopes": wanted}
+        if days > 0:
+            payload["expires_in_days"] = days
+
+        try:
+            response = requests.post(f"{server_url}/api/tokens", json=payload,
+                                     headers=session_headers, timeout=30)
+        except requests.exceptions.RequestException as e:
+            print(f"Network error creating this machine's access token: {e}")
+            return False
+
+        if response.status_code in (404, 405):
+            # A server from before access tokens: keep the password session, as before.
+            if not self._store_credential(server_url, username, session, "session"):
+                return False
+            print(f"Login successful. Session saved to: {self.global_config_file}")
+            print("(This server does not issue access tokens; the session expires on its own.)")
             return True
-        print("Failed to update global config")
-        return False
+        if response.status_code != 200:
+            print(f"Signed in, but could not create an access token: "
+                  f"{self._response_error_message(response)}")
+            return False
+
+        data = response.json()
+        meta = data.get("access_token") or {}
+        previous_id = None
+        if (global_cfg.get("auth_method") == "token" and global_cfg.get("token_id")
+                and global_cfg.get("origin_url") == server_url
+                and global_cfg.get("username") == username):
+            previous_id = global_cfg.get("token_id")
+
+        if not self._store_credential(
+            server_url, username, data["token"], "token",
+            token_id=meta.get("id"), token_name=meta.get("name"),
+            scopes=meta.get("scopes"), expires_at=meta.get("expires_at"),
+        ):
+            print("Signed in, but the token could not be saved.")
+            return False
+
+        # The token this machine held before is now unused; retire it so repeated
+        # logins do not leave a trail of live credentials behind.
+        if previous_id and previous_id != meta.get("id"):
+            try:
+                requests.delete(f"{server_url}/api/tokens/{previous_id}",
+                                headers=session_headers, timeout=30)
+            except requests.exceptions.RequestException:
+                pass
+
+        expiry = (meta.get("expires_at") or "")[:10] or "never"
+        print(f"Signed in as {username}.")
+        print(f"Saved access token '{meta.get('name')}' ({', '.join(meta.get('scopes') or [])}; "
+              f"expires {expiry}) to {self.global_config_file}")
+        print("Your password was not saved. To cut this machine off later: "
+              f"fox token revoke {meta.get('id')}  (or Settings -> Access tokens)")
+        return True
+
+    def logout(self):
+        """Forget the saved credential, revoking it on the server when it is a token."""
+        cfg = self.load_global_config() or {}
+        token = self._saved_token(cfg)
+        if token and token.startswith("fxp_"):
+            server_url = cfg.get("origin_url") or self._resolve_server_url()
+            try:
+                response = requests.delete(f"{server_url}/api/tokens/current",
+                                           headers={"Authorization": f"Bearer {token}"},
+                                           timeout=30)
+                if response.status_code == 200:
+                    print("Revoked this machine's token on the server.")
+                elif response.status_code != 401:  # 401: already revoked or expired
+                    print(f"Could not revoke the token on the server: "
+                          f"{self._response_error_message(response)}")
+            except requests.exceptions.RequestException as e:
+                print(f"Could not reach the server to revoke the token ({e}); "
+                      "revoke it from Settings -> Access tokens.")
+
+        removed = any(field in cfg for field in self.CREDENTIAL_FIELDS)
+        for field in self.CREDENTIAL_FIELDS:
+            cfg.pop(field, None)
+        if not self.save_global_config(cfg):
+            print("Failed to update global config")
+            return False
+        print(f"Logged out. Credential removed from: {self.global_config_file}"
+              if removed else "No saved credential to remove.")
+        if self._env_token():
+            print("Note: FOXNEST_TOKEN is set in this environment and is still in use.")
+        return True
+
+    def _recover_from_401(self, had_token):
+        """After the server refused the credential: True if there is a new one to retry with."""
+        if self._env_token():
+            print("The server rejected FOXNEST_TOKEN: it has been revoked, has expired, "
+                  "or belongs to another server.")
+            return False
+        cfg = self.load_global_config() or {}
+        method = cfg.get("auth_method")
+        if method == "ssh":
+            if self.ssh_login(quiet=True):
+                return True
+            print("Could not sign in again with the SSH key. Run: fox login --ssh")
+            return False
+        if had_token and method == "token":
+            print(f"The saved access token '{cfg.get('token_name') or 'token'}' was rejected: "
+                  "it has been revoked, has expired, or belongs to another server.")
+        if not self._interactive():
+            print(f"Run: fox login   (server: {self._resolve_server_url()})")
+            return False
+        print("Signing in again...")
+        return self.login()
+
+    def _authed_request(self, method, url, timeout=30, **kwargs):
+        """One request with the saved credential; on 401, recover once and retry."""
+        if not self.ensure_authenticated():
+            resp = requests.Response()
+            resp.status_code = 401
+            resp._content = b'{"detail":"Authentication required"}'
+            resp.headers["Content-Type"] = "application/json"
+            return resp
+
+        call = getattr(requests, method.lower())
+        headers = self.get_auth_headers()
+        resp = call(url, headers=headers, timeout=timeout, **kwargs)
+        if resp.status_code == 401 and self._recover_from_401(bool(headers.get("Authorization"))):
+            try:
+                resp = call(url, headers=self.get_auth_headers(), timeout=timeout, **kwargs)
+            except requests.exceptions.RequestException:
+                pass
+        return resp
 
     def _authed_post(self, url, json=None, params=None, timeout=30):
-        """POST with auth header; on 401, prompt login once and retry."""
-        if not self.ensure_authenticated():
-            resp = requests.Response()
-            resp.status_code = 401
-            resp._content = b'{"detail":"Authentication required"}'
-            resp.headers["Content-Type"] = "application/json"
-            return resp
-
-        headers = self.get_auth_headers()
-        try:
-            resp = requests.post(url, json=json, params=params, headers=headers, timeout=timeout)
-        except requests.exceptions.RequestException as e:
-            raise
-
-        if resp.status_code == 401:
-            had_token = bool(headers.get("Authorization"))
-            print("Authentication required. Attempting interactive login...")
-            if self.login():
-                headers = self.get_auth_headers()
-                try:
-                    resp = requests.post(url, json=json, params=params, headers=headers, timeout=timeout)
-                except requests.exceptions.RequestException:
-                    pass
-            elif had_token:
-                print(
-                    f"\nTip: Token may be for a different server than {self._resolve_server_url()}.\n"
-                    f"     Run: fox login   (credentials: {self.global_config_file})"
-                )
-        return resp
-
+        """POST with auth header; on 401, recover the credential once and retry."""
+        return self._authed_request("POST", url, timeout=timeout, json=json, params=params)
 
     def _authed_put(self, url, json=None, params=None, timeout=30):
-        """PUT with auth header; on 401, prompt login once and retry."""
-        if not self.ensure_authenticated():
-            resp = requests.Response()
-            resp.status_code = 401
-            resp._content = b'{"detail":"Authentication required"}'
-            resp.headers["Content-Type"] = "application/json"
-            return resp
-        headers = self.get_auth_headers()
-        resp = requests.put(url, params=params, json=json, headers=headers, timeout=timeout)
-        if resp.status_code == 401 and self.prompt_login_and_retry():
-            resp = requests.put(url, params=params, json=json,
-                                headers=self.get_auth_headers(), timeout=timeout)
-        return resp
+        """PUT with auth header; on 401, recover the credential once and retry."""
+        return self._authed_request("PUT", url, timeout=timeout, json=json, params=params)
 
     def _authed_get(self, url, params=None, timeout=30):
-        """GET with auth header; on 401, prompt login once and retry."""
-        if not self.ensure_authenticated():
-            resp = requests.Response()
-            resp.status_code = 401
-            resp._content = b'{"detail":"Authentication required"}'
-            resp.headers["Content-Type"] = "application/json"
-            return resp
-
-        headers = self.get_auth_headers()
-        try:
-            resp = requests.get(url, params=params, headers=headers, timeout=timeout)
-        except requests.exceptions.RequestException as e:
-            raise
-
-        if resp.status_code == 401:
-            had_token = bool(headers.get("Authorization"))
-            print("Authentication required. Attempting interactive login...")
-            if self.login():
-                headers = self.get_auth_headers()
-                try:
-                    resp = requests.get(url, params=params, headers=headers, timeout=timeout)
-                except requests.exceptions.RequestException:
-                    pass
-            elif had_token:
-                print(
-                    f"\nTip: Token may be for a different server than {self._resolve_server_url()}.\n"
-                    f"     Run: fox login   (credentials: {self.global_config_file})"
-                )
-        return resp
+        """GET with auth header; on 401, recover the credential once and retry."""
+        return self._authed_request("GET", url, timeout=timeout, params=params)
 
     def _authed_delete(self, url, timeout=30):
-        """DELETE with auth header; on 401, prompt login once and retry."""
-        if not self.ensure_authenticated():
-            resp = requests.Response()
-            resp.status_code = 401
-            resp._content = b'{"detail":"Authentication required"}'
-            resp.headers["Content-Type"] = "application/json"
-            return resp
+        """DELETE with auth header; on 401, recover the credential once and retry."""
+        return self._authed_request("DELETE", url, timeout=timeout)
 
-        headers = self.get_auth_headers()
+    def _password_session_headers(self, purpose):
+        """Headers for one credential-management call, from a password sign-in never saved.
+
+        The server will not let a token or an SSH sign-in create or change credentials --
+        otherwise a stolen token could mint its own successor -- so these calls need the
+        password. A saved password session (older clients) is used as it is.
+        """
+        cfg = self.load_global_config() or {}
+        server_url = self._resolve_server_url()
+        saved = self._saved_token(cfg)
+        if not self._env_token() and saved and not saved.startswith("fxp_"):
+            return {"Authorization": f"Bearer {saved}"}
+
+        username = cfg.get("username")
+        if not username and self.has_auth_token():
+            try:
+                me = requests.get(f"{server_url}/api/auth/me", headers=self.get_auth_headers(), timeout=30)
+                if me.status_code == 200:
+                    username = (me.json().get("user") or {}).get("username")
+            except requests.exceptions.RequestException:
+                pass
+        if not username:
+            username = self._ask("Username")
+        if not username:
+            print("A username is required.")
+            return None
+
+        print(f"{purpose} needs your password: access tokens and SSH keys cannot manage credentials.")
+        password = self._read_secret(f"Password for {username}: ")
+        if not password:
+            print("No password given.")
+            return None
+        signed_in = self._password_sign_in(server_url, username, password)
+        return {"Authorization": f"Bearer {signed_in[0]}"} if signed_in else None
+
+    def whoami(self):
+        """Who this machine is signed in as, with what, and until when."""
+        server_url = self._resolve_server_url()
+        if not self.has_auth_token():
+            print("Not signed in. Run: fox login")
+            return False
         try:
-            resp = requests.delete(url, headers=headers, timeout=timeout)
+            response = requests.get(f"{server_url}/api/auth/me", headers=self.get_auth_headers(), timeout=30)
         except requests.exceptions.RequestException as e:
-            raise
+            print(f"Network error: {e}")
+            return False
+        if response.status_code == 401:
+            print(f"{server_url} rejected the saved credential: it has been revoked or has expired. "
+                  "Run: fox login")
+            return False
+        if response.status_code != 200:
+            print(f"Could not check the credential: {self._response_error_message(response)}")
+            return False
 
-        if resp.status_code == 401:
-            had_token = bool(headers.get("Authorization"))
-            print("Authentication required. Attempting interactive login...")
-            if self.login():
-                headers = self.get_auth_headers()
-                try:
-                    resp = requests.delete(url, headers=headers, timeout=timeout)
-                except requests.exceptions.RequestException:
-                    pass
-            elif had_token:
-                print(
-                    f"\nTip: Token may be for a different server than {self._resolve_server_url()}.\n"
-                    f"     Run: fox login   (credentials: {self.global_config_file})"
-                )
-        return resp
-    
+        data = response.json()
+        user = data.get("user") or {}
+        cred = data.get("credential") or {}
+        kind = cred.get("type")
+        source = "FOXNEST_TOKEN" if self._env_token() else str(self.global_config_file)
+        print(f"Server:     {server_url}")
+        print(f"User:       {user.get('username')} ({user.get('role')})")
+        if kind == "ssh_key":
+            key = cred.get("ssh_key") or {}
+            print(f"Credential: SSH sign-in with key '{key.get('title')}' ({key.get('fingerprint')})")
+        elif kind == "access_token":
+            print(f"Credential: access token '{cred.get('name')}' ({cred.get('prefix')}...)")
+        else:
+            print("Credential: password session")
+        if cred.get("scopes"):
+            print(f"Scopes:     {', '.join(cred['scopes'])}")
+        if kind in ("ssh_key", "access_token"):
+            print(f"Expires:    {(cred.get('expires_at') or 'never')[:19].replace('T', ' ')}"
+                  + (" (renewed automatically)" if kind == "ssh_key" and not self._env_token() else ""))
+        print(f"Source:     {source}")
+        return True
+
+    # ------------------------------------------------------------------------------
+    # Personal access tokens
+    # ------------------------------------------------------------------------------
+
+    def token_create(self, name, scopes=None, expires_in_days=None, use=False):
+        """Create a token (needs the password) and print it once."""
+        server_url = self._resolve_server_url()
+        headers = self._password_session_headers("Creating an access token")
+        if not headers:
+            return False
+        payload = {"name": name}
+        if scopes:
+            payload["scopes"] = list(scopes)
+        if expires_in_days:
+            payload["expires_in_days"] = int(expires_in_days)
+        try:
+            response = requests.post(f"{server_url}/api/tokens", json=payload, headers=headers, timeout=30)
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Failed to create token: {self._response_error_message(response)}")
+            return False
+
+        data = response.json()
+        token = data.get("token", "")
+        meta = data.get("access_token", {})
+        print("")
+        print("Access token created.")
+        print("")
+        print(f"  {token}")
+        print("")
+        print("  Copy it now - the server stores only a hash and cannot show it again.")
+        print(f"  id      : {meta.get('id')}")
+        print(f"  name    : {meta.get('name')}")
+        print(f"  scopes  : {', '.join(meta.get('scopes') or [])}")
+        print(f"  expires : {(meta.get('expires_at') or 'never')[:10]}")
+        print("")
+        if use:
+            username = (self.load_global_config() or {}).get("username")
+            if self._store_credential(server_url, username, token, "token",
+                                      token_id=meta.get("id"), token_name=meta.get("name"),
+                                      scopes=meta.get("scopes"), expires_at=meta.get("expires_at")):
+                print(f"Saved as this machine's credential in {self.global_config_file}")
+        else:
+            print("Use it on a build agent:  FOXNEST_TOKEN=<token> fox push")
+            print("Or save it on a machine:  fox login --token <token>")
+        return True
+
+    def token_list(self, include_revoked=False):
+        """List your tokens; the one this machine uses is marked."""
+        server_url = self._resolve_server_url()
+        try:
+            response = self._authed_get(f"{server_url}/api/tokens",
+                                        params={"include_revoked": str(bool(include_revoked)).lower()})
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Failed to list tokens: {self._response_error_message(response)}")
+            return False
+
+        tokens = response.json().get("tokens", [])
+        if not tokens:
+            print("No access tokens. Create one with: fox token create <name>")
+            return True
+        mine = (self.load_global_config() or {}).get("token_id") if not self._env_token() else None
+        print(f"{'ID':<5} {'NAME':<28} {'SCOPES':<24} {'EXPIRES':<11} {'LAST USED':<17} STATE")
+        for t in tokens:
+            state = "revoked" if t.get("revoked") else ("expired" if t.get("expired") else "active")
+            if mine is not None and t.get("id") == mine:
+                state += " (this machine)"
+            print(
+                f"{t['id']:<5} {t['name'][:27]:<28} {','.join(t.get('scopes') or [])[:23]:<24} "
+                f"{(t.get('expires_at') or 'never')[:10]:<11} "
+                f"{(t.get('last_used_at') or 'never')[:16].replace('T', ' '):<17} {state}"
+            )
+        return True
+
+    def token_revoke(self, token_id):
+        """Revoke one token. Revoking another token than the one in use needs the password."""
+        server_url = self._resolve_server_url()
+        cfg = self.load_global_config() or {}
+        is_current = (not self._env_token() and cfg.get("auth_method") in ("token", "ssh")
+                      and str(cfg.get("token_id")) == str(token_id))
+        headers = self.get_auth_headers() if is_current else \
+            self._password_session_headers("Revoking an access token")
+        if not headers:
+            return False
+        # This machine's own token goes through /current, which any token -- a read-only
+        # one included -- may call; revoking by id is a write a read-only token cannot make.
+        target = "current" if is_current else token_id
+        try:
+            response = requests.delete(f"{server_url}/api/tokens/{target}", headers=headers, timeout=30)
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code == 404:
+            print(f"No token with id {token_id} belongs to you.")
+            return False
+        if response.status_code != 200:
+            print(f"Failed to revoke token: {self._response_error_message(response)}")
+            return False
+        print(f"Token {token_id} revoked. Any machine using it is now locked out.")
+        if is_current:
+            for field in self.CREDENTIAL_FIELDS:
+                cfg.pop(field, None)
+            self.save_global_config(cfg)
+            print("That was this machine's credential; run `fox login` to sign in again.")
+        return True
+
+    def token_use(self, token):
+        """Save an existing token as this machine's credential, after checking it works."""
+        server_url = self._resolve_server_url()
+        token = (token or "").strip()
+        if not token:
+            print("A token value is required.")
+            return False
+        if not token.startswith("fxp_"):
+            print("That does not look like an access token (they begin with fxp_).")
+            return False
+        try:
+            response = requests.get(f"{server_url}/api/auth/me",
+                                    headers={"Authorization": f"Bearer {token}"}, timeout=30)
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"{server_url} rejected that token: {self._response_error_message(response)}")
+            return False
+        data = response.json()
+        user = data.get("user") or {}
+        cred = data.get("credential") or {}
+        if not self._store_credential(server_url, user.get("username"), token, "token",
+                                      token_id=cred.get("token_id"), token_name=cred.get("name"),
+                                      scopes=cred.get("scopes"), expires_at=cred.get("expires_at")):
+            return False
+        print(f"Signed in as {user.get('username')} with access token '{cred.get('name')}' "
+              f"({', '.join(cred.get('scopes') or [])}).")
+        return True
+
+    # ------------------------------------------------------------------------------
+    # SSH keys
+    # ------------------------------------------------------------------------------
+
+    def _find_private_key(self, explicit=None, quiet=False):
+        """The key to sign with: the one given, else ~/.ssh/id_ed25519, id_ecdsa, id_rsa."""
+        if explicit:
+            path = Path(explicit).expanduser()
+            if not path.exists():
+                if not quiet:
+                    print(f"No such key file: {path}")
+                return None
+            return path
+        ssh_dir = Path.home() / ".ssh"
+        for name in DEFAULT_SSH_KEYS:
+            candidate = ssh_dir / name
+            if candidate.exists():
+                return candidate
+        if not quiet:
+            print(f"No private key found in {ssh_dir}.")
+            print("Generate one with:  ssh-keygen -t ed25519")
+            print("Or point at it with: --key <path>")
+        return None
+
+    @staticmethod
+    def _public_key_path(key_path):
+        key_path = Path(key_path)
+        return key_path if key_path.suffix == ".pub" else Path(str(key_path) + ".pub")
+
+    def ssh_key_add(self, title, key_path=None, scopes=None):
+        """Upload a public key (needs the password)."""
+        server_url = self._resolve_server_url()
+        if key_path:
+            pub_path = self._public_key_path(Path(key_path).expanduser())
+        else:
+            private = self._find_private_key()
+            if not private:
+                return False
+            pub_path = self._public_key_path(private)
+        if not pub_path.exists():
+            print(f"No public key at {pub_path}")
+            return False
+        try:
+            public_key = pub_path.read_text(encoding="utf-8").strip()
+        except Exception as e:
+            print(f"Could not read {pub_path}: {e}")
+            return False
+        if "PRIVATE KEY" in public_key:
+            print(f"{pub_path} is a private key. Point --key at the .pub file.")
+            return False
+
+        headers = self._password_session_headers("Adding an SSH key")
+        if not headers:
+            return False
+        payload = {"title": title, "public_key": public_key}
+        if scopes:
+            payload["scopes"] = list(scopes)
+        try:
+            response = requests.post(f"{server_url}/api/ssh-keys", json=payload, headers=headers, timeout=30)
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Failed to add key: {self._response_error_message(response)}")
+            return False
+        key = response.json().get("key", {})
+        print(f"Added {key.get('key_type')} key '{key.get('title')}' (id {key.get('id')})")
+        print(f"  fingerprint: {key.get('fingerprint')}")
+        print(f"  scopes     : {', '.join(key.get('scopes') or [])}")
+        print("Sign in with it: fox login --ssh")
+        return True
+
+    def ssh_key_list(self):
+        server_url = self._resolve_server_url()
+        try:
+            response = self._authed_get(f"{server_url}/api/ssh-keys")
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Failed to list keys: {self._response_error_message(response)}")
+            return False
+        keys = response.json().get("keys", [])
+        if not keys:
+            print("No SSH keys registered. Add one with: fox ssh add <title>")
+            return True
+
+        local = None
+        cfg = self.load_global_config() or {}
+        private = self._find_private_key(cfg.get("ssh_key_path"), quiet=True)
+        if private and self._public_key_path(private).exists():
+            try:
+                local = ssh_fingerprint(self._public_key_path(private).read_text(encoding="utf-8"))
+            except Exception:
+                local = None
+
+        print(f"{'ID':<5} {'TITLE':<20} {'TYPE':<20} {'SCOPES':<20} {'SIGN-INS':<9} FINGERPRINT")
+        for k in keys:
+            mark = "  (this machine)" if local and k.get("fingerprint") == local else ""
+            print(
+                f"{k['id']:<5} {k['title'][:19]:<20} {k['key_type'][:19]:<20} "
+                f"{','.join(k.get('scopes') or [])[:19]:<20} {k.get('active_sessions', 0):<9} "
+                f"{k['fingerprint']}{mark}"
+            )
+        return True
+
+    def ssh_key_remove(self, key_id):
+        """Remove a key (needs the password). Every sign-in it made ends at once."""
+        server_url = self._resolve_server_url()
+        headers = self._password_session_headers("Removing an SSH key")
+        if not headers:
+            return False
+        try:
+            response = requests.delete(f"{server_url}/api/ssh-keys/{key_id}", headers=headers, timeout=30)
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Failed to remove key: {self._response_error_message(response)}")
+            return False
+        print(f"Key {key_id} removed. Every sign-in made with it has ended.")
+        cfg = self.load_global_config() or {}
+        if cfg.get("auth_method") == "ssh" and str(cfg.get("ssh_key_id")) == str(key_id):
+            for field in self.CREDENTIAL_FIELDS:
+                cfg.pop(field, None)
+            self.save_global_config(cfg)
+            print("This machine was signed in with that key; run `fox login` to sign in again.")
+        return True
+
+    def ssh_login(self, username=None, key_path=None, quiet=False):
+        """Sign in by signing a one-time challenge with a private key.
+
+        Saves a short-lived access token bound to the key. When it runs out, the next
+        command signs a fresh challenge with the same key -- no password, nothing
+        long-lived on disk. ``quiet`` is that renewal: no prompts, one line on stderr.
+        """
+        server_url = self._resolve_server_url()
+        cfg = self.load_global_config() or {}
+
+        username = username or cfg.get("username")
+        if not username and not quiet:
+            username = self._ask("Username")
+        if not username:
+            if not quiet:
+                print("A username is required.")
+            return False
+
+        private_path = self._find_private_key(key_path or cfg.get("ssh_key_path"), quiet=quiet)
+        if not private_path:
+            return False
+
+        try:
+            response = requests.post(f"{server_url}/api/auth/ssh/challenge",
+                                     json={"username": username}, timeout=30)
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Could not get a challenge: {self._response_error_message(response)}")
+            return False
+        nonce = response.json().get("nonce", "")
+
+        try:
+            signature, signer = sign_ssh_challenge(
+                private_path, nonce.encode("utf-8"),
+                interactive=self._interactive(), read_passphrase=self._read_secret,
+            )
+        except SSHSignError as e:
+            print(f"SSH sign-in failed: {e}", file=sys.stderr if quiet else sys.stdout)
+            return False
+
+        try:
+            response = requests.post(f"{server_url}/api/auth/ssh/verify",
+                                     json={"nonce": nonce, "signature": signature}, timeout=30)
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            out = sys.stderr if quiet else sys.stdout
+            print(f"SSH sign-in failed: {self._response_error_message(response)}", file=out)
+            print(f"Is {private_path.name}'s public key registered to {username}? Check: fox ssh list",
+                  file=out)
+            return False
+
+        data = response.json()
+        key = data.get("key") or {}
+        username = (data.get("user") or {}).get("username", username)
+        if not self._store_credential(
+            server_url, username, data["access_token"], "ssh",
+            token_id=data.get("token_id"), token_name=f"SSH sign-in: {key.get('title')}",
+            scopes=data.get("scopes"), expires_at=data.get("expires_at"),
+            ssh_key_path=str(private_path.resolve()), ssh_key_id=key.get("id"),
+        ):
+            print("Signed in, but the token could not be saved.")
+            return False
+
+        if quiet:
+            print(f"Renewed SSH sign-in with {private_path.name}.", file=sys.stderr)
+        else:
+            print(f"Signed in as {username} with {private_path.name} ({key.get('fingerprint')}).")
+            print(f"Scopes: {', '.join(data.get('scopes') or [])}. The sign-in renews itself "
+                  f"with this key; it lasts until {(data.get('expires_at') or '')[:16].replace('T', ' ')} UTC "
+                  "between renewals.")
+        return True
+
     def save_global_config(self, config):
         """Save global FoxNest credentials"""
         self.global_config_dir.mkdir(exist_ok=True)
@@ -532,6 +1270,9 @@ class FoxClient:
         try:
             with open(self.global_config_file, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2)
+            if os.name != "nt":
+                # It holds a bearer token: readable by its owner only, as ssh insists for keys.
+                os.chmod(self.global_config_file, 0o600)
             return True
         except Exception as e:
             print(f"Error: Could not save global config: {e}")
@@ -653,6 +1394,14 @@ class FoxClient:
         return variants
 
     def _resolve_server_url(self, config=None):
+        """Which server to talk to.
+
+        FOXNEST_SERVER overrides everything, so a host (a CI runner, the VS Code
+        extension) can point one workspace at a server without rewriting config files.
+        """
+        env_server = (os.environ.get("FOXNEST_SERVER") or "").strip()
+        if env_server:
+            return env_server.rstrip("/")
         if config is not None:
             return config.get("origin_url") or config.get("server_url") or self.server_url
         origin = self.get_origin_url()
@@ -5463,6 +6212,13 @@ def print_extended_help():
     print("  pr from-fork            Propose a fork's branch back upstream")
     print("  fork [--as <name>]      Create your own copy of this repository")
     print("  forks                   List forks of this repository")
+    print("  login                   Sign in: your password is exchanged for this machine's own access token")
+    print("  login --ssh             Sign in with an SSH key instead (renews itself; no password)")
+    print("  login --token <token>   Use an access token made elsewhere")
+    print("  logout                  Revoke this machine's token and forget it")
+    print("  whoami                  Who you are signed in as, with which credential and scopes")
+    print("  token create|list|revoke|use   Personal access tokens (CI: set FOXNEST_TOKEN)")
+    print("  ssh add|list|remove|login      SSH keys for password-free sign-in")
     print("  config                  Show configuration")
     print("  gc                      Optimize repository (garbage collection)")
     print("  docs [path]             Generate documentation locally")
@@ -5471,6 +6227,11 @@ def print_extended_help():
     print("  version, --version, -v  Show version information")
     print("")
     print("EXAMPLES:")
+    print("  fox login                      # asks for your password once; saves a revocable token")
+    print("  fox ssh add work-laptop        # registers ~/.ssh/id_ed25519.pub")
+    print("  fox login --ssh                # from now on, sign in with the key")
+    print("  fox token create ci --scope repo:read --expires-in-days 30")
+    print("  FOXNEST_TOKEN=fxp_... fox pull # on a build agent: nothing written to disk")
     print("  fox set username alice")
     print("  fox init --username alice --repo-name myproject")
     print("  fox set origin 192.168.15.207:502")
@@ -6074,12 +6835,59 @@ def main():
     # Help command
     help_parser = subparsers.add_parser("help", help="Show help information")
 
-    # Login command
-    login_parser = subparsers.add_parser("login", help="Login to server and save access token to global config")
+    # Credentials
+    login_parser = subparsers.add_parser(
+        "login", help="Sign this machine in: a password (exchanged for an access token), "
+                      "an existing token, or an SSH key")
     login_parser.add_argument("--username", help="Username for login")
-    login_parser.add_argument("--password", help="Password for login (not recommended on CLI)")
-    # Logout command
-    logout_parser = subparsers.add_parser("logout", help="Remove saved access token from global config")
+    login_parser.add_argument("--password", help="Password for login (not recommended on CLI; "
+                                                 "pipe it on stdin instead)")
+    login_parser.add_argument("--token", dest="login_token", metavar="TOKEN",
+                              help="Save an existing fxp_ access token instead of signing in")
+    login_parser.add_argument("--ssh", dest="login_ssh", action="store_true",
+                              help="Sign in with an SSH key instead of a password")
+    login_parser.add_argument("--key", dest="login_key", metavar="PATH",
+                              help="With --ssh: the private key (or a .pub whose key is in ssh-agent)")
+    login_parser.add_argument("--scope", dest="login_scopes", action="append", metavar="SCOPE",
+                              help="Scope for this machine's token (repeatable): repo:read, repo:write, admin")
+    login_parser.add_argument("--expires-in-days", dest="login_days", type=int, metavar="N",
+                              help="Days until this machine's token expires (default 90; 0 = never)")
+    logout_parser = subparsers.add_parser(
+        "logout", help="Revoke this machine's token on the server and forget it")
+    subparsers.add_parser("whoami", help="Show who this machine is signed in as, and with what")
+
+    token_parser = subparsers.add_parser("token", help="Personal access tokens")
+    token_sub = token_parser.add_subparsers(dest="token_command", help="Token commands")
+    token_create = token_sub.add_parser("create", help="Create a token (asks for your password)")
+    token_create.add_argument("name", help="A name you will recognise later, e.g. ci-runner")
+    token_create.add_argument("--scope", dest="scopes", action="append", metavar="SCOPE",
+                              help="repo:read (default), repo:write or admin; repeatable")
+    token_create.add_argument("--expires-in-days", dest="expires_in_days", type=int, metavar="N",
+                              help="Days until it expires (default: never)")
+    token_create.add_argument("--use", action="store_true",
+                              help="Also save it as this machine's credential")
+    token_list = token_sub.add_parser("list", help="List your tokens")
+    token_list.add_argument("--all", dest="include_revoked", action="store_true",
+                            help="Include revoked and expired tokens")
+    token_revoke = token_sub.add_parser("revoke", help="Revoke a token by id")
+    token_revoke.add_argument("token_id", type=int, help="Token id (see: fox token list)")
+    token_use = token_sub.add_parser("use", help="Save an existing token as this machine's credential")
+    token_use.add_argument("token", help="The fxp_... token value")
+
+    ssh_parser = subparsers.add_parser("ssh", help="SSH keys: sign in with a key instead of a password")
+    ssh_sub = ssh_parser.add_subparsers(dest="ssh_command", help="SSH key commands")
+    ssh_add = ssh_sub.add_parser("add", help="Register a public key (asks for your password)")
+    ssh_add.add_argument("title", help="A name for the key, e.g. work-laptop")
+    ssh_add.add_argument("--key", dest="key_path", metavar="PATH",
+                         help="Public key file (default: ~/.ssh/id_ed25519.pub, id_ecdsa.pub, id_rsa.pub)")
+    ssh_add.add_argument("--scope", dest="scopes", action="append", metavar="SCOPE",
+                         help="What sign-ins with this key may do: repo:read, repo:write (default), admin")
+    ssh_sub.add_parser("list", help="List your registered keys")
+    ssh_remove = ssh_sub.add_parser("remove", help="Remove a key, ending every sign-in made with it")
+    ssh_remove.add_argument("key_id", type=int, help="Key id (see: fox ssh list)")
+    ssh_login = ssh_sub.add_parser("login", help="Sign in with a key (same as: fox login --ssh)")
+    ssh_login.add_argument("--key", dest="key_path", metavar="PATH", help="Private key to sign with")
+    ssh_login.add_argument("--username", help="Account to sign in to")
     link_parser = subparsers.add_parser("link", help="Link local repo to an existing remote (after admin approval)")
     
     args = parser.parse_args()
@@ -6191,6 +6999,11 @@ def main():
         print("\nGlobal Configuration:")
         print(f"  Username: {global_config.get('username', 'Not set')}")
         print(f"  Origin URL: {global_config.get('origin_url', 'Not set')}")
+        method = {"token": "access token", "ssh": "SSH key sign-in", "session": "password session"}
+        credential = "FOXNEST_TOKEN (environment)" if fox._env_token() else (
+            method.get(global_config.get("auth_method"), "saved token")
+            if fox._saved_token(global_config) else "none -- run: fox login")
+        print(f"  Credential: {credential}   (details: fox whoami)")
         print(f"  Config file: {fox.global_config_file}")
         
         if fox.is_initialized():
@@ -6451,12 +7264,54 @@ def main():
         fox.gc()
 
     elif args.command == "login":
-        # Attempt login; prefer CLI args but fall back to interactive prompt
-        uname = getattr(args, 'username', None)
-        pwd = getattr(args, 'password', None)
-        fox.login(username=uname, password=pwd)
+        if args.login_token:
+            ok = fox.token_use(args.login_token)
+        elif args.login_ssh:
+            ok = fox.ssh_login(username=args.username, key_path=args.login_key)
+        else:
+            ok = fox.login(username=args.username, password=args.password,
+                           scopes=args.login_scopes, expires_in_days=args.login_days)
+        if not ok:
+            sys.exit(1)
     elif args.command == "logout":
-        fox.logout()
+        if not fox.logout():
+            sys.exit(1)
+    elif args.command == "whoami":
+        if not fox.whoami():
+            sys.exit(1)
+
+    elif args.command == "token":
+        sub = getattr(args, "token_command", None)
+        if sub == "create":
+            ok = fox.token_create(args.name, scopes=args.scopes,
+                                  expires_in_days=args.expires_in_days, use=args.use)
+        elif sub == "list":
+            ok = fox.token_list(include_revoked=args.include_revoked)
+        elif sub == "revoke":
+            ok = fox.token_revoke(args.token_id)
+        elif sub == "use":
+            ok = fox.token_use(args.token)
+        else:
+            print("Usage: fox token create|list|revoke|use")
+            ok = False
+        if not ok:
+            sys.exit(1)
+
+    elif args.command == "ssh":
+        sub = getattr(args, "ssh_command", None)
+        if sub == "add":
+            ok = fox.ssh_key_add(args.title, key_path=args.key_path, scopes=args.scopes)
+        elif sub == "list":
+            ok = fox.ssh_key_list()
+        elif sub == "remove":
+            ok = fox.ssh_key_remove(args.key_id)
+        elif sub == "login":
+            ok = fox.ssh_login(username=args.username, key_path=args.key_path)
+        else:
+            print("Usage: fox ssh add|list|remove|login")
+            ok = False
+        if not ok:
+            sys.exit(1)
 
     elif args.command == "link":
         if not fox.check_repository("link"):

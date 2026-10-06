@@ -624,6 +624,35 @@ def ensure_ssh_key_tables():
         print(f"[warn] Unable to create SSH key tables: {exc}")
 
 
+def ensure_credential_columns():
+    """Scopes on SSH keys, and the link from a sign-in token to the key that issued it.
+
+    Must run after ensure_access_tokens_table() and ensure_ssh_key_tables(). Keys that
+    predate scopes get repo:write -- what a developer's own key is for -- rather than
+    the unscoped session they used to yield.
+    """
+    columns = (
+        ("ssh_keys", "scopes", "VARCHAR(200) NOT NULL DEFAULT 'repo:write'"),
+        ("access_tokens", "ssh_key_id", "INTEGER"),
+    )
+    try:
+        for table, column, ddl_type in columns:
+            existing = [c["name"] for c in inspect(engine).get_columns(table)]
+            if not existing or column in existing:
+                continue
+            with engine.begin() as connection:
+                connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+            print(f"[ok] Added missing column {table}.{column}")
+        with engine.begin() as connection:
+            connection.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_access_tokens_ssh_key_id "
+                "ON access_tokens(ssh_key_id)"
+            ))
+        print("[ok] Credential columns verified")
+    except Exception as exc:
+        print(f"[warn] Unable to add credential columns: {exc}")
+
+
 def ensure_webhook_tables():
     """Create the webhook and webhook delivery tables."""
     try:

@@ -10,19 +10,21 @@ import {
   FiUnlock,
   FiPlay,
   FiClock,
+  FiKey,
 } from 'react-icons/fi'
 import PageHeader from '../components/ui/PageHeader'
 import GlassCard from '../components/ui/GlassCard'
 import Button from '../components/ui/Button'
 import Badge from '../components/ui/Badge'
 import EmptyState from '../components/ui/EmptyState'
+import CredentialsOverview from '../components/operations/CredentialsOverview'
 import api from '../utils/api'
 import { cn } from '../lib/utils'
 
 /**
- * Operations: the three things a shared deployment needs someone watching.
+ * Operations: the things a shared deployment needs someone watching.
  *
- * Lockouts, schema health and backups sit on one screen because they are the
+ * Lockouts, credentials, schema health and backups sit on one screen because they are the
  * same job — knowing whether the server is in a state you would trust with the
  * team's source code. Splitting them across three places means nobody looks at
  * any of them.
@@ -45,6 +47,7 @@ function duration(ms) {
 
 const TABS = [
   { id: 'lockouts', label: 'Sign-in security', icon: FiShield },
+  { id: 'credentials', label: 'Credentials', icon: FiKey },
   { id: 'backups', label: 'Backups', icon: FiHardDrive },
   { id: 'schema', label: 'Schema', icon: FiDatabase },
 ]
@@ -153,7 +156,7 @@ export default function Operations() {
       <PageHeader
         eyebrow="Shared deployment"
         title="Operations"
-        subtitle="Sign-in protection, verified backups, and whether the database still matches the code."
+        subtitle="Sign-in protection, who holds which credentials, verified backups, and whether the database still matches the code."
         actions={
           <Button variant="secondary" onClick={load} className="flex items-center gap-2">
             <FiRefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
@@ -407,6 +410,9 @@ py -3.11 tools/backup.py --restore <path>`}
       )}
 
       {/* ---------------- schema ---------------- */}
+      {/* ---------------- credentials ---------------- */}
+      {tab === 'credentials' && <CredentialsOverview />}
+
       {tab === 'schema' && (
         <div className="space-y-4">
           {!health ? (
