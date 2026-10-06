@@ -7,23 +7,26 @@ an admin's to set; global hooks apply to every repository and are admin-only.
 import json
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from database.database import get_db
 from database.models import Repository, ServerHook, User
 
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, has_admin_powers
 from app.services import server_hooks as hook_service
 
 
 router = APIRouter()
 
 
-def _assert_may_manage(db: Session, user: User, repository_id: Optional[str]) -> None:
-    role = (getattr(user, "role", "developer") or "").lower()
-    if role in ("team_lead", "admin"):
+def _assert_may_manage(
+    http_request: Request, db: Session, user: User, repository_id: Optional[str]
+) -> None:
+    # The role alone is not enough when a token is in use: an admin's repo:write
+    # token is a repository credential, not a server-administration one.
+    if has_admin_powers(http_request, user):
         return
     if not repository_id:
         raise HTTPException(
@@ -56,12 +59,13 @@ class ServerHookUpdateRequest(BaseModel):
 
 @router.get("/api/server-hooks")
 async def list_server_hooks(
+    http_request: Request,
     repository_id: Optional[str] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Hooks for a repository, or the global ones when none is given."""
-    _assert_may_manage(db, current_user, repository_id)
+    _assert_may_manage(http_request, db, current_user, repository_id)
 
     query = db.query(ServerHook)
     if repository_id:
@@ -80,12 +84,13 @@ async def list_server_hooks(
 
 @router.post("/api/server-hooks")
 async def create_server_hook(
+    http_request: Request,
     request: ServerHookRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Create a hook. Rules are validated now so a bad regex cannot land."""
-    _assert_may_manage(db, current_user, request.repository_id)
+    _assert_may_manage(http_request, db, current_user, request.repository_id)
 
     if request.hook_type not in hook_service.VALID_HOOK_TYPES:
         raise HTTPException(
@@ -119,6 +124,7 @@ async def create_server_hook(
 
 @router.put("/api/server-hooks/{hook_id}")
 async def update_server_hook(
+    http_request: Request,
     hook_id: int,
     request: ServerHookUpdateRequest,
     current_user: User = Depends(get_current_user),
@@ -128,7 +134,7 @@ async def update_server_hook(
     hook = db.query(ServerHook).filter(ServerHook.id == hook_id).first()
     if not hook:
         raise HTTPException(status_code=404, detail="Hook not found")
-    _assert_may_manage(db, current_user, hook.repository_id)
+    _assert_may_manage(http_request, db, current_user, hook.repository_id)
 
     if request.name is not None:
         hook.name = request.name.strip() or hook.name
@@ -149,6 +155,7 @@ async def update_server_hook(
 
 @router.delete("/api/server-hooks/{hook_id}")
 async def delete_server_hook(
+    http_request: Request,
     hook_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -156,7 +163,7 @@ async def delete_server_hook(
     hook = db.query(ServerHook).filter(ServerHook.id == hook_id).first()
     if not hook:
         raise HTTPException(status_code=404, detail="Hook not found")
-    _assert_may_manage(db, current_user, hook.repository_id)
+    _assert_may_manage(http_request, db, current_user, hook.repository_id)
 
     db.delete(hook)
     db.commit()
@@ -170,6 +177,7 @@ class HookTestRequest(BaseModel):
 
 @router.post("/api/server-hooks/{hook_id}/test")
 async def test_server_hook(
+    http_request: Request,
     hook_id: int,
     request: HookTestRequest,
     current_user: User = Depends(get_current_user),
@@ -185,7 +193,7 @@ async def test_server_hook(
     hook = db.query(ServerHook).filter(ServerHook.id == hook_id).first()
     if not hook:
         raise HTTPException(status_code=404, detail="Hook not found")
-    _assert_may_manage(db, current_user, hook.repository_id)
+    _assert_may_manage(http_request, db, current_user, hook.repository_id)
 
     try:
         config = json.loads(hook.config_json or "{}")

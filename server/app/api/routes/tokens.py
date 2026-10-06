@@ -1,25 +1,35 @@
 """Personal access token management.
 
-Every endpoint here operates on the caller's *own* tokens. There is deliberately
-no route for an admin to list or mint tokens for another user: an admin who
-could do that could act as that user indefinitely and invisibly, which is
-exactly the accountability gap tokens are meant to close. Disabling the account
-remains the way to cut off someone else's access, and it revokes their tokens
-with it.
+Every endpoint here operates on the caller's *own* tokens, with two
+administrator exceptions at the bottom: seeing which credentials exist, and
+revoking all of one person's at once (a stolen laptop should not mean disabling
+the account). There is still no way for an admin to *mint* a token for someone
+else: an admin who could do that could act as that user indefinitely and
+invisibly, which is exactly the accountability gap tokens are meant to close.
+
+Creating a token needs a password sign-in (require_password_session). A token
+that could mint tokens could outlive its own expiry and revocation by making a
+replacement, and widen its own scopes on the way.
 """
 
 from datetime import datetime, timedelta
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from database.crud import UserCRUD
 from database.database import get_db
-from database.models import AccessToken, User
+from database.models import AccessToken, SSHKey, User
 
-from app.core.dependencies import get_current_user
+from app.core.dependencies import (
+    assert_password_session, current_access_token, get_current_user,
+    require_admin_user, require_password_session,
+)
 from app.services import access_tokens as token_service
+from app.services import credential_notifications
+from app.services import ssh_keys as key_service
 
 
 router = APIRouter()
@@ -49,7 +59,7 @@ async def list_access_tokens(
 @router.post("/api/tokens")
 async def create_access_token_route(
     request: CreateTokenRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_password_session),
     db: Session = Depends(get_db),
 ):
     """Create a token and return its plaintext once.
@@ -72,6 +82,7 @@ async def create_access_token_route(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    credential_notifications.token_created(db, current_user, token)
     return {
         "success": True,
         "token": plaintext,
@@ -80,16 +91,42 @@ async def create_access_token_route(
     }
 
 
+@router.delete("/api/tokens/current")
+async def revoke_current_token(
+    http_request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Revoke the token this request was made with -- what ``fox logout`` calls.
+
+    Allowed for any token, read-only ones included: giving up your own access is
+    never an escalation, and a logout that leaves the token live is not a logout.
+    """
+    token = current_access_token(http_request)
+    if token is None:
+        raise HTTPException(
+            status_code=400,
+            detail="This request was signed in with a password session, not an access token. "
+                   "Password sessions expire on their own.",
+        )
+    token_service.revoke_token(db, token)
+    return {"success": True, "access_token": token_service.serialize(token)}
+
+
 @router.delete("/api/tokens/{token_id}")
 async def revoke_access_token(
     token_id: int,
+    http_request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Revoke one of the caller's tokens.
 
     Scoped to the caller's own rows, so guessing another user's token id
-    returns 404 rather than revoking their credential.
+    returns 404 rather than revoking their credential. A token may revoke itself
+    here if it can write (a read-only one uses /api/tokens/current, which the
+    write-scope check exempts); revoking any *other* token needs a password
+    sign-in, so a stolen token cannot lock its owner's other machines out.
     """
     token = (
         db.query(AccessToken)
@@ -99,5 +136,89 @@ async def revoke_access_token(
     if not token:
         raise HTTPException(status_code=404, detail="Token not found")
 
+    in_use = current_access_token(http_request)
+    if not (in_use is not None and in_use.id == token.id):
+        assert_password_session(http_request, "Revoking another credential")
+
     token_service.revoke_token(db, token)
     return {"success": True, "access_token": token_service.serialize(token)}
+
+
+# ---------------------------------------------------------------------------
+# Administrator oversight
+# ---------------------------------------------------------------------------
+
+
+def _credentials_of(db: Session, user: User) -> dict:
+    tokens = [
+        token for token in token_service.list_tokens(db, user.id, include_ssh_sessions=True)
+        if token_service.is_live(token)
+    ]
+    keys = key_service.list_keys(db, user.id)
+    return {
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "full_name": user.full_name,
+            "role": user.role,
+            "is_active": user.is_active,
+        },
+        "tokens": [token_service.serialize(t) for t in tokens if t.ssh_key_id is None],
+        "ssh_keys": [
+            key_service.serialize(key, active_sessions=token_service.live_session_count(db, key.id))
+            for key in keys
+        ],
+    }
+
+
+@router.get("/api/admin/credentials")
+async def list_all_credentials(
+    username: Optional[str] = None,
+    current_user: User = Depends(require_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Every live token and registered key, by user. Metadata only, never secrets.
+
+    Answers "which machines can act as whom" -- the first question after a laptop
+    goes missing. Users with no credentials are left out.
+    """
+    if username:
+        user = UserCRUD.get_user_by_username(db, username)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        users = [user]
+    else:
+        holder_ids = {
+            row[0] for row in db.query(AccessToken.user_id)
+            .filter(AccessToken.revoked_at.is_(None)).distinct()
+        } | {row[0] for row in db.query(SSHKey.user_id).distinct()}
+        users = (
+            db.query(User).filter(User.id.in_(holder_ids)).order_by(User.username).all()
+            if holder_ids else []
+        )
+
+    entries = [_credentials_of(db, user) for user in users]
+    if not username:
+        entries = [e for e in entries if e["tokens"] or e["ssh_keys"]]
+    return {"success": True, "users": entries}
+
+
+@router.post("/api/admin/users/{username}/credentials/revoke")
+async def revoke_user_credentials(
+    username: str,
+    current_user: User = Depends(require_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Revoke every token and remove every SSH key one user has.
+
+    The account itself stays usable: the owner signs in with their password and
+    creates fresh credentials. Disabling the account remains the heavier option.
+    """
+    user = UserCRUD.get_user_by_username(db, username)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    keys = key_service.delete_all_for_user(db, user.id)
+    tokens = token_service.revoke_all_for_user(db, user.id)
+    credential_notifications.credentials_revoked(db, user, current_user, tokens, keys)
+    return {"success": True, "revoked_tokens": tokens, "removed_ssh_keys": keys}

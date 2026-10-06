@@ -51,7 +51,7 @@ export default function Settings({ isAdmin = false }) {
       </div>
 
       {tab === 'tokens' && <AccessTokensPanel isAdmin={isAdmin} />}
-      {tab === 'ssh' && <SSHKeysPanel />}
+      {tab === 'ssh' && <SSHKeysPanel isAdmin={isAdmin} />}
       {tab === 'webhooks' && isAdmin && <WebhooksPanel repositoryId={null} />}
     </div>
   )

@@ -7,24 +7,27 @@ are admin-only, since they see every repository on the server.
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from database.database import get_db
 from database.models import Repository, User, Webhook, WebhookDelivery
 
-from app.core.dependencies import get_current_user, require_admin_user
+from app.core.dependencies import get_current_user, has_admin_powers, require_admin_user
 from app.services import webhooks as hook_service
 
 
 router = APIRouter()
 
 
-def _assert_may_manage(db: Session, user: User, repository_id: Optional[str]) -> None:
+def _assert_may_manage(
+    http_request: Request, db: Session, user: User, repository_id: Optional[str]
+) -> None:
     """Only the repository owner or an admin/team lead may manage its hooks."""
-    role = (getattr(user, "role", "developer") or "").lower()
-    if role in ("team_lead", "admin"):
+    # The role alone is not enough when a token is in use: an admin's repo:write
+    # token is a repository credential, not a server-administration one.
+    if has_admin_powers(http_request, user):
         return
 
     if not repository_id:
@@ -102,12 +105,13 @@ class WebhookUpdateRequest(BaseModel):
 
 @router.get("/api/webhooks")
 async def list_webhooks(
+    http_request: Request,
     repository_id: Optional[str] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """List webhooks for a repository, or the global ones when none is given."""
-    _assert_may_manage(db, current_user, repository_id)
+    _assert_may_manage(http_request, db, current_user, repository_id)
 
     query = db.query(Webhook)
     if repository_id:
@@ -125,12 +129,13 @@ async def list_webhooks(
 
 @router.post("/api/webhooks")
 async def create_webhook(
+    http_request: Request,
     request: WebhookRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Register a webhook."""
-    _assert_may_manage(db, current_user, request.repository_id)
+    _assert_may_manage(http_request, db, current_user, request.repository_id)
 
     if request.repository_id:
         exists = db.query(Repository).filter(Repository.id == request.repository_id).first()
@@ -155,6 +160,7 @@ async def create_webhook(
 
 @router.put("/api/webhooks/{webhook_id}")
 async def update_webhook(
+    http_request: Request,
     webhook_id: int,
     request: WebhookUpdateRequest,
     current_user: User = Depends(get_current_user),
@@ -164,7 +170,7 @@ async def update_webhook(
     hook = db.query(Webhook).filter(Webhook.id == webhook_id).first()
     if not hook:
         raise HTTPException(status_code=404, detail="Webhook not found")
-    _assert_may_manage(db, current_user, hook.repository_id)
+    _assert_may_manage(http_request, db, current_user, hook.repository_id)
 
     if request.url is not None:
         hook.url = request.url
@@ -185,6 +191,7 @@ async def update_webhook(
 
 @router.delete("/api/webhooks/{webhook_id}")
 async def delete_webhook(
+    http_request: Request,
     webhook_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -193,7 +200,7 @@ async def delete_webhook(
     hook = db.query(Webhook).filter(Webhook.id == webhook_id).first()
     if not hook:
         raise HTTPException(status_code=404, detail="Webhook not found")
-    _assert_may_manage(db, current_user, hook.repository_id)
+    _assert_may_manage(http_request, db, current_user, hook.repository_id)
 
     db.query(WebhookDelivery).filter(WebhookDelivery.webhook_id == hook.id).delete()
     db.delete(hook)
@@ -203,6 +210,7 @@ async def delete_webhook(
 
 @router.post("/api/webhooks/{webhook_id}/ping")
 async def ping_webhook(
+    http_request: Request,
     webhook_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -216,7 +224,7 @@ async def ping_webhook(
     hook = db.query(Webhook).filter(Webhook.id == webhook_id).first()
     if not hook:
         raise HTTPException(status_code=404, detail="Webhook not found")
-    _assert_may_manage(db, current_user, hook.repository_id)
+    _assert_may_manage(http_request, db, current_user, hook.repository_id)
 
     import json as _json
     import hashlib as _hashlib
@@ -247,6 +255,7 @@ async def ping_webhook(
 
 @router.get("/api/webhooks/{webhook_id}/deliveries")
 async def list_deliveries(
+    http_request: Request,
     webhook_id: int,
     limit: int = 30,
     current_user: User = Depends(get_current_user),
@@ -256,7 +265,7 @@ async def list_deliveries(
     hook = db.query(Webhook).filter(Webhook.id == webhook_id).first()
     if not hook:
         raise HTTPException(status_code=404, detail="Webhook not found")
-    _assert_may_manage(db, current_user, hook.repository_id)
+    _assert_may_manage(http_request, db, current_user, hook.repository_id)
 
     deliveries = (
         db.query(WebhookDelivery)

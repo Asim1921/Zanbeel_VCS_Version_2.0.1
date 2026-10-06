@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -18,7 +18,7 @@ from database.crud import (
 from database.database import get_db
 from database.models import PendingRepository, User
 
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, has_admin_powers
 from app.core.pagination import paginate_list
 from app.services import webhooks as hook_service
 from app.core.permissions import (
@@ -39,6 +39,7 @@ router = APIRouter()
 @router.post("/api/repository/create")
 async def create_repository(
     request: CreateRepositoryRequest,
+    http_request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -53,8 +54,9 @@ async def create_repository(
     if not request.username or not repo_name:
         raise HTTPException(status_code=400, detail="Username and repo_name required")
 
+    # Acting for someone else is administration: a token needs the admin scope for it.
     if request.username != current_user.username and \
-            getattr(current_user, "role", "developer") not in ("team_lead", "admin"):
+            not has_admin_powers(http_request, current_user):
         raise HTTPException(
             status_code=403,
             detail=(

@@ -12,25 +12,33 @@ itself does: it issues a random nonce, the client signs it, and the server
 verifies with the registered public key. What crosses the wire is a signature
 over a one-time value, so capturing it gains an attacker nothing.
 
-Three properties make that safe:
+Four properties make that safe:
 
 * **The nonce is single-use.** It is deleted the moment it is consumed, so a
   captured challenge/response pair cannot be replayed.
 * **The nonce is bound to a username.** A signature for one account cannot be
   presented as another's.
+* **The signature is an OpenSSH SSHSIG in the ``zanbeel-auth`` namespace** (see
+  sshsig.py), so the client never signs raw bytes a server chose, and a key in
+  ssh-agent or behind a passphrase works through ``ssh-keygen -Y sign``.
 * **Signature verification uses `cryptography`**, not hand-rolled maths. Getting
   RSA padding checks subtly wrong is the classic way to build an authentication
   bypass that looks like it works.
 
 Verification succeeds only with the private key. The server stores nothing that
 would let it forge a signature, which is the advantage over a shared token.
+
+What a sign-in yields is an access token bound to the key (access_tokens.
+issue_ssh_session): scoped like the key, short-lived, and gone when the key is
+removed -- not a session with the account's full powers.
 """
 
 import base64
 import hashlib
 import secrets
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes
@@ -40,9 +48,22 @@ from sqlalchemy.orm import Session
 
 from database.models import SSHChallenge, SSHKey, User
 
+from app.services import access_tokens as token_service
+from app.services import sshsig
+
 # Long enough to paste a key and run a signing command, short enough that an
 # abandoned nonce is not sitting around.
 CHALLENGE_TTL_SECONDS = 120
+
+# Outstanding challenges kept per username. The endpoint is unauthenticated, so
+# without a cap anyone could fill the table; a real client needs only one.
+MAX_PENDING_CHALLENGES = 5
+
+# New RSA keys below this are refused. 1024-bit RSA is within reach of a
+# determined attacker; ssh-keygen has defaulted to 3072 for years.
+MIN_RSA_BITS = 2048
+
+DEFAULT_KEY_SCOPES = (token_service.SCOPE_REPO_WRITE,)
 
 SUPPORTED_KEY_TYPES = (
     "ssh-rsa",
@@ -99,9 +120,15 @@ def parse_public_key(text: str) -> Tuple[str, str, str]:
         raise SSHKeyError("The key body is not valid base64")
 
     try:
-        load_ssh_public_key(f"{key_type} {parts[1]}".encode())
+        loaded = load_ssh_public_key(f"{key_type} {parts[1]}".encode())
     except (ValueError, UnsupportedAlgorithm) as exc:
         raise SSHKeyError(f"Could not parse the key: {exc}")
+
+    if isinstance(loaded, rsa.RSAPublicKey) and loaded.key_size < MIN_RSA_BITS:
+        raise SSHKeyError(
+            f"RSA keys must be at least {MIN_RSA_BITS} bits (this one is {loaded.key_size}). "
+            "Generate a new one with: ssh-keygen -t ed25519"
+        )
 
     digest = hashlib.sha256(blob).digest()
     fingerprint = "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
@@ -111,11 +138,23 @@ def parse_public_key(text: str) -> Tuple[str, str, str]:
     return key_type, normalised, fingerprint
 
 
-def add_key(db: Session, user: User, title: str, public_key: str) -> SSHKey:
-    """Register a key for a user."""
+def add_key(
+    db: Session,
+    user: User,
+    title: str,
+    public_key: str,
+    scopes: Optional[Sequence[str]] = None,
+) -> SSHKey:
+    """Register a key for a user, limited to ``scopes`` (default: repo:write)."""
     label = (title or "").strip()
     if not label:
         raise SSHKeyError("A title is required so you can tell your keys apart")
+
+    try:
+        granted = token_service.normalise_scopes(scopes or DEFAULT_KEY_SCOPES)
+        token_service.check_scopes_allowed(user, granted)
+    except ValueError as exc:
+        raise SSHKeyError(str(exc))
 
     key_type, normalised, fingerprint = parse_public_key(public_key)
 
@@ -135,6 +174,7 @@ def add_key(db: Session, user: User, title: str, public_key: str) -> SSHKey:
         key_type=key_type,
         public_key=normalised,
         fingerprint=fingerprint,
+        scopes=",".join(granted),
     )
     db.add(key)
     db.commit()
@@ -146,9 +186,19 @@ def list_keys(db: Session, user_id: int) -> List[SSHKey]:
     return (
         db.query(SSHKey)
         .filter(SSHKey.user_id == user_id)
-        .order_by(SSHKey.created_at.desc())
+        .order_by(SSHKey.created_at.desc(), SSHKey.id.desc())
         .all()
     )
+
+
+def _remove(db: Session, key: SSHKey) -> None:
+    """Delete a key and every token its sign-ins issued, in one transaction.
+
+    The tokens go first: a sign-in made with a key the owner has since removed
+    must stop working at once, not when its eight hours run out.
+    """
+    token_service.delete_ssh_sessions(db, key.id)
+    db.delete(key)
 
 
 def delete_key(db: Session, user: User, key_id: int) -> bool:
@@ -159,9 +209,18 @@ def delete_key(db: Session, user: User, key_id: int) -> bool:
     )
     if not key:
         return False
-    db.delete(key)
+    _remove(db, key)
     db.commit()
     return True
+
+
+def delete_all_for_user(db: Session, user_id: int) -> int:
+    """Remove every key a user has registered. Returns how many."""
+    keys = db.query(SSHKey).filter(SSHKey.user_id == user_id).all()
+    for key in keys:
+        _remove(db, key)
+    db.commit()
+    return len(keys)
 
 
 # ---------------------------------------------------------------------------
@@ -186,10 +245,22 @@ def create_challenge(db: Session, username: str) -> SSHChallenge:
     which accounts exist and which have keys.
     """
     _purge_expired(db)
+    name = (username or "").strip()
+
+    # Keep only the newest few outstanding for this name. Oldest go first, so a
+    # client that asked twice still holds a valid nonce from its second request.
+    pending = (
+        db.query(SSHChallenge)
+        .filter(SSHChallenge.username == name)
+        .order_by(SSHChallenge.id.desc())
+        .all()
+    )
+    for stale in pending[MAX_PENDING_CHALLENGES - 1:]:
+        db.delete(stale)
 
     challenge = SSHChallenge(
         nonce=secrets.token_urlsafe(32),
-        username=(username or "").strip(),
+        username=name,
         expires_at=datetime.utcnow() + timedelta(seconds=CHALLENGE_TTL_SECONDS),
     )
     db.add(challenge)
@@ -198,8 +269,15 @@ def create_challenge(db: Session, username: str) -> SSHChallenge:
     return challenge
 
 
-def _verify_signature(key: SSHKey, message: bytes, signature: bytes) -> bool:
-    """Check one signature against one registered public key."""
+def _verify_legacy_signature(key: SSHKey, message: bytes, signature: bytes) -> bool:
+    """Check a raw signature over the nonce against one registered public key.
+
+    The format the first CLI (still bundled with the VS Code extension) sends.
+    Accepting it is safe for the server -- only the key holder can produce it --
+    but a client that makes raw signatures over server-chosen bytes is a signing
+    oracle, so the current CLI sends SSHSIG instead and this exists only so older
+    clients keep working.
+    """
     try:
         public_key = load_ssh_public_key(key.public_key.encode())
     except Exception:
@@ -220,8 +298,50 @@ def _verify_signature(key: SSHKey, message: bytes, signature: bytes) -> bool:
         return False
 
 
-def verify_challenge(db: Session, nonce: str, signature_b64: str) -> Optional[User]:
-    """Consume a nonce and return the user whose key signed it, or None.
+@dataclass(frozen=True)
+class Authentication:
+    user: User
+    key: SSHKey
+    signature_format: str  # "sshsig" | "legacy"
+
+
+def _match_sshsig(db: Session, user: User, message: bytes, text: str) -> Optional[SSHKey]:
+    """The user's key that made this SSHSIG over ``message``, or None.
+
+    The signature names its own public key, so the lookup is by fingerprint
+    rather than by trying every key the user has.
+    """
+    try:
+        parsed = sshsig.parse(text)
+    except sshsig.SSHSigError:
+        return None
+    key = (
+        db.query(SSHKey)
+        .filter(SSHKey.fingerprint == parsed.fingerprint, SSHKey.user_id == user.id)
+        .first()
+    )
+    if not key:
+        return None
+    if not sshsig.verify(parsed, message, sshsig.NAMESPACE):
+        return None
+    return key
+
+
+def _match_legacy(db: Session, user: User, message: bytes, text: str) -> Optional[SSHKey]:
+    try:
+        signature = base64.b64decode(text or "", validate=True)
+    except Exception:
+        return None
+    if not signature:
+        return None
+    for key in list_keys(db, user.id):
+        if _verify_legacy_signature(key, message, signature):
+            return key
+    return None
+
+
+def authenticate(db: Session, nonce: str, signature: str) -> Optional[Authentication]:
+    """Consume a nonce; return who signed it and with which key, or None.
 
     The challenge row is deleted whether or not verification succeeds, so a
     failed attempt cannot be retried against the same nonce with a different
@@ -242,14 +362,7 @@ def verify_challenge(db: Session, nonce: str, signature_b64: str) -> Optional[Us
         db.rollback()
         return None
 
-    if expired:
-        return None
-
-    try:
-        signature = base64.b64decode(signature_b64 or "", validate=True)
-    except Exception:
-        return None
-    if not signature:
+    if expired or not (signature or "").strip():
         return None
 
     user = db.query(User).filter(User.username == username).first()
@@ -257,26 +370,39 @@ def verify_challenge(db: Session, nonce: str, signature_b64: str) -> Optional[Us
         return None
 
     message = nonce.encode("utf-8")
-    for key in list_keys(db, user.id):
-        if _verify_signature(key, message, signature):
-            try:
-                key.last_used_at = datetime.utcnow()
-                db.commit()
-            except Exception:
-                db.rollback()
-            return user
+    if sshsig.looks_like_sshsig(signature):
+        key, fmt = _match_sshsig(db, user, message, signature), "sshsig"
+    else:
+        key, fmt = _match_legacy(db, user, message, signature), "legacy"
+    if not key:
+        return None
 
-    return None
+    try:
+        key.last_used_at = datetime.utcnow()
+        db.commit()
+    except Exception:
+        db.rollback()
+    return Authentication(user=user, key=key, signature_format=fmt)
 
 
-def serialize(key: SSHKey) -> dict:
+def verify_challenge(db: Session, nonce: str, signature: str) -> Optional[User]:
+    """Consume a nonce and return the user whose key signed it, or None."""
+    result = authenticate(db, nonce, signature)
+    return result.user if result else None
+
+
+def serialize(key: SSHKey, active_sessions: Optional[int] = None) -> dict:
     """Public representation. The key itself is public, so it is safe to return."""
-    return {
+    data = {
         "id": key.id,
         "title": key.title,
         "key_type": key.key_type,
         "fingerprint": key.fingerprint,
         "public_key": key.public_key,
+        "scopes": token_service.scopes_of_key(key),
         "last_used_at": key.last_used_at.isoformat() if key.last_used_at else None,
         "created_at": key.created_at.isoformat() if key.created_at else None,
     }
+    if active_sessions is not None:
+        data["active_sessions"] = active_sessions
+    return data

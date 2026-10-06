@@ -1175,15 +1175,28 @@ class FoxNestAPI {
     return this.request('/ssh-keys')
   }
 
-  async addSSHKey({ title, publicKey }) {
-    return this.request('/ssh-keys', {
-      method: 'POST',
-      body: { title, public_key: publicKey },
-    })
+  async addSSHKey({ title, publicKey, scopes = null }) {
+    const body = { title, public_key: publicKey }
+    if (scopes && scopes.length) body.scopes = scopes
+    return this.request('/ssh-keys', { method: 'POST', body })
   }
 
   async deleteSSHKey(keyId) {
     return this.request(`/ssh-keys/${keyId}`, { method: 'DELETE' })
+  }
+
+  // --- Credentials oversight (admin) -----------------------------------------
+  // Metadata only: no endpoint returns a token's value, to its owner or anyone else.
+
+  async listAllCredentials(username = null) {
+    const suffix = username ? `?username=${encodeURIComponent(username)}` : ''
+    return this.request(`/admin/credentials${suffix}`)
+  }
+
+  async revokeUserCredentials(username) {
+    return this.request(`/admin/users/${encodeURIComponent(username)}/credentials/revoke`, {
+      method: 'POST',
+    })
   }
 
   // --- Security operations (admin) -------------------------------------------

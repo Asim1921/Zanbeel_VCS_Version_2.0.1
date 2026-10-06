@@ -20,14 +20,34 @@ import api from '../../utils/api'
  *
  * Signing happens on the client with the private key, so the browser cannot
  * complete an SSH login — this screen only registers and revokes keys, and
- * points at `fox ssh login` for the rest. Saying so plainly avoids the obvious
+ * points at `fox login --ssh` for the rest. Saying so plainly avoids the obvious
  * confusion of "why is there no Sign in with SSH button here".
+ *
+ * A key is a machine credential, so it carries scopes like a token: a sign-in
+ * with a read-only key can fetch but not push. Removing a key ends every sign-in
+ * it made, immediately.
  */
 
+const ACCESS = [
+  {
+    id: 'write',
+    scopes: ['repo:write'],
+    label: 'Read and write',
+    help: 'Push, merge and everything else you can do to repositories.',
+  },
+  {
+    id: 'read',
+    scopes: ['repo:read'],
+    label: 'Read only',
+    help: 'Fetch and browse. Good for a build agent or a deploy machine.',
+  },
+]
+
 function relativeTime(iso) {
-  if (!iso) return 'never used'
-  const then = new Date(iso).getTime()
-  if (Number.isNaN(then)) return 'never used'
+  // Server timestamps are naive UTC; new Date() alone would read them as local time
+  // and show a key used a moment ago as used hours ago.
+  const then = api.parseServerTimestamp(iso)?.getTime()
+  if (!then) return 'never used'
   const seconds = Math.round((Date.now() - then) / 1000)
   if (seconds < 60) return 'used just now'
   const minutes = Math.round(seconds / 60)
@@ -36,18 +56,22 @@ function relativeTime(iso) {
   if (hours < 24) return `used ${hours}h ago`
   const days = Math.round(hours / 24)
   if (days < 30) return `used ${days}d ago`
-  return `used ${new Date(iso).toLocaleDateString()}`
+  return `used ${api.parseServerTimestamp(iso).toLocaleDateString()}`
 }
 
-export default function SSHKeysPanel() {
+export default function SSHKeysPanel({ isAdmin = false }) {
   const [keys, setKeys] = useState([])
+  const [sessionHours, setSessionHours] = useState(8)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
   const [addOpen, setAddOpen] = useState(false)
   const [title, setTitle] = useState('')
   const [publicKey, setPublicKey] = useState('')
+  const [access, setAccess] = useState('write')
+  const [withAdmin, setWithAdmin] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [formError, setFormError] = useState(null)
 
   const load = useCallback(async () => {
     try {
@@ -55,6 +79,7 @@ export default function SSHKeysPanel() {
       setError(null)
       const response = await api.listSSHKeys()
       setKeys(response.keys || [])
+      if (response.session_hours) setSessionHours(response.session_hours)
     } catch (err) {
       setError(err.message || 'Failed to load SSH keys')
     } finally {
@@ -66,26 +91,43 @@ export default function SSHKeysPanel() {
     load()
   }, [load])
 
+  const closeAdd = () => {
+    setAddOpen(false)
+    setFormError(null)
+  }
+
   const handleAdd = async () => {
     if (!title.trim() || !publicKey.trim()) return
+    const base = ACCESS.find((option) => option.id === access)?.scopes || ['repo:write']
     try {
       setSaving(true)
-      setError(null)
-      await api.addSSHKey({ title: title.trim(), publicKey: publicKey.trim() })
+      setFormError(null)
+      await api.addSSHKey({
+        title: title.trim(),
+        publicKey: publicKey.trim(),
+        scopes: withAdmin && isAdmin ? [...base, 'admin'] : base,
+      })
       setAddOpen(false)
       setTitle('')
       setPublicKey('')
+      setAccess('write')
+      setWithAdmin(false)
       await load()
     } catch (err) {
-      setError(err.message || 'Failed to add the key')
+      // Shown in the dialog, next to the key the server refused, rather than
+      // behind it where it is easy to miss.
+      setFormError(err.message || 'Failed to add the key')
     } finally {
       setSaving(false)
     }
   }
 
   const handleDelete = async (key) => {
+    const sessions = key.active_sessions
+      ? ` ${key.active_sessions} active sign-in${key.active_sessions === 1 ? '' : 's'} will end now.`
+      : ''
     const confirmed = window.confirm(
-      `Remove "${key.title}"? Any machine signing in with it loses access immediately.`
+      `Remove "${key.title}"? It can no longer be used to sign in.${sessions}`
     )
     if (!confirmed) return
     try {
@@ -106,7 +148,7 @@ export default function SSHKeysPanel() {
           <p className="mt-1 max-w-2xl text-sm text-muted">
             Sign in from the CLI with a key instead of a password. Nothing reusable
             crosses the wire — the server sends a one-time challenge and your machine
-            signs it.
+            signs it. Each key is limited to the access you give it.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -137,13 +179,18 @@ export default function SSHKeysPanel() {
         <EmptyState
           icon={FiTerminal}
           title="No SSH keys"
-          description="Add your public key, then sign in from the CLI with: fox ssh login"
+          description="Add your public key, then sign in from the CLI with: fox login --ssh"
           action={<Button onClick={() => setAddOpen(true)}>Add a key</Button>}
         />
       ) : (
-        <div className="space-y-2">
+        <div className="space-y-2" data-testid="ssh-key-list">
           {keys.map((key) => (
-            <GlassCard key={key.id} hover={false} className="flex flex-wrap items-center gap-4 p-4">
+            <GlassCard
+              key={key.id}
+              hover={false}
+              className="flex flex-wrap items-center gap-4 p-4"
+              data-testid="ssh-key-row"
+            >
               <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-surface text-accent">
                 <FiKey className="h-4 w-4" />
               </div>
@@ -152,11 +199,27 @@ export default function SSHKeysPanel() {
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="truncate font-medium text-ink">{key.title}</span>
                   <Badge variant="default">{key.key_type}</Badge>
+                  {(key.scopes || []).includes('repo:write') ? (
+                    <Badge variant="info">read &amp; write</Badge>
+                  ) : (
+                    <Badge variant="success">read only</Badge>
+                  )}
+                  {(key.scopes || []).includes('admin') && <Badge variant="warning">admin</Badge>}
                 </div>
                 <p className="mt-1 truncate font-mono text-[11px] text-muted">
                   {key.fingerprint}
                 </p>
-                <p className="mt-0.5 text-xs text-muted">{relativeTime(key.last_used_at)}</p>
+                <p className="mt-0.5 text-xs text-muted">
+                  {relativeTime(key.last_used_at)}
+                  {key.active_sessions > 0 && (
+                    <>
+                      {' · '}
+                      <span className="text-ink-soft">
+                        {key.active_sessions} active sign-in{key.active_sessions === 1 ? '' : 's'}
+                      </span>
+                    </>
+                  )}
+                </p>
               </div>
 
               <Button
@@ -177,18 +240,20 @@ export default function SSHKeysPanel() {
         <p className="text-[13px] font-medium text-ink-soft">Using a key</p>
         <p className="text-xs text-muted">
           Signing needs your private key, which never leaves your machine — so the
-          sign-in itself happens in the CLI, not here.
+          sign-in itself happens in the CLI, not here. A sign-in lasts {sessionHours} hours
+          and the CLI renews it with the key on its own. Keys protected by a passphrase or
+          held in ssh-agent work too.
         </p>
         <pre className="overflow-x-auto rounded-lg border border-border bg-black/30 p-3 font-mono text-[12px] text-ink-soft">
 {`ssh-keygen -t ed25519          # if you do not have a key yet
 fox ssh add work-laptop        # uploads ~/.ssh/id_ed25519.pub
-fox ssh login                  # signs a challenge, saves a session`}
+fox login --ssh                # signs a challenge; no password from now on`}
         </pre>
       </GlassCard>
 
       <Modal
         open={addOpen}
-        onClose={() => setAddOpen(false)}
+        onClose={closeAdd}
         title="Add an SSH key"
         subtitle="Paste the contents of your .pub file — never the private key."
       >
@@ -214,12 +279,59 @@ fox ssh login                  # signs a challenge, saves a session`}
             />
             <p className="mt-1 text-xs text-muted">
               One line, starting with <code className="ref">ssh-ed25519</code>,{' '}
-              <code className="ref">ssh-rsa</code> or <code className="ref">ecdsa-sha2-…</code>.
+              <code className="ref">ssh-rsa</code> (2048 bits or more) or{' '}
+              <code className="ref">ecdsa-sha2-…</code>.
             </p>
           </div>
 
+          <div className="space-y-2">
+            <span className="text-[13px] font-medium text-ink-soft">Access</span>
+            {ACCESS.map((option) => (
+              <label
+                key={option.id}
+                className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-white/[0.02] p-3 transition-colors hover:border-border-strong"
+              >
+                <input
+                  type="radio"
+                  name="ssh-key-access"
+                  value={option.id}
+                  checked={access === option.id}
+                  onChange={() => setAccess(option.id)}
+                  className="mt-0.5 h-4 w-4 accent-[#3b9dff]"
+                />
+                <span className="min-w-0">
+                  <span className="block text-[13px] text-ink">{option.label}</span>
+                  <span className="block text-xs text-muted">{option.help}</span>
+                </span>
+              </label>
+            ))}
+            {isAdmin && (
+              <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-white/[0.02] p-3 transition-colors hover:border-border-strong">
+                <input
+                  type="checkbox"
+                  checked={withAdmin}
+                  onChange={(e) => setWithAdmin(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 accent-[#3b9dff]"
+                />
+                <span className="min-w-0">
+                  <span className="block font-mono text-[13px] text-ink">admin</span>
+                  <span className="block text-xs text-muted">
+                    Also allow administrative commands. Leave off unless this machine needs them.
+                  </span>
+                </span>
+              </label>
+            )}
+          </div>
+
+          {formError && (
+            <div className="flex items-start gap-2 rounded-lg border border-danger-fg/25 bg-danger-bg p-3 text-sm text-danger-fg">
+              <FiAlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span className="min-w-0 break-words">{formError}</span>
+            </div>
+          )}
+
           <div className="flex justify-end gap-2 pt-1">
-            <Button variant="secondary" onClick={() => setAddOpen(false)}>
+            <Button variant="secondary" onClick={closeAdd}>
               Cancel
             </Button>
             <Button onClick={handleAdd} disabled={!title.trim() || !publicKey.trim() || saving}>

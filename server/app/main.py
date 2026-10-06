@@ -19,6 +19,7 @@ from app.db.schema_check import verify_or_fail
 from app.db.migrations import (
     ensure_access_tokens_table,
     ensure_branch_protection_tables,
+    ensure_credential_columns,
     ensure_commit_signatures_table,
     ensure_commit_statuses_table,
     ensure_fork_columns,
@@ -105,6 +106,8 @@ async def startup_event():
     ensure_repositories_branch_policy_column()
     ensure_access_tokens_table()
     ensure_ssh_key_tables()
+    # Both tables above must exist first.
+    ensure_credential_columns()
     ensure_webhook_tables()
     ensure_commit_statuses_table()
     ensure_server_hooks_table()

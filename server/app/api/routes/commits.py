@@ -2,7 +2,7 @@
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from database.crud import (
@@ -12,7 +12,7 @@ from database.crud import (
 from database.database import get_db
 from database.models import User
 
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, has_admin_powers
 from app.core.errors import _raise_head_mismatch
 from app.core.pagination import paginate_list
 from app.core.permissions import (
@@ -58,6 +58,7 @@ router = APIRouter()
 async def push_commit(
     repo_id: str,
     request: PushCommitRequest,
+    http_request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -126,11 +127,12 @@ async def push_commit(
 
         is_rollback_push = branch_name.startswith("rollback_")
 
-        # Prevent non-privileged users from pushing someone else's regular commits
+        # Prevent non-privileged users from pushing someone else's regular commits. Acting
+        # as another author is administration, so a token needs the admin scope for it.
         if (
             pusher_username != author_username
             and not is_rollback_push
-            and user_role not in ['team_lead', 'admin']
+            and not has_admin_powers(http_request, user)
         ):
             raise HTTPException(
                 status_code=403,

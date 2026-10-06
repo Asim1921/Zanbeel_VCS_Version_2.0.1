@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react'
 import {
   FiBell, FiCheck, FiCheckCircle, FiLoader, FiAlertCircle, FiRotateCcw,
   FiGitPullRequest, FiGitMerge, FiMessageSquare, FiUserCheck, FiFolder, FiInbox,
+  FiKey, FiTerminal, FiSlash,
 } from 'react-icons/fi'
 import api from '../utils/api'
 import GlassCard from '../components/ui/GlassCard'
@@ -26,6 +27,9 @@ const ICONS = {
   issue_comment: FiMessageSquare,
   issue_assigned: FiUserCheck,
   access_granted: FiFolder,
+  credential_token_created: FiKey,
+  credential_ssh_key_added: FiTerminal,
+  credentials_revoked: FiSlash,
 }
 
 const LABELS = {
@@ -33,6 +37,9 @@ const LABELS = {
   pr_review_requested: 'review requested',
   pr_merged: 'merged',
   pr_comment: 'comment',
+  credential_token_created: 'new access token',
+  credential_ssh_key_added: 'new SSH key',
+  credentials_revoked: 'credentials revoked',
 }
 
 const prettyType = (type) =>

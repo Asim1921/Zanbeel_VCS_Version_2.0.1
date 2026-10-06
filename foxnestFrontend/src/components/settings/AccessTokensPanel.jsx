@@ -24,16 +24,45 @@ import api from '../../utils/api'
  * it again — a toast that auto-dismisses would lose it for good.
  */
 
-const SCOPE_HELP = {
-  'repo:read': 'Read repositories, files, commits and history.',
-  'repo:write': 'Everything read can do, plus push, merge and create.',
-  admin: 'Administrative endpoints. Only available to team leads.',
-}
+const ACCESS = [
+  {
+    id: 'read',
+    scopes: ['repo:read'],
+    label: 'Read only',
+    help: 'Read repositories, files, commits and history.',
+  },
+  {
+    id: 'write',
+    scopes: ['repo:write'],
+    label: 'Read and write',
+    help: 'Everything read can do, plus push, merge and create.',
+  },
+]
+
+// A token that never expires is a standing liability if it leaks, so the
+// choices nudge towards a lifetime and "never" is the last option, not the first.
+const EXPIRY = [
+  { value: '7', label: '7 days' },
+  { value: '30', label: '30 days' },
+  { value: '90', label: '90 days' },
+  { value: '365', label: '1 year' },
+  { value: '', label: 'Never' },
+]
+
+// admin implies write, and write implies read -- the same hierarchy the server expands.
+const scopeLabel = (scopes = []) =>
+  [
+    scopes.includes('repo:write') || scopes.includes('admin') ? 'read & write' : 'read only',
+    scopes.includes('admin') && 'admin',
+  ]
+    .filter(Boolean)
+    .join(' · ')
 
 function relativeTime(iso) {
-  if (!iso) return 'never'
-  const then = new Date(iso).getTime()
-  if (Number.isNaN(then)) return 'never'
+  // Server timestamps are naive UTC; new Date() alone would read them as local time
+  // and show a key used a moment ago as used hours ago.
+  const then = api.parseServerTimestamp(iso)?.getTime()
+  if (!then) return 'never'
   const seconds = Math.round((Date.now() - then) / 1000)
   if (seconds < 60) return 'just now'
   const minutes = Math.round(seconds / 60)
@@ -42,7 +71,7 @@ function relativeTime(iso) {
   if (hours < 24) return `${hours}h ago`
   const days = Math.round(hours / 24)
   if (days < 30) return `${days}d ago`
-  return new Date(iso).toLocaleDateString()
+  return api.parseServerTimestamp(iso).toLocaleDateString()
 }
 
 export default function AccessTokensPanel({ isAdmin = false }) {
@@ -53,9 +82,11 @@ export default function AccessTokensPanel({ isAdmin = false }) {
 
   const [createOpen, setCreateOpen] = useState(false)
   const [name, setName] = useState('')
-  const [scopes, setScopes] = useState(['repo:read'])
-  const [expiresInDays, setExpiresInDays] = useState('')
+  const [access, setAccess] = useState('read')
+  const [withAdmin, setWithAdmin] = useState(false)
+  const [expiresInDays, setExpiresInDays] = useState('90')
   const [creating, setCreating] = useState(false)
+  const [formError, setFormError] = useState(null)
 
   const [newToken, setNewToken] = useState(null)
   const [copied, setCopied] = useState(false)
@@ -77,30 +108,31 @@ export default function AccessTokensPanel({ isAdmin = false }) {
     load()
   }, [load])
 
-  const toggleScope = (scope) => {
-    setScopes((current) =>
-      current.includes(scope) ? current.filter((s) => s !== scope) : [...current, scope]
-    )
+  const closeCreate = () => {
+    setCreateOpen(false)
+    setFormError(null)
   }
 
   const handleCreate = async () => {
     if (!name.trim()) return
+    const base = ACCESS.find((option) => option.id === access)?.scopes || ['repo:read']
     try {
       setCreating(true)
-      setError(null)
+      setFormError(null)
       const response = await api.createAccessToken({
         name: name.trim(),
-        scopes,
+        scopes: withAdmin && isAdmin ? [...base, 'admin'] : base,
         expiresInDays: expiresInDays || null,
       })
       setNewToken(response)
       setCreateOpen(false)
       setName('')
-      setScopes(['repo:read'])
-      setExpiresInDays('')
+      setAccess('read')
+      setWithAdmin(false)
+      setExpiresInDays('90')
       await load()
     } catch (err) {
-      setError(err.message || 'Failed to create token')
+      setFormError(err.message || 'Failed to create token')
     } finally {
       setCreating(false)
     }
@@ -129,8 +161,6 @@ export default function AccessTokensPanel({ isAdmin = false }) {
     }
   }
 
-  const availableScopes = ['repo:read', 'repo:write', ...(isAdmin ? ['admin'] : [])]
-
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -140,7 +170,8 @@ export default function AccessTokensPanel({ isAdmin = false }) {
           </h2>
           <p className="mt-1 max-w-2xl text-sm text-muted">
             Use a token instead of your password on build agents and scripts. Each one is
-            named, limited to the scopes you pick, and can be revoked on its own.
+            named, limited to the access you pick, and can be revoked on its own. Signing in
+            with <code className="ref">fox login</code> creates one for that machine.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -185,10 +216,11 @@ export default function AccessTokensPanel({ isAdmin = false }) {
           action={<Button onClick={() => setCreateOpen(true)}>Create a token</Button>}
         />
       ) : (
-        <div className="space-y-2">
+        <div className="space-y-2" data-testid="token-list">
           {tokens.map((token) => (
             <GlassCard
               key={token.id}
+              data-testid="token-row"
               className={`flex flex-wrap items-center gap-4 p-4 ${
                 token.active ? '' : 'opacity-60'
               }`}
@@ -207,13 +239,16 @@ export default function AccessTokensPanel({ isAdmin = false }) {
                   ) : (
                     <Badge variant="success">Active</Badge>
                   )}
+                  {token.active && !token.expires_at && (
+                    <Badge variant="warning" dot={false}>No expiry</Badge>
+                  )}
                 </div>
                 <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-muted">
                   <span className="ref">{token.prefix}…</span>
-                  <span>{(token.scopes || []).join(', ')}</span>
+                  <span title={(token.scopes || []).join(', ')}>{scopeLabel(token.scopes)}</span>
                   <span>last used {relativeTime(token.last_used_at)}</span>
                   {token.expires_at && (
-                    <span>expires {new Date(token.expires_at).toLocaleDateString()}</span>
+                    <span>expires {api.parseServerTimestamp(token.expires_at).toLocaleDateString()}</span>
                   )}
                 </div>
               </div>
@@ -237,9 +272,9 @@ export default function AccessTokensPanel({ isAdmin = false }) {
       {/* --- create --- */}
       <Modal
         open={createOpen}
-        onClose={() => setCreateOpen(false)}
+        onClose={closeCreate}
         title="New access token"
-        subtitle="Give it the narrowest scope that still does the job."
+        subtitle="Give it the narrowest access that still does the job."
       >
         <div className="space-y-5">
           <Input
@@ -251,38 +286,84 @@ export default function AccessTokensPanel({ isAdmin = false }) {
           />
 
           <div className="space-y-2">
-            <span className="text-[13px] font-medium text-ink-soft">Scopes</span>
-            {availableScopes.map((scope) => (
+            <span className="text-[13px] font-medium text-ink-soft">Access</span>
+            {ACCESS.map((option) => (
               <label
-                key={scope}
+                key={option.id}
                 className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-white/[0.02] p-3 transition-colors hover:border-border-strong"
               >
                 <input
-                  type="checkbox"
-                  checked={scopes.includes(scope)}
-                  onChange={() => toggleScope(scope)}
+                  type="radio"
+                  name="token-access"
+                  value={option.id}
+                  checked={access === option.id}
+                  onChange={() => setAccess(option.id)}
                   className="mt-0.5 h-4 w-4 accent-[#3b9dff]"
                 />
                 <span className="min-w-0">
-                  <span className="block font-mono text-[13px] text-ink">{scope}</span>
-                  <span className="block text-xs text-muted">{SCOPE_HELP[scope]}</span>
+                  <span className="block text-[13px] text-ink">
+                    {option.label} <span className="font-mono text-muted">{option.scopes[0]}</span>
+                  </span>
+                  <span className="block text-xs text-muted">{option.help}</span>
                 </span>
               </label>
             ))}
+            {isAdmin && (
+              <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-white/[0.02] p-3 transition-colors hover:border-border-strong">
+                <input
+                  type="checkbox"
+                  checked={withAdmin}
+                  onChange={(e) => setWithAdmin(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 accent-[#3b9dff]"
+                />
+                <span className="min-w-0">
+                  <span className="block font-mono text-[13px] text-ink">admin</span>
+                  <span className="block text-xs text-muted">
+                    Administrative endpoints and server-wide settings. Without it, even your
+                    token cannot use your team-lead powers.
+                  </span>
+                </span>
+              </label>
+            )}
           </div>
 
-          <Input
-            label="Expires after (days)"
-            type="number"
-            min="1"
-            max="3650"
-            placeholder="Leave blank for no expiry"
-            value={expiresInDays}
-            onChange={(e) => setExpiresInDays(e.target.value)}
-          />
+          <div className="space-y-1.5">
+            <label htmlFor="token-expiry" className="block text-[13px] font-medium text-ink-soft">
+              Expires after
+            </label>
+            <select
+              id="token-expiry"
+              value={expiresInDays}
+              onChange={(e) => setExpiresInDays(e.target.value)}
+              className="w-full rounded-lg border border-border bg-cream-mid px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+            >
+              {EXPIRY.map((option) => (
+                <option key={option.label} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            {!expiresInDays && (
+              <p className="text-xs text-warning-fg">
+                A token that never expires stays valid until someone remembers to revoke it.
+              </p>
+            )}
+          </div>
+
+          <p className="text-xs text-muted">
+            A token cannot create other tokens, add SSH keys or change your password or
+            email — those always need your password.
+          </p>
+
+          {formError && (
+            <div className="flex items-start gap-2 rounded-lg border border-danger-fg/25 bg-danger-bg p-3 text-sm text-danger-fg">
+              <FiAlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span className="min-w-0 break-words">{formError}</span>
+            </div>
+          )}
 
           <div className="flex justify-end gap-2 pt-1">
-            <Button variant="secondary" onClick={() => setCreateOpen(false)}>
+            <Button variant="secondary" onClick={closeCreate}>
               Cancel
             </Button>
             <Button onClick={handleCreate} disabled={!name.trim() || creating}>
@@ -306,7 +387,10 @@ export default function AccessTokensPanel({ isAdmin = false }) {
           </div>
 
           <div className="flex items-center gap-2 rounded-lg border border-border bg-cream-mid p-3">
-            <code className="min-w-0 flex-1 break-all font-mono text-[13px] text-ink">
+            <code
+              data-testid="new-token-value"
+              className="min-w-0 flex-1 break-all font-mono text-[13px] text-ink"
+            >
               {newToken?.token}
             </code>
             <Button variant="secondary" size="sm" onClick={copyToken} className="shrink-0">
@@ -324,10 +408,14 @@ export default function AccessTokensPanel({ isAdmin = false }) {
             </Button>
           </div>
 
-          <div className="rounded-lg border border-border bg-white/[0.02] p-3">
-            <p className="mb-1.5 text-xs font-medium text-ink-soft">Use it from the CLI:</p>
+          <div className="space-y-2 rounded-lg border border-border bg-white/[0.02] p-3">
+            <p className="text-xs font-medium text-ink-soft">On a build agent, from its secret store:</p>
             <code className="block break-all font-mono text-[12px] text-muted">
-              fox token use {newToken?.token}
+              FOXNEST_TOKEN=&lt;token&gt; fox pull
+            </code>
+            <p className="pt-1 text-xs font-medium text-ink-soft">Or save it on a machine:</p>
+            <code className="block break-all font-mono text-[12px] text-muted">
+              fox login --token &lt;token&gt;
             </code>
           </div>
 
