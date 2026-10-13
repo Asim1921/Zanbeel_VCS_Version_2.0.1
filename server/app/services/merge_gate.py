@@ -80,7 +80,8 @@ def enforce(
     another route, because merging around it leaves the pull request open and the
     approval unspent, recording a review that never gated anything.
     """
-    from app.services import branch_protection, pr_reviews
+    from app.services import pr_reviews, status_checks
+    from database.crud import BranchCRUD
 
     if pull_request is not None:
         try:
@@ -89,10 +90,38 @@ def enforce(
             raise MergeGateError(exc.message, exc.status_code, exc.payload) from exc
         return
 
-    if not branch_protection.requires_review(db, repository, target_branch):
+    rules = review_requirements(db, repository, target_branch)
+    # The repository-wide list counts here too. It is what the web screen edits, and a
+    # branch merge used to ignore it, so `fox merge` landed unchecked code on a branch
+    # whose required checks were configured exactly as the screen offered.
+    checks = status_checks.required_check_rules(db, repository, target_branch)
+    needs_review = bool(rules["required_approvals"] or rules["require_code_owners"])
+    if not needs_review and not checks:
         return
 
-    rules = review_requirements(db, repository, target_branch)
+    if not needs_review:
+        # Checks alone need no reviewer: the source tip's results decide, as they
+        # would for a pull request.
+        source = BranchCRUD.get_branch(db, repository.id, source_branch)
+        head = source.head_commit_id if source else None
+        blockers = status_checks.merge_blockers(db, repository, head, target_branch)
+        if not blockers:
+            return
+        raise MergeGateError(
+            f"'{target_branch}' requires passing status checks before anything lands on it: "
+            + "; ".join(blockers) + ".",
+            409,
+            {
+                "code": "CHECKS_REQUIRED",
+                "operation": operation,
+                "target_branch": target_branch,
+                "source_branch": source_branch,
+                "source_head_commit_id": head,
+                "blockers": blockers,
+                "required_checks": [check.as_dict() for check in checks],
+            },
+        )
+
     existing = open_pull_request_for(db, repository, source_branch, target_branch)
 
     reasons = []
@@ -100,8 +129,8 @@ def enforce(
         reasons.append(f"{rules['required_approvals']} approval(s)")
     if rules["require_code_owners"]:
         reasons.append("code owner sign-off")
-    if rules["require_status_checks"]:
-        reasons.append("status checks " + ", ".join(rules["require_status_checks"]))
+    if checks:
+        reasons.append("status checks " + ", ".join(check.context for check in checks))
 
     detail = " and ".join(reasons) if reasons else "review"
     if existing:
@@ -121,6 +150,7 @@ def enforce(
             "target_branch": target_branch,
             "source_branch": source_branch,
             "review_rules": rules,
+            "required_checks": [check.as_dict() for check in checks],
             "open_pull_request_id": existing.id if existing else None,
         },
     )

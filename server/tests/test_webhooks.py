@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 SERVER_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -82,6 +83,10 @@ class WebhookTestBase(unittest.TestCase):
         _Receiver.fail_times = 0
         _Receiver._failures = 0
         wh.RETRY_BACKOFF = (0, 0)  # keep the suite fast
+        # The receiver listens on loopback, which the server refuses to call unless an
+        # administrator allows it -- so allow it, exactly as a deployment would.
+        self._env = mock.patch.dict(os.environ, {"FOXNEST_OUTBOUND_ALLOWED_HOSTS": "127.0.0.1"})
+        self._env.start()
 
         handle, self.db_path = tempfile.mkstemp(suffix=".db")
         os.close(handle)
@@ -96,6 +101,7 @@ class WebhookTestBase(unittest.TestCase):
         wh.SessionLocal = self.Session
 
     def tearDown(self):
+        self._env.stop()
         wh.SessionLocal = self._real_sessionlocal
         self.db.close()
         self.engine.dispose()
@@ -278,6 +284,61 @@ class SerialisationTests(WebhookTestBase):
         hook = self.make_hook(events="push,tag.created")
         self.assertEqual(wh.serialize(hook)["events"], ["push", "tag.created"])
 
+
+
+class DeliveryLogTests(WebhookTestBase):
+    """One delivery id per delivery, shared by its retries; a bounded log."""
+
+    def test_retries_share_one_delivery_id_and_the_body_carries_it(self):
+        _Receiver.status_to_return = 503
+        hook = self.make_hook(secret="s" * 20)
+        wh.dispatch(self.db, wh.EVENT_PUSH, "repo1", {}, background=False)
+        rows = self.db.query(WebhookDelivery).filter(WebhookDelivery.webhook_id == hook.id).all()
+        self.assertEqual(len(rows), wh.MAX_ATTEMPTS)
+        self.assertEqual(len({row.delivery_guid for row in rows}), 1)
+        body = json.loads(rows[0].payload)
+        self.assertEqual(body["delivery_id"], rows[0].delivery_guid)
+
+    def test_each_hook_gets_its_own_delivery_id(self):
+        first, second = self.make_hook(), self.make_hook()
+        wh.dispatch(self.db, wh.EVENT_PUSH, "repo1", {}, background=False)
+        ids = {row.webhook_id: row.delivery_guid for row in self.db.query(WebhookDelivery).all()}
+        self.assertNotEqual(ids[first.id], ids[second.id])
+
+    def test_a_refused_destination_is_logged_once_and_not_retried(self):
+        hook = self.make_hook(url="http://169.254.169.254/latest/meta-data/")
+        wh.dispatch(self.db, wh.EVENT_PUSH, "repo1", {}, background=False)
+        rows = self.db.query(WebhookDelivery).filter(WebhookDelivery.webhook_id == hook.id).all()
+        self.assertEqual(len(rows), 1)
+        self.assertIn("Not sent", rows[0].error)
+        self.assertEqual(_Receiver.received, [])
+
+    def test_the_log_is_capped_per_hook(self):
+        hook = self.make_hook()
+        with mock.patch.object(wh, "MAX_DELIVERIES_PER_HOOK", 3):
+            for _ in range(5):
+                wh.dispatch(self.db, wh.EVENT_PUSH, "repo1", {}, background=False)
+        self.db.expire_all()
+        count = self.db.query(WebhookDelivery).filter(WebhookDelivery.webhook_id == hook.id).count()
+        self.assertEqual(count, 3)
+
+    def test_old_deliveries_are_dropped(self):
+        from datetime import datetime, timedelta
+        hook = self.make_hook()
+        self.db.add(WebhookDelivery(webhook_id=hook.id, event="push", payload="{}", success=True,
+                                    attempt=1, created_at=datetime.utcnow() - timedelta(days=400)))
+        self.db.commit()
+        wh.dispatch(self.db, wh.EVENT_PUSH, "repo1", {}, background=False)
+        self.db.expire_all()
+        ages = [row.created_at for row in self.db.query(WebhookDelivery).all()]
+        self.assertTrue(all(age > datetime.utcnow() - timedelta(days=60) for age in ages))
+
+    def test_background_dispatch_uses_the_bounded_pool(self):
+        self.make_hook()
+        with mock.patch.object(wh._EXECUTOR, "submit") as submit:
+            queued = wh.dispatch(self.db, wh.EVENT_PUSH, "repo1", {})
+        self.assertEqual(queued, 1)
+        self.assertEqual(submit.call_count, 1)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

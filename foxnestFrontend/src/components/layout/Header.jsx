@@ -1,9 +1,11 @@
-import { FiMenu, FiLogOut, FiBell, FiCheck, FiChevronDown, FiChevronUp, FiExternalLink, FiDownload, FiUser, FiSettings } from 'react-icons/fi'
-import React, { useEffect, useState } from 'react'
+import { FiMenu, FiLogOut, FiBell, FiCheck, FiChevronDown, FiChevronUp, FiExternalLink, FiDownload, FiUser, FiSettings, FiSearch } from 'react-icons/fi'
+import React, { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import Button from '../ui/Button'
 import Modal from '../ui/Modal'
 import api from '../../utils/api'
 import Avatar from '../Avatar'
+import { hasTarget, openTarget, searchLink } from '../../lib/links'
 
 function getNotificationDisplayBody(n) {
   const t = (n?.type || '').toLowerCase()
@@ -15,7 +17,7 @@ function getNotificationDisplayBody(n) {
     lines.push('Permission Level: Developer (write access)')
     if (n.created_at) {
       try {
-        lines.push(`Granted At: ${new Date(n.created_at).toLocaleString()}`)
+        lines.push(`Granted At: ${api.parseServerTimestamp(n.created_at)?.toLocaleString() || ''}`)
       } catch {
         // ignore
       }
@@ -28,7 +30,25 @@ function getNotificationDisplayBody(n) {
 }
 
 const Header = ({ sidebarOpen, setSidebarOpen, activeTab, setActiveTab, currentUser, onLogout }) => {
+  const navigate = useNavigate()
   const displayName = currentUser?.full_name || currentUser?.username || 'User'
+
+  // Search from anywhere: Enter opens the search page with the code results; "/"
+  // focuses the box, as it does on GitHub, unless the person is typing somewhere.
+  const [quickQuery, setQuickQuery] = useState('')
+  const quickRef = useRef(null)
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return
+      const el = document.activeElement
+      const typing = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable)
+      if (typing) return
+      e.preventDefault()
+      quickRef.current?.focus()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
   const role = currentUser?.role === 'team_lead' || currentUser?.role === 'admin' ? 'Admin' : 'User'
 
   const [notificationsOpen, setNotificationsOpen] = useState(false)
@@ -199,6 +219,27 @@ const Header = ({ sidebarOpen, setSidebarOpen, activeTab, setActiveTab, currentU
         </div>
 
         <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+          <form
+            role="search"
+            className="relative hidden md:block"
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (!quickQuery.trim()) return
+              navigate(searchLink({ type: 'code', q: quickQuery.trim() }))
+              setQuickQuery('')
+              quickRef.current?.blur()
+            }}
+          >
+            <FiSearch className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
+            <input
+              ref={quickRef}
+              aria-label="Search code"
+              value={quickQuery}
+              onChange={(e) => setQuickQuery(e.target.value)}
+              placeholder="Search code…  /"
+              className="w-44 rounded-full border border-border bg-surface py-1.5 pl-8 pr-3 text-[13px] text-ink transition-all placeholder:text-muted focus:w-64 focus:border-accent focus:outline-none lg:w-52"
+            />
+          </form>
           <button
             type="button"
             onClick={() => setNotificationsOpen(true)}
@@ -376,8 +417,33 @@ const Header = ({ sidebarOpen, setSidebarOpen, activeTab, setActiveTab, currentU
                         )}
 
                         <p className="mt-2 text-xs text-muted">
-                          {n.created_at ? new Date(n.created_at).toLocaleString() : ''}
+                          {api.parseServerTimestamp(n.created_at)?.toLocaleString() || ''}
                         </p>
+
+                        {hasTarget(n) && !(n?.payload?.repository_id && n?.payload?.issue_number) && (
+                          <div className="mt-2">
+                            <button
+                              type="button"
+                              data-testid="bell-open"
+                              onClick={async () => {
+                                setNotificationsOpen(false)
+                                if (!n.is_read) {
+                                  try {
+                                    await api.markNotificationsRead([n.id])
+                                    refreshUnread()
+                                  } catch {
+                                    // opening matters more than the read mark
+                                  }
+                                }
+                                openTarget(navigate, n)
+                              }}
+                              className="inline-flex items-center gap-1 rounded-lg border border-accent/40 bg-accent/10 px-2 py-1 text-xs text-ink hover:bg-accent/20"
+                            >
+                              <FiExternalLink className="h-3.5 w-3.5" />
+                              Open
+                            </button>
+                          </div>
+                        )}
 
                         {n?.payload?.repository_id && n?.payload?.issue_number && (
                           <div className="mt-2 flex flex-wrap gap-2">

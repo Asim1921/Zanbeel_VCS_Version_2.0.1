@@ -179,7 +179,8 @@ async def push_commit(
         # a path that was going to be dropped anyway, and before anything is
         # written so a rejected push leaves no trace.
         try:
-            server_hooks.run_pre_receive(db, repository, commit_data, current_user, branch_name)
+            server_hooks.run_pre_receive(db, repository, commit_data, current_user, branch_name,
+                                         new_branch=current_branch is None)
         except server_hooks.HookRejection as rejection:
             raise HTTPException(
                 status_code=422,
@@ -332,25 +333,13 @@ async def push_commit(
             
             # Create activity
             ActivityCRUD.create_activity(
-                db, user.id, "push_commit", 
-                f"Pushed commit to '{branch_name}' from {actual_head or 'None'} to {commit.id}: {commit.message[:50]}...", repo_id
+                db, user.id, "push_commit",
+                f"Pushed {commit.id[:8]} to '{branch_name}': {(commit.message or '').splitlines()[0][:80] if commit.message else ''}",
+                repo_id, target_type="branch", target_id=branch_name, commit_id=commit.id,
             )
 
-            # Tell any integrations. Dispatch is fire-and-forget on a worker
-            # thread, so a slow or dead receiver cannot make this push hang.
-            hook_service.dispatch(db, hook_service.EVENT_PUSH, repo_id, {
-                "repository": {"id": repo_id, "name": repository.name},
-                "branch": branch_name,
-                "before": actual_head,
-                "after": commit.id,
-                "pusher": pusher_username,
-                "commit": {
-                    "id": commit.id,
-                    "message": commit.message,
-                    "author": pusher_username,
-                    "file_count": screening["kept"],
-                },
-            })
+            # The push webhook is sent by refs.update_reference above, as it is for
+            # every other way a branch moves.
 
             _sync_issues_for_new_commit(db, repo_id, commit, branch_name, user.id)
             

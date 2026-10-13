@@ -26,12 +26,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
-from database.crud import BranchCRUD, CommitCRUD, FileObjectCRUD, UserCRUD
+from database.crud import BranchCRUD, CommitCRUD, FileObjectCRUD, RepositoryCRUD, UserCRUD
 from database.models import Commit
 
 from app.services.commit_graph import _get_commit_tree
 from app.services.merge import _merge_trees
-from app.services import refs
+from app.services import refs, server_hooks
 from app.services.signing import sign_commit
 
 
@@ -161,6 +161,13 @@ def _write_commit(
         "parents": [branch.head_commit_id] if branch.head_commit_id else [],
         "timestamp": datetime.utcnow().isoformat(),
     }
+
+    # Push rules apply to what a cherry-pick or revert puts on the branch. A revert
+    # can restore content that has since been removed for a reason.
+    server_hooks.check_server_write(
+        db, RepositoryCRUD.get_repository(db, repo_id), branch.name, branch.head_commit_id,
+        tree, UserCRUD.get_user_by_username(db, author_username),
+    )
 
     # Ask the branch before writing. create_commit_from_file_hashes() commits its
     # own transaction and moves repository.head_commit_id, so a refusal arriving
@@ -353,6 +360,14 @@ def rebase(
     # rebase -- resolved once rather than per replayed commit.
     actor = UserCRUD.get_user_by_username(db, author_username)
     actor_id = actor.id if actor else None
+
+    # Push rules for every replayed commit, all before any is written, so a refusal
+    # halfway through cannot leave half a rebase behind.
+    repository = RepositoryCRUD.get_repository(db, repo_id)
+    previous = _get_commit_tree(db, onto.head_commit_id) if onto.head_commit_id else {}
+    for _commit, tree in planned:
+        server_hooks.check_server_change(db, repository, branch.name, previous, tree, actor)
+        previous = tree
     for commit, tree in planned:
         entries = []
         for path, content in tree.items():

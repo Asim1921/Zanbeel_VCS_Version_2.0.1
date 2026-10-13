@@ -3,6 +3,14 @@
 Access rule: a webhook receives repository contents, so managing one requires
 the same standing as administering the repository. Global hooks (no repository)
 are admin-only, since they see every repository on the server.
+
+Every webhook is signed. One created without a secret gets a generated one, shown
+once in the response; a secret can be replaced or rotated but not removed, because
+an unsigned delivery is one the receiver cannot tell from a forgery.
+
+URLs are checked against the outbound rules (app/services/outbound.py) when they are
+saved, so a hook pointed at this server, the LAN or the metadata service is refused
+with the reason rather than failing on every delivery.
 """
 
 from typing import List, Optional
@@ -14,9 +22,12 @@ from sqlalchemy.orm import Session
 from database.database import get_db
 from database.models import Repository, User, Webhook, WebhookDelivery
 
-from app.core.dependencies import get_current_user, has_admin_powers, require_admin_user
+from app.core.dependencies import get_current_user, has_admin_powers
+from app.services import outbound
 from app.services import webhooks as hook_service
 
+
+from app.services import audit
 
 router = APIRouter()
 
@@ -44,6 +55,32 @@ def _assert_may_manage(
             status_code=403,
             detail="Only the repository owner or an admin may manage its webhooks",
         )
+
+
+def _hook_or_404(db: Session, webhook_id: int) -> Webhook:
+    hook = db.query(Webhook).filter(Webhook.id == webhook_id).first()
+    if not hook:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    return hook
+
+
+def _check_url(url: str) -> Optional[str]:
+    """Refuse a URL the server may not call; return a warning if DNS cannot answer yet."""
+    try:
+        return outbound.check_url(url)
+    except outbound.OutboundBlocked as exc:
+        raise HTTPException(status_code=400, detail=exc.message)
+
+
+def _check_secret(secret: str) -> str:
+    secret = secret.strip()
+    if len(secret) < hook_service.MIN_SECRET_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"A webhook secret must be at least {hook_service.MIN_SECRET_LENGTH} "
+                   "characters. Leave it out to have one generated.",
+        )
+    return secret
 
 
 def _validate_events(events: Optional[List[str]]) -> str:
@@ -128,13 +165,13 @@ async def list_webhooks(
 
 
 @router.post("/api/webhooks")
-async def create_webhook(
+def create_webhook(
     http_request: Request,
     request: WebhookRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Register a webhook."""
+    """Register a webhook. The response carries its secret, this once."""
     _assert_may_manage(http_request, db, current_user, request.repository_id)
 
     if request.repository_id:
@@ -142,10 +179,14 @@ async def create_webhook(
         if not exists:
             raise HTTPException(status_code=404, detail="Repository not found")
 
+    warning = _check_url(request.url)
+    generated = not (request.secret or "").strip()
+    secret = hook_service.generate_secret() if generated else _check_secret(request.secret)
+
     hook = Webhook(
         repository_id=request.repository_id,
         url=request.url,
-        secret=request.secret or None,
+        secret=secret,
         events=_validate_events(request.events),
         content_type=request.content_type or "application/json",
         active=request.active,
@@ -154,12 +195,21 @@ async def create_webhook(
     db.add(hook)
     db.commit()
     db.refresh(hook)
+    audit.record(db, current_user.id, "webhook_created", repository_id=hook.repository_id,
+                 description=f"Added webhook {hook.url} ({hook.events})",
+                 target_type="webhook", target_id=hook.id)
 
-    return {"success": True, "webhook": hook_service.serialize(hook)}
+    return {
+        "success": True,
+        "webhook": hook_service.serialize(hook),
+        "secret": secret,
+        "secret_generated": generated,
+        "warning": warning,
+    }
 
 
 @router.put("/api/webhooks/{webhook_id}")
-async def update_webhook(
+def update_webhook(
     http_request: Request,
     webhook_id: int,
     request: WebhookUpdateRequest,
@@ -167,16 +217,21 @@ async def update_webhook(
     db: Session = Depends(get_db),
 ):
     """Update a webhook. Omitted fields are left alone."""
-    hook = db.query(Webhook).filter(Webhook.id == webhook_id).first()
-    if not hook:
-        raise HTTPException(status_code=404, detail="Webhook not found")
+    hook = _hook_or_404(db, webhook_id)
     _assert_may_manage(http_request, db, current_user, hook.repository_id)
 
+    warning = None
     if request.url is not None:
+        warning = _check_url(request.url)
         hook.url = request.url
     if request.secret is not None:
-        # An empty string clears the secret; None means "leave it".
-        hook.secret = request.secret or None
+        if not request.secret.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Webhooks are always signed, so the secret cannot be removed. "
+                       "Rotate it to get a new one.",
+            )
+        hook.secret = _check_secret(request.secret)
     if request.events is not None:
         hook.events = _validate_events(request.events)
     if request.content_type is not None:
@@ -186,7 +241,36 @@ async def update_webhook(
 
     db.commit()
     db.refresh(hook)
-    return {"success": True, "webhook": hook_service.serialize(hook)}
+    changed = [name for name in ("url", "secret", "events", "content_type", "active")
+               if getattr(request, name) is not None]
+    audit.record(db, current_user.id, "webhook_updated", repository_id=hook.repository_id,
+                 description=f"Changed webhook {hook.url}: {', '.join(changed) or 'nothing'}",
+                 target_type="webhook", target_id=hook.id)
+    return {"success": True, "webhook": hook_service.serialize(hook), "warning": warning}
+
+
+@router.post("/api/webhooks/{webhook_id}/rotate-secret")
+async def rotate_webhook_secret(
+    http_request: Request,
+    webhook_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Replace the secret with a generated one, returned this once.
+
+    Deliveries are signed with the new secret from now on, so the receiver needs it
+    straight away. Also how a webhook from before secrets were required gets one.
+    """
+    hook = _hook_or_404(db, webhook_id)
+    _assert_may_manage(http_request, db, current_user, hook.repository_id)
+
+    secret = hook_service.generate_secret()
+    hook.secret = secret
+    db.commit()
+    db.refresh(hook)
+    audit.record(db, current_user.id, "webhook_secret_rotated", repository_id=hook.repository_id,
+                 description=f"Rotated the secret of webhook {hook.url}", target_type="webhook", target_id=hook.id)
+    return {"success": True, "webhook": hook_service.serialize(hook), "secret": secret}
 
 
 @router.delete("/api/webhooks/{webhook_id}")
@@ -197,19 +281,20 @@ async def delete_webhook(
     db: Session = Depends(get_db),
 ):
     """Delete a webhook and its delivery history."""
-    hook = db.query(Webhook).filter(Webhook.id == webhook_id).first()
-    if not hook:
-        raise HTTPException(status_code=404, detail="Webhook not found")
+    hook = _hook_or_404(db, webhook_id)
     _assert_may_manage(http_request, db, current_user, hook.repository_id)
 
+    url, repository_id, hook_id = hook.url, hook.repository_id, hook.id
     db.query(WebhookDelivery).filter(WebhookDelivery.webhook_id == hook.id).delete()
     db.delete(hook)
     db.commit()
+    audit.record(db, current_user.id, "webhook_deleted", repository_id=repository_id,
+                 description=f"Removed webhook {url}", target_type="webhook", target_id=hook_id)
     return {"success": True}
 
 
 @router.post("/api/webhooks/{webhook_id}/ping")
-async def ping_webhook(
+def ping_webhook(
     http_request: Request,
     webhook_id: int,
     current_user: User = Depends(get_current_user),
@@ -217,39 +302,19 @@ async def ping_webhook(
 ):
     """Send a test delivery and wait for the result.
 
-    Synchronous on purpose, unlike real events: someone who just configured a
-    URL wants to know *now* whether it works, and is willing to wait for the
-    answer. Real events must never block a push.
+    Synchronous on purpose, unlike real events: someone who just configured a URL
+    wants to know *now* whether it works. One attempt, no retries, and a plain ``def``
+    route so the wait happens on a worker thread. It used to be an ``async`` route
+    making a blocking request with retries, which held up every other request on the
+    server until the receiver answered.
     """
-    hook = db.query(Webhook).filter(Webhook.id == webhook_id).first()
-    if not hook:
-        raise HTTPException(status_code=404, detail="Webhook not found")
+    hook = _hook_or_404(db, webhook_id)
     _assert_may_manage(http_request, db, current_user, hook.repository_id)
 
-    import json as _json
-    import hashlib as _hashlib
-    import time as _time
-
-    envelope = {
-        "event": hook_service.EVENT_PING,
-        "delivered_at": None,
-        "repository_id": hook.repository_id,
-        "data": {"message": "Ping from Zanbeel", "webhook_id": hook.id},
-    }
-    body = _json.dumps(envelope, separators=(",", ":"), default=str).encode("utf-8")
-    delivery_id = _hashlib.sha256(body + str(_time.time()).encode()).hexdigest()[:32]
-
-    hook_service.deliver(hook.id, hook_service.EVENT_PING, body, delivery_id)
-
-    latest = (
-        db.query(WebhookDelivery)
-        .filter(WebhookDelivery.webhook_id == hook.id)
-        .order_by(WebhookDelivery.id.desc())
-        .first()
-    )
+    delivery = hook_service.ping(db, hook)
     return {
         "success": True,
-        "delivery": hook_service.serialize_delivery(latest) if latest else None,
+        "delivery": hook_service.serialize_delivery(delivery) if delivery else None,
     }
 
 
@@ -258,23 +323,50 @@ async def list_deliveries(
     http_request: Request,
     webhook_id: int,
     limit: int = 30,
+    delivery_id: Optional[str] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Recent delivery attempts, newest first."""
-    hook = db.query(Webhook).filter(Webhook.id == webhook_id).first()
-    if not hook:
-        raise HTTPException(status_code=404, detail="Webhook not found")
+    """Recent delivery attempts, newest first. ``delivery_id`` narrows to one delivery."""
+    hook = _hook_or_404(db, webhook_id)
     _assert_may_manage(http_request, db, current_user, hook.repository_id)
 
-    deliveries = (
-        db.query(WebhookDelivery)
-        .filter(WebhookDelivery.webhook_id == hook.id)
-        .order_by(WebhookDelivery.id.desc())
-        .limit(max(1, min(limit, 200)))
-        .all()
-    )
+    query = db.query(WebhookDelivery).filter(WebhookDelivery.webhook_id == hook.id)
+    if delivery_id:
+        query = query.filter(WebhookDelivery.delivery_guid == delivery_id)
+    deliveries = query.order_by(WebhookDelivery.id.desc()).limit(max(1, min(limit, 200))).all()
     return {
         "success": True,
         "deliveries": [hook_service.serialize_delivery(d) for d in deliveries],
+    }
+
+
+@router.post("/api/webhooks/{webhook_id}/deliveries/{delivery_row_id}/redeliver")
+def redeliver_webhook_delivery(
+    http_request: Request,
+    webhook_id: int,
+    delivery_row_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Send a logged delivery again, as one new attempt with a new delivery id.
+
+    For the receiver that was down when the event happened: the pipeline gets what it
+    missed without anyone pushing again.
+    """
+    hook = _hook_or_404(db, webhook_id)
+    _assert_may_manage(http_request, db, current_user, hook.repository_id)
+
+    original = (
+        db.query(WebhookDelivery)
+        .filter(WebhookDelivery.id == delivery_row_id, WebhookDelivery.webhook_id == hook.id)
+        .first()
+    )
+    if not original:
+        raise HTTPException(status_code=404, detail="Delivery not found")
+
+    delivery = hook_service.redeliver(db, hook, original)
+    return {
+        "success": True,
+        "delivery": hook_service.serialize_delivery(delivery) if delivery else None,
     }

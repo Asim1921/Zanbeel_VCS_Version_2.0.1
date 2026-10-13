@@ -33,17 +33,22 @@ TOKEN_PREFIX = "fxp_"
 _SECRET_BYTES = 32
 
 SCOPE_REPO_READ = "repo:read"
+# Report commit statuses, and read. What a CI runner needs: it can say whether a
+# commit passed, but cannot push code, so a leaked CI token cannot change what is tested.
+SCOPE_REPO_STATUS = "repo:status"
 SCOPE_REPO_WRITE = "repo:write"
 SCOPE_ADMIN = "admin"
 
-VALID_SCOPES = (SCOPE_REPO_READ, SCOPE_REPO_WRITE, SCOPE_ADMIN)
+VALID_SCOPES = (SCOPE_REPO_READ, SCOPE_REPO_STATUS, SCOPE_REPO_WRITE, SCOPE_ADMIN)
 
-# Writing implies reading, and admin implies both. Expanding here means callers
-# compare against one flat set rather than re-deriving the hierarchy.
+# Writing implies reporting statuses and reading, and admin implies all of them.
+# Expanding here means callers compare against one flat set rather than re-deriving
+# the hierarchy.
 _SCOPE_IMPLIES = {
     SCOPE_REPO_READ: {SCOPE_REPO_READ},
-    SCOPE_REPO_WRITE: {SCOPE_REPO_WRITE, SCOPE_REPO_READ},
-    SCOPE_ADMIN: {SCOPE_ADMIN, SCOPE_REPO_WRITE, SCOPE_REPO_READ},
+    SCOPE_REPO_STATUS: {SCOPE_REPO_STATUS, SCOPE_REPO_READ},
+    SCOPE_REPO_WRITE: {SCOPE_REPO_WRITE, SCOPE_REPO_STATUS, SCOPE_REPO_READ},
+    SCOPE_ADMIN: {SCOPE_ADMIN, SCOPE_REPO_WRITE, SCOPE_REPO_STATUS, SCOPE_REPO_READ},
 }
 
 

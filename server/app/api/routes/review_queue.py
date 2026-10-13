@@ -1,6 +1,7 @@
 """Approval queues for pending commits and pending repositories."""
 
 import json
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -17,7 +18,11 @@ from app.services.branches import _get_default_branch
 from app.services.issues import _sync_issues_for_new_commit
 from app.services.notifications import _notify_issue_commit_reviewed
 from app.services.signing import sign_commit
+from app.services import webhooks as hook_service
 
+
+from app.services import audit
+from app.services import notifications as notify
 
 router = APIRouter()
 
@@ -106,6 +111,40 @@ async def get_repository_pending_commits(repo_id: str, status: str = None, curre
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+def _announce_review(db: Session, pending, reviewer: User, decision: str,
+                     comment: Optional[str], commit_id: Optional[str] = None) -> None:
+    """Send commit.reviewed. On approval the branch move also sends push, via refs."""
+    branch = None
+    try:
+        raw = json.loads(pending.files_data) if getattr(pending, "files_data", None) else {}
+        if isinstance(raw, dict):
+            branch = (raw.get("meta") or {}).get("branch")
+    except Exception:
+        branch = None
+    repository = getattr(pending, "repository", None)
+    hook_service.dispatch(db, hook_service.EVENT_COMMIT_REVIEWED, pending.repository_id, {
+        "repository": {"id": pending.repository_id,
+                       "name": getattr(repository, "name", None)},
+        "branch": branch,
+        "decision": decision,
+        "reviewer": reviewer.username,
+        "comment": comment,
+        "author": getattr(getattr(pending, "author", None), "username", None),
+        "commit": {"id": commit_id or pending.id, "message": pending.message},
+    })
+    subject = ((pending.message or "").splitlines() or [""])[0][:60]
+    author = getattr(getattr(pending, "author", None), "username", None) or "someone"
+    audit.record(
+        db, reviewer.id, "approve_commit" if decision == "approved" else "reject_commit",
+        repository_id=pending.repository_id,
+        description=f"{decision.capitalize()} {author}'s commit {(commit_id or pending.id)[:8]}"
+                    + (f" on '{branch}'" if branch else "") + f": {subject}",
+        target_type="commit", target_id=commit_id or pending.id, commit_id=commit_id,
+        payload={"pending_commit_id": pending.id, "author": author, "comment": comment},
+    )
+    notify.commit_reviewed_for_author(db, pending, reviewer, decision, comment, commit_id=commit_id)
+
+
 @router.post("/api/pending-commits/{commit_id}/review")
 async def review_pending_commit(commit_id: str, request: ReviewCommitRequest, current_user: User = Depends(require_reviewer_user), db: Session = Depends(get_db)):
     """Approve or reject a pending commit"""
@@ -119,6 +158,8 @@ async def review_pending_commit(commit_id: str, request: ReviewCommitRequest, cu
             # that admitted it to the repository.
             if commit is not None:
                 sign_commit(db, commit, current_user.username, current_user.id)
+                _announce_review(db, pending, current_user, "approved", request.comment,
+                                 commit_id=commit.id)
             try:
                 branch_name = None
                 if pending and getattr(pending, "files_data", None):
@@ -158,6 +199,7 @@ async def review_pending_commit(commit_id: str, request: ReviewCommitRequest, cu
             pending = PendingCommitCRUD.reject_pending_commit(
                 db, commit_id, current_user.username, request.comment
             )
+            _announce_review(db, pending, current_user, "rejected", request.comment)
             try:
                 branch_name = None
                 if pending and getattr(pending, "files_data", None):

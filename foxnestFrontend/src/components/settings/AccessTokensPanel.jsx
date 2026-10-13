@@ -32,6 +32,12 @@ const ACCESS = [
     help: 'Read repositories, files, commits and history.',
   },
   {
+    id: 'status',
+    scopes: ['repo:status'],
+    label: 'Report CI statuses',
+    help: 'For a CI job: read, and report whether a commit passed. Cannot push, so a leaked CI token cannot change what gets tested.',
+  },
+  {
     id: 'write',
     scopes: ['repo:write'],
     label: 'Read and write',
@@ -49,10 +55,15 @@ const EXPIRY = [
   { value: '', label: 'Never' },
 ]
 
-// admin implies write, and write implies read -- the same hierarchy the server expands.
+// admin implies write, write implies status, and status implies read -- the same
+// hierarchy the server expands.
 const scopeLabel = (scopes = []) =>
   [
-    scopes.includes('repo:write') || scopes.includes('admin') ? 'read & write' : 'read only',
+    scopes.includes('repo:write') || scopes.includes('admin')
+      ? 'read & write'
+      : scopes.includes('repo:status')
+        ? 'read & report statuses'
+        : 'read only',
     scopes.includes('admin') && 'admin',
   ]
     .filter(Boolean)
@@ -411,7 +422,9 @@ export default function AccessTokensPanel({ isAdmin = false }) {
           <div className="space-y-2 rounded-lg border border-border bg-white/[0.02] p-3">
             <p className="text-xs font-medium text-ink-soft">On a build agent, from its secret store:</p>
             <code className="block break-all font-mono text-[12px] text-muted">
-              FOXNEST_TOKEN=&lt;token&gt; fox pull
+              {scopeLabel(newToken?.access_token?.scopes) === 'read & report statuses'
+                ? 'FOXNEST_TOKEN=<token> FOXNEST_REPO_ID=<repo id> fox status-check report ci/build success --commit <id>'
+                : 'FOXNEST_TOKEN=<token> fox pull'}
             </code>
             <p className="pt-1 text-xs font-medium text-ink-soft">Or save it on a machine:</p>
             <code className="block break-all font-mono text-[12px] text-muted">

@@ -125,6 +125,8 @@ async def create_user(request: dict, current_user: User = Depends(require_admin_
         
         password_hash = hash_password(password) if password else None
         user = UserCRUD.create_user(db, username, email, full_name, role, team_lead_id, password_hash=password_hash)
+        ActivityCRUD.create_activity(db, current_user.id, "create_user",
+                                     f"Created {role} {username}", target_type="user", target_id=username)
         
         return {
             "success": True,
@@ -172,9 +174,17 @@ async def update_user(username: str, request: dict, http_request: Request, curre
             if not is_admin:
                 raise HTTPException(status_code=403, detail="Only admin/team lead can change active status")
             user.is_active = request["is_active"]
-        
+
         db.commit()
         db.refresh(user)
+        changed = [k for k in ("email", "full_name", "is_active") if k in request]
+        if changed:
+            ActivityCRUD.create_activity(
+                db, current_user.id, "update_user",
+                f"Changed {username}: {', '.join(changed)}"
+                + (f" (now {'active' if user.is_active else 'disabled'})" if "is_active" in request else ""),
+                target_type="user", target_id=username,
+            )
         
         return {
             "success": True,
@@ -208,7 +218,9 @@ async def delete_user(username: str, current_user: User = Depends(require_admin_
         
         db.delete(user)
         db.commit()
-        
+        ActivityCRUD.create_activity(db, current_user.id, "delete_user", f"Deleted user {username}",
+                                     target_type="user", target_id=username)
+
         return {
             "success": True,
             "message": f"User {username} deleted successfully"

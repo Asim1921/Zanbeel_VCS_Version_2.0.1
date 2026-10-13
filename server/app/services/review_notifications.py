@@ -46,6 +46,7 @@ def _pr_payload(repository: Repository, pr: PullRequest) -> Dict[str, Any]:
         "title": pr.title,
         "source_branch": pr.source_branch,
         "target_branch": pr.target_branch,
+        "target": {"kind": "pull_request", "repository_id": repository.id, "pr_id": pr.id},
     }
 
 

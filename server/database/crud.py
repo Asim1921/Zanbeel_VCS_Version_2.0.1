@@ -212,8 +212,13 @@ class RepositoryCRUD:
         # Delete user permissions
         db.query(UserPermission).filter(UserPermission.repository_id == repo_id).delete()
         
-        # Delete activities
-        db.query(Activity).filter(Activity.repository_id == repo_id).delete()
+        # Keep the activity log: deleting a repository must not erase the record of
+        # what happened in it, least of all of who deleted it. The rows are detached
+        # and keep the repository's name.
+        db.query(Activity).filter(Activity.repository_id == repo_id).update(
+            {Activity.repository_id: None, Activity.repository_name: repository.name},
+            synchronize_session=False,
+        )
         
         # Delete repository tags
         db.query(RepositoryTag).filter(RepositoryTag.repository_id == repo_id).delete()
@@ -715,18 +720,16 @@ class PullRequestCRUD:
 
 class ActivityCRUD:
     @staticmethod
-    def create_activity(db: Session, user_id: int, activity_type: str, description: str = None, repository_id: str = None):
-        """Create an activity record"""
-        activity = Activity(
-            user_id=user_id,
-            repository_id=repository_id,
-            activity_type=activity_type,
-            description=description
-        )
-        
-        db.add(activity)
-        db.commit()
-        return activity
+    def create_activity(db: Session, user_id: int, activity_type: str, description: str = None,
+                        repository_id: str = None, **details):
+        """Record an activity through the audit log.
+
+        Kept so existing call sites need no change; ``details`` takes the audit log's
+        structured fields (target_type, target_id, commit_id, payload).
+        """
+        from app.services import audit
+        return audit.record(db, user_id, activity_type, repository_id=repository_id,
+                            description=description, **details)
     
     @staticmethod
     def get_recent_activities(db: Session, limit: int = 20) -> List[Activity]:

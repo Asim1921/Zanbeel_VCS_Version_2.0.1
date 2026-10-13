@@ -18,7 +18,11 @@ import api from '../../utils/api'
 
 const scopeText = (scopes = []) =>
   [
-    scopes.includes('repo:write') || scopes.includes('admin') ? 'read & write' : 'read only',
+    scopes.includes('repo:write') || scopes.includes('admin')
+      ? 'read & write'
+      : scopes.includes('repo:status')
+        ? 'read & report statuses'
+        : 'read only',
     scopes.includes('admin') && 'admin',
   ]
     .filter(Boolean)

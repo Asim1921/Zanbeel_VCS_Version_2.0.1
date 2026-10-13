@@ -18,6 +18,8 @@ from app.core.dependencies import get_current_user, has_admin_powers
 from app.services import server_hooks as hook_service
 
 
+from app.services import audit
+
 router = APIRouter()
 
 
@@ -49,6 +51,20 @@ class ServerHookRequest(BaseModel):
     hook_type: str = hook_service.HOOK_PRE_RECEIVE
     enabled: bool = True
     config: Dict[str, Any] = Field(default_factory=dict)
+
+
+def _check_hook_type(hook_type: str) -> None:
+    if hook_type == hook_service.HOOK_POST_RECEIVE:
+        raise HTTPException(
+            status_code=400,
+            detail="post-receive hooks never ran on this server. To be told about pushes, "
+                   "create a webhook subscribed to the 'push' event instead.",
+        )
+    if hook_type not in hook_service.VALID_HOOK_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"hook_type must be one of {', '.join(hook_service.VALID_HOOK_TYPES)}",
+        )
 
 
 class ServerHookUpdateRequest(BaseModel):
@@ -83,7 +99,7 @@ async def list_server_hooks(
 
 
 @router.post("/api/server-hooks")
-async def create_server_hook(
+def create_server_hook(
     http_request: Request,
     request: ServerHookRequest,
     current_user: User = Depends(get_current_user),
@@ -92,11 +108,7 @@ async def create_server_hook(
     """Create a hook. Rules are validated now so a bad regex cannot land."""
     _assert_may_manage(http_request, db, current_user, request.repository_id)
 
-    if request.hook_type not in hook_service.VALID_HOOK_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"hook_type must be one of {', '.join(hook_service.VALID_HOOK_TYPES)}",
-        )
+    _check_hook_type(request.hook_type)
 
     if request.repository_id:
         exists = db.query(Repository).filter(Repository.id == request.repository_id).first()
@@ -119,11 +131,14 @@ async def create_server_hook(
     db.add(hook)
     db.commit()
     db.refresh(hook)
+    audit.record(db, current_user.id, "push_rule_created", repository_id=hook.repository_id,
+                 description=f"Added push rule '{hook.name}' ({', '.join(sorted(config)) or 'no rules'})",
+                 target_type="push_rule", target_id=hook.id)
     return {"success": True, "hook": hook_service.serialize(hook)}
 
 
 @router.put("/api/server-hooks/{hook_id}")
-async def update_server_hook(
+def update_server_hook(
     http_request: Request,
     hook_id: int,
     request: ServerHookUpdateRequest,
@@ -141,15 +156,31 @@ async def update_server_hook(
     if request.enabled is not None:
         hook.enabled = request.enabled
     if request.config is not None:
+        incoming = dict(request.config)
+        # The policy-service secret is never sent back to the browser, so a form that
+        # re-saves the rules cannot include it. Keep it unless a new one is given or
+        # the service it signs for has changed.
+        try:
+            previous = json.loads(hook.config_json or "{}")
+        except ValueError:
+            previous = {}
+        if (not incoming.get("external_secret") and previous.get("external_secret")
+                and incoming.get("external_url") == previous.get("external_url")):
+            incoming["external_secret"] = previous["external_secret"]
         try:
             hook.config_json = json.dumps(
-                hook_service.validate_config(request.config), sort_keys=True
+                hook_service.validate_config(incoming), sort_keys=True
             )
         except hook_service.HookError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.message)
 
     db.commit()
     db.refresh(hook)
+    changed = [name for name in ("name", "enabled", "config") if getattr(request, name) is not None]
+    audit.record(db, current_user.id, "push_rule_updated", repository_id=hook.repository_id,
+                 description=f"Changed push rule '{hook.name}': {', '.join(changed) or 'nothing'}"
+                             + ("" if hook.enabled else " (disabled)"),
+                 target_type="push_rule", target_id=hook.id)
     return {"success": True, "hook": hook_service.serialize(hook)}
 
 
@@ -165,30 +196,40 @@ async def delete_server_hook(
         raise HTTPException(status_code=404, detail="Hook not found")
     _assert_may_manage(http_request, db, current_user, hook.repository_id)
 
+    name, repository_id, hook_id = hook.name, hook.repository_id, hook.id
     db.delete(hook)
     db.commit()
+    audit.record(db, current_user.id, "push_rule_deleted", repository_id=repository_id,
+                 description=f"Removed push rule '{name}'", target_type="push_rule", target_id=hook_id)
     return {"success": True}
 
 
 class HookTestRequest(BaseModel):
     message: str = ""
     paths: list = Field(default_factory=list)
+    # Text content to test content rules with: {path: text}. Paths listed only in
+    # ``paths`` are tested with no content.
+    files: Dict[str, str] = Field(default_factory=dict)
+    deleted: list = Field(default_factory=list)
+    branch: Optional[str] = None
+    new_branch: bool = False
 
 
+# Sync on purpose: a rule with an external policy service makes a blocking HTTP call,
+# which in an ``async def`` would stall every other request until it timed out.
 @router.post("/api/server-hooks/{hook_id}/test")
-async def test_server_hook(
+def test_server_hook(
     http_request: Request,
     hook_id: int,
     request: HookTestRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Dry-run a hook against a hypothetical commit.
+    """Dry-run a hook against a hypothetical change.
 
-    Lets an admin find out whether a rule does what they meant *before* it
-    starts rejecting colleagues' pushes. Content rules cannot be exercised here
-    because no file bodies are supplied — the response says so rather than
-    reporting a misleading pass.
+    Lets an admin find out whether a rule does what they meant *before* it starts
+    rejecting colleagues' pushes. Content rules are exercised for the files given
+    with content; paths given without content are checked by path rules only.
     """
     hook = db.query(ServerHook).filter(ServerHook.id == hook_id).first()
     if not hook:
@@ -200,21 +241,27 @@ async def test_server_hook(
     except ValueError:
         raise HTTPException(status_code=500, detail="Hook configuration is not valid JSON")
 
+    files = {path: b"" for path in request.paths}
+    files.update({path: (text or "").encode("utf-8") for path, text in request.files.items()})
     commit_data = {
         "id": "0" * 40,
         "message": request.message,
         "author": current_user.username,
-        # Empty payloads: path rules still apply, content and size rules cannot.
-        "files": {path: "" for path in request.paths},
+        "files": files,
     }
-    reasons = hook_service.evaluate(config, commit_data, current_user)
+    reasons = hook_service.evaluate(
+        config, commit_data, current_user,
+        branch=request.branch, deleted=[str(p) for p in request.deleted],
+        new_branch=request.new_branch,
+    )
 
+    untested = [path for path in request.paths if path not in request.files]
     return {
         "success": True,
         "would_accept": not reasons,
         "reasons": reasons,
         "note": (
-            "Content and size rules are not exercised by a dry run, which sends "
-            "paths without file bodies."
+            "Paths given without content were checked by path rules only: "
+            + ", ".join(untested[:10]) if untested else None
         ),
     }

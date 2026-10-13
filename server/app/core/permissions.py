@@ -151,6 +151,34 @@ def _user_can_read_repository_contents(db: Session, actor: Optional[User], repos
     ).first() is not None
 
 
+def readable_repository_ids(db: Session, actor: Optional[User]) -> Optional[set]:
+    """Ids of every repository whose contents ``actor`` may read; None means all of them.
+
+    The same rule as ``_user_can_read_repository_contents``, as a few set queries
+    instead of two per repository, so search and the activity log can filter a whole
+    server's worth of rows without asking about each repository in turn.
+    """
+    if not actor:
+        return set()
+    if _is_privileged_role(getattr(actor, "role", "developer")):
+        return None
+    ids = {row[0] for row in db.query(Repository.id).filter(Repository.owner_id == actor.id)}
+    ids |= {
+        row[0] for row in
+        db.query(Commit.repository_id).filter(Commit.author_id == actor.id).distinct()
+    }
+    # A non-issue permission row grants reading; a manage-level row grants it even
+    # when issue-scoped, because can_manage_repository counts it.
+    ids |= {
+        row[0] for row in db.query(UserPermission.repository_id).filter(
+            UserPermission.user_id == actor.id,
+            UserPermission.issue_id.is_(None)
+            | UserPermission.permission_level.in_(("team_lead", "admin")),
+        )
+    }
+    return ids
+
+
 def _require_repository_read_access(db: Session, actor: User, repository: Repository, action: str) -> None:
     """Enforce read-only access to repository contents/metadata."""
     # Issue-only users are not allowed to browse repo contents.

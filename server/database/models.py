@@ -498,10 +498,35 @@ class Activity(Base):
     activity_type = Column(String(50), nullable=False)  # commit, create_repo, etc.
     description = Column(Text)
     created_at = Column(DateTime, server_default=func.now())
-    
+    # What the record is about, so the audit view can link to it and filter by it:
+    # target_type is branch / pull_request / commit / user / webhook / ..., target_id
+    # its name or id within the repository.
+    target_type = Column(String(30), nullable=True)
+    target_id = Column(String(200), nullable=True)
+    commit_id = Column(String(40), nullable=True)
+    payload_json = Column(Text, nullable=True)
+    # How the actor was signed in when they did it: "session", "token:<name>" or
+    # "ssh_key:<title>". Which credential made a change is the first audit question
+    # after a leak.
+    credential = Column(String(120), nullable=True)
+    client_ip = Column(String(64), nullable=True)
+    # The repository's name when this happened: survives a rename, and a deletion,
+    # which detaches the row (repository_id NULL) instead of erasing the history.
+    repository_name = Column(String(200), nullable=True)
+    # The actor's username, kept for the same reason: a deleted user's actions still
+    # say who did them.
+    actor_username = Column(String(50), nullable=True)
+
     # Relationships
     user = relationship("User")
     repository = relationship("Repository")
+
+    __table_args__ = (
+        Index("ix_activities_created_at", "created_at"),
+        Index("ix_activities_repository_time", "repository_id", "created_at"),
+        Index("ix_activities_user_time", "user_id", "created_at"),
+        Index("ix_activities_type_time", "activity_type", "created_at"),
+    )
 
 class PendingCommit(Base):
     __tablename__ = "pending_commits"
@@ -995,6 +1020,10 @@ class WebhookDelivery(Base):
     id = Column(Integer, primary_key=True, index=True)
     webhook_id = Column(Integer, ForeignKey("webhooks.id"), nullable=False, index=True)
     event = Column(String(60), nullable=False)
+    # One id per delivery, shared by its retries and sent as X-Zanbeel-Delivery.
+    delivery_guid = Column(String(40), nullable=True, index=True)
+    # Set on a manual redelivery: the delivery_guid it repeats.
+    redelivery_of = Column(String(40), nullable=True)
     payload = Column(Text, nullable=False)
     status_code = Column(Integer, nullable=True)
     response_body = Column(Text, nullable=True)

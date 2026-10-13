@@ -461,10 +461,53 @@ class FoxNestAPI {
     })
   }
 
-  // Activity feed. Implemented server-side and populated for a long time, but no
-  // screen ever called it.
-  async getActivities(limit = 20) {
-    return this.request(`/activities?limit=${limit}`)
+  // --- Activity log -----------------------------------------------------------
+  // Filtered and paged on the server; everyone sees what they can read, plus their
+  // own account's events. A number is still accepted for the old getActivities(10).
+
+  _activityParams(filters = {}) {
+    const p = new URLSearchParams()
+    const map = {
+      limit: 'limit', offset: 'offset', user: 'user', repositoryId: 'repository_id', type: 'type',
+      since: 'since', until: 'until', q: 'q', targetType: 'target_type', targetId: 'target_id',
+      commit: 'commit',
+    }
+    for (const [key, name] of Object.entries(map)) {
+      const value = filters[key]
+      if (value !== null && value !== undefined && value !== '') p.append(name, String(value))
+    }
+    return p
+  }
+
+  async getActivities(filters = 20) {
+    const options = typeof filters === 'number' ? { limit: filters } : filters
+    return this.request(`/activities?${this._activityParams(options)}`)
+  }
+
+  async getRepositoryActivity(repoId, filters = {}) {
+    return this.request(`/repository/${repoId}/activity?${this._activityParams(filters)}`)
+  }
+
+  async getActivityTypes() {
+    return this.request('/activities/types')
+  }
+
+  // CSV of the filtered log (administrators). Returned as a Blob to save.
+  async downloadActivityCsv(filters = {}) {
+    const { limit: _limit, offset: _offset, ...rest } = filters
+    const token = getSessionToken()
+    const response = await fetch(`${this.baseURL}/activities/export?${this._activityParams(rest)}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}))
+      throw new Error(data?.detail || `HTTP ${response.status}`)
+    }
+    return {
+      blob: await response.blob(),
+      rows: Number(response.headers.get('X-Zanbeel-Rows') || 0),
+      truncated: response.headers.get('X-Zanbeel-Truncated') === '1',
+    }
   }
 
   // Merge conflict resolution, GitHub's way: the resolution is committed to the pull
@@ -1123,6 +1166,18 @@ class FoxNestAPI {
     return this.request(`/webhooks/${webhookId}/deliveries?limit=${limit}`)
   }
 
+  // Returns the new secret, once.
+  async rotateWebhookSecret(webhookId) {
+    return this.request(`/webhooks/${webhookId}/rotate-secret`, { method: 'POST' })
+  }
+
+  async redeliverWebhookDelivery(webhookId, deliveryRowId) {
+    return this.request(`/webhooks/${webhookId}/deliveries/${deliveryRowId}/redeliver`, {
+      method: 'POST',
+      timeout: 60000,
+    })
+  }
+
   // --- Commit status checks --------------------------------------------------
 
   async reportCommitStatus(repoId, commitId, payload) {
@@ -1132,13 +1187,19 @@ class FoxNestAPI {
     })
   }
 
-  async getCommitStatuses(repoId, commitId, { history = false } = {}) {
-    const suffix = history ? '?history=true' : ''
+  // `branch`: the branch the commit is headed for, so the required checks are that
+  // branch's (the repository-wide list plus its protection rules).
+  async getCommitStatuses(repoId, commitId, { history = false, branch = null } = {}) {
+    const params = new URLSearchParams()
+    if (history) params.set('history', 'true')
+    if (branch) params.set('branch', branch)
+    const suffix = params.toString() ? `?${params}` : ''
     return this.request(`/repository/${repoId}/commits/${commitId}/statuses${suffix}`)
   }
 
-  async getRequiredChecks(repoId) {
-    return this.request(`/repository/${repoId}/required-checks`)
+  async getRequiredChecks(repoId, branch = null) {
+    const suffix = branch ? `?branch=${encodeURIComponent(branch)}` : ''
+    return this.request(`/repository/${repoId}/required-checks${suffix}`)
   }
 
   // --- Server-side hooks (pre-receive push policy) ---------------------------
@@ -1160,10 +1221,12 @@ class FoxNestAPI {
     return this.request(`/server-hooks/${hookId}`, { method: 'DELETE' })
   }
 
-  async testServerHook(hookId, { message = '', paths = [] } = {}) {
+  // `files` ({path: text}) lets content rules be tried too; `paths` alone checks
+  // path rules only.
+  async testServerHook(hookId, { message = '', paths = [], files = {}, deleted = [], branch = null, newBranch = false } = {}) {
     return this.request(`/server-hooks/${hookId}/test`, {
       method: 'POST',
-      body: { message, paths },
+      body: { message, paths, files, deleted, branch, new_branch: newBranch },
     })
   }
 
@@ -1235,25 +1298,44 @@ class FoxNestAPI {
   }
 
   // --- Search ----------------------------------------------------------------
-  // Code search is scoped to one repository: a store-wide content scan would
-  // read gigabytes per query. Repository and commit search are global.
+  // Code search without a repository covers every repository you can read, from the
+  // server's index of each default branch. With one, it can take a branch and a
+  // regular expression.
 
-  async searchRepositories({ q = '', owner = null, archived = null, limit = 50 } = {}) {
+  async searchRepositories({ q = '', owner = null, archived = null, limit = 50, offset = 0 } = {}) {
     const p = new URLSearchParams()
     if (q) p.append('q', q)
     if (owner) p.append('owner', owner)
     if (archived !== null && archived !== undefined) p.append('archived', String(archived))
     p.append('limit', String(limit))
+    if (offset) p.append('offset', String(offset))
     return this.request(`/search/repositories?${p}`)
   }
 
-  async searchCommits({ q = '', repositoryId = null, author = null, limit = 50 } = {}) {
+  async searchCommits({ q = '', repositoryId = null, author = null, limit = 50, offset = 0 } = {}) {
     const p = new URLSearchParams()
     if (q) p.append('q', q)
     if (repositoryId) p.append('repository_id', repositoryId)
     if (author) p.append('author', author)
     p.append('limit', String(limit))
+    if (offset) p.append('offset', String(offset))
     return this.request(`/search/commits?${p}`)
+  }
+
+  async searchPaths({ q, repositoryId = null, branch = null, limit = 50 } = {}) {
+    const p = new URLSearchParams({ q })
+    if (repositoryId) p.append('repository_id', repositoryId)
+    if (branch) p.append('branch', branch)
+    p.append('limit', String(limit))
+    return this.request(`/search/paths?${p}`)
+  }
+
+  async getSearchIndexStatus() {
+    return this.request('/admin/search-index')
+  }
+
+  async rebuildSearchIndex() {
+    return this.request('/admin/search-index/rebuild', { method: 'POST' })
   }
 
   // --- Branch mutation -------------------------------------------------------
@@ -1332,8 +1414,9 @@ class FoxNestAPI {
     })
   }
 
-  async searchCode({ repositoryId, q, branch = null, path = null, regex = false, caseSensitive = false, limit = 200 } = {}) {
-    const p = new URLSearchParams({ repository_id: repositoryId, q })
+  async searchCode({ repositoryId = null, q, branch = null, path = null, regex = false, caseSensitive = false, limit = 200 } = {}) {
+    const p = new URLSearchParams({ q })
+    if (repositoryId) p.append('repository_id', repositoryId)
     if (branch) p.append('branch', branch)
     if (path) p.append('path', path)
     if (regex) p.append('regex', 'true')

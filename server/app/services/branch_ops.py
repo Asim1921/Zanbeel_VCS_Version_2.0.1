@@ -24,14 +24,16 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 import branch_policies
-from database.crud import ActivityCRUD, BranchCRUD, CommitCRUD, FileObjectCRUD
+from database.crud import (
+    ActivityCRUD, BranchCRUD, CommitCRUD, FileObjectCRUD, RepositoryCRUD, UserCRUD,
+)
 from app.services import webhooks as hook_service
 from database.models import Repository, User
 
 from app.services.branches import _get_default_branch, _normalize_branch_name
 from app.services.commit_graph import _find_merge_base, _get_commit_tree, _is_ancestor
 from app.services.merge import _merge_trees
-from app.services import merge_gate, refs
+from app.services import merge_gate, refs, server_hooks
 from app.services.signing import sign_commit
 
 
@@ -79,17 +81,16 @@ def set_policy(db: Session, repository: Repository, policy: Dict[str, Any]) -> D
 
     # Status check contexts are free-form names reported by CI, not branch names,
     # so they are kept verbatim apart from trimming and de-duplication. Order is
-    # preserved because it is how the UI lists them.
-    required_checks = policy.get("required_status_checks", defaults["required_status_checks"])
-    if not isinstance(required_checks, list):
-        raise BranchOpError("required_status_checks must be a list of check names")
-    seen, checks = set(), []
-    for name in required_checks:
-        text = str(name).strip()
-        if text and text not in seen:
-            seen.add(text)
-            checks.append(text)
-    cleaned["required_status_checks"] = checks
+    # preserved because it is how the UI lists them. An entry may also pin who is
+    # allowed to report it: {"context": "ci/build", "reporter": "jenkins"}.
+    from app.services import status_checks
+
+    try:
+        cleaned["required_status_checks"] = status_checks.validate_required(
+            policy.get("required_status_checks", defaults["required_status_checks"])
+        )
+    except status_checks.StatusError as exc:
+        raise BranchOpError(exc.message)
 
     repository.branch_policy_json = json.dumps(cleaned, sort_keys=True)
     db.commit()
@@ -145,6 +146,12 @@ def _check_expected_head(target, expected_head_commit_id: Optional[str]) -> None
 
 def _write(db: Session, repo_id: str, target, tree: Dict[str, bytes], author: str,
            message: str, parents: List[str], seed: str):
+    # Push rules see what this write puts on the branch: a merge or a file copy lands
+    # content as surely as a push does.
+    server_hooks.check_server_write(
+        db, RepositoryCRUD.get_repository(db, repo_id), target.name, target.head_commit_id,
+        tree, UserCRUD.get_user_by_username(db, author),
+    )
     # Ask the branch before writing. create_commit_from_file_hashes() commits its
     # own transaction and moves repository.head_commit_id, so a refusal arriving
     # after it leaves the refused commit stored and the repository head pointing
@@ -291,14 +298,7 @@ def publish_branch(db: Session, repository: Repository, actor: User, source_name
         f"({(previous or 'none')[:8]} -> {source.head_commit_id[:8]})", repository.id,
     )
 
-    hook_service.dispatch(db, hook_service.EVENT_PUSH, repository.id, {
-        "repository": {"id": repository.id, "name": repository.name},
-        "branch": target.name,
-        "before": previous,
-        "after": source.head_commit_id,
-        "pusher": actor.username,
-        "reason": "fast-forward publish",
-    })
+    # refs.update_reference above sends the push webhook.
     return {"status": "published", "source": source.name, "target": target.name,
             "previous_head": previous, "new_head": source.head_commit_id}
 

@@ -32,6 +32,8 @@ from app.services import credential_notifications
 from app.services import ssh_keys as key_service
 
 
+from app.services import audit
+
 router = APIRouter()
 
 
@@ -83,6 +85,9 @@ async def create_access_token_route(
         raise HTTPException(status_code=400, detail=str(exc))
 
     credential_notifications.token_created(db, current_user, token)
+    audit.record(db, current_user.id, "token_created",
+                 description=f"Created access token '{token.name}' ({', '.join(token_service.scopes_of(token))})",
+                 target_type="access_token", target_id=token.id)
     return {
         "success": True,
         "token": plaintext,
@@ -110,6 +115,8 @@ async def revoke_current_token(
                    "Password sessions expire on their own.",
         )
     token_service.revoke_token(db, token)
+    audit.record(db, current_user.id, "token_revoked", description=f"Revoked access token '{token.name}' (signed out)",
+                 target_type="access_token", target_id=token.id)
     return {"success": True, "access_token": token_service.serialize(token)}
 
 
@@ -141,6 +148,8 @@ async def revoke_access_token(
         assert_password_session(http_request, "Revoking another credential")
 
     token_service.revoke_token(db, token)
+    audit.record(db, current_user.id, "token_revoked", description=f"Revoked access token '{token.name}'",
+                 target_type="access_token", target_id=token.id)
     return {"success": True, "access_token": token_service.serialize(token)}
 
 
@@ -221,4 +230,7 @@ async def revoke_user_credentials(
     keys = key_service.delete_all_for_user(db, user.id)
     tokens = token_service.revoke_all_for_user(db, user.id)
     credential_notifications.credentials_revoked(db, user, current_user, tokens, keys)
+    audit.record(db, current_user.id, "credentials_revoked",
+                 description=f"Revoked every credential of {user.username}: {tokens} token(s), {keys} key(s)",
+                 target_type="user", target_id=user.username)
     return {"success": True, "revoked_tokens": tokens, "removed_ssh_keys": keys}

@@ -9,6 +9,19 @@ from database.models import User
 
 from app.core.dependencies import require_admin_user
 from app.schemas import CreatePermissionRequest
+from app.services import audit
+from app.services import notifications as notify
+
+
+def _granted(db, current_user, permission, verb):
+    audit.record(
+        db, current_user.id, "grant_permission", repository_id=permission.repository_id,
+        description=f"{verb} {permission.user.username} {permission.permission_level} access",
+        target_type="user", target_id=permission.user.username,
+        payload={"permission_level": permission.permission_level},
+    )
+    notify.access_changed(db, permission.user, permission.repository,
+                          permission.permission_level, current_user)
 
 
 router = APIRouter()
@@ -23,8 +36,9 @@ async def create_permission(request: CreatePermissionRequest, current_user: User
             request.username,
             request.repo_id,
             request.permission_level,
-            request.granted_by
+            current_user.username,
         )
+        _granted(db, current_user, permission, "Granted")
         
         return {
             "success": True,
@@ -49,8 +63,9 @@ async def update_permission(request: CreatePermissionRequest, current_user: User
             request.username,
             request.repo_id,
             request.permission_level,
-            request.granted_by
+            current_user.username,
         )
+        _granted(db, current_user, permission, "Granted")
         
         return {
             "success": True,
@@ -111,11 +126,18 @@ async def get_user_permissions(username: str, current_user: User = Depends(requi
 async def revoke_permission(username: str, repo_id: str, current_user: User = Depends(require_admin_user), db: Session = Depends(get_db)):
     """Revoke a user's permission to a repository"""
     try:
+        from database.crud import RepositoryCRUD, UserCRUD
         success = UserPermissionCRUD.revoke_permission(db, username, repo_id)
-        if success:
-            return {"success": True, "message": "Permission revoked successfully"}
-        else:
+        if not success:
             raise HTTPException(status_code=404, detail="Permission not found")
+        audit.record(db, current_user.id, "revoke_permission", repository_id=repo_id,
+                     description=f"Revoked {username}'s access", target_type="user", target_id=username)
+        repository = RepositoryCRUD.get_repository(db, repo_id)
+        if repository:
+            notify.access_changed(db, UserCRUD.get_user_by_username(db, username), repository, None, current_user)
+        return {"success": True, "message": "Permission revoked successfully"}
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:

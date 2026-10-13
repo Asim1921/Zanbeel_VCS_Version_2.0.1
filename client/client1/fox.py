@@ -573,6 +573,10 @@ class FoxClient:
             if "application/json" in content_type:
                 data = response.json()
                 detail = data.get("detail")
+                if isinstance(detail, dict):
+                    message = str(detail.get("message") or detail.get("detail") or detail.get("code") or "")
+                    extra = [str(b) for b in detail.get("blockers") or [] if str(b) not in message]
+                    detail = "; ".join([m for m in [message] if m] + extra) or None
                 if isinstance(detail, list):
                     parts = []
                     for item in detail:
@@ -1261,6 +1265,450 @@ class FoxClient:
             print(f"Scopes: {', '.join(data.get('scopes') or [])}. The sign-in renews itself "
                   f"with this key; it lasts until {(data.get('expires_at') or '')[:16].replace('T', ' ')} UTC "
                   "between renewals.")
+        return True
+
+    # ------------------------------------------------------------------------------
+    # Integrations: CI status checks and webhooks
+    #
+    # A CI job reports with a token that has the repo:status scope -- it can say whether
+    # a commit passed, and cannot push:
+    #   FOXNEST_TOKEN=fxp_... FOXNEST_SERVER=http://host:33333 \
+    #     fox status-check report ci/build success --url https://ci.example/run/42
+    # In a working copy the repository and commit come from .fox; elsewhere pass
+    # --repo-id (or set FOXNEST_REPO_ID) and --commit.
+    # ------------------------------------------------------------------------------
+
+    STATUS_STATES = ("pending", "success", "failure", "error")
+
+    def _integration_repo_id(self, repo_id=None):
+        if repo_id:
+            return repo_id
+        if self.is_initialized():
+            config = self.load_config() or {}
+            if config.get("repo_id"):
+                return config["repo_id"]
+        return (os.environ.get("FOXNEST_REPO_ID") or "").strip() or None
+
+    def _repo_url(self, repo_id, suffix=""):
+        return f"{self._resolve_server_url()}/api/repository/{repo_id}{suffix}"
+
+    def status_check_report(self, context, state, commit=None, url=None, description=None,
+                            repo_id=None):
+        """Report a CI result against a commit."""
+        repo_id = self._integration_repo_id(repo_id)
+        if not repo_id:
+            print("No repository: run this in a working copy, or pass --repo-id (or set FOXNEST_REPO_ID).")
+            return False
+        commit = commit or (self.get_head_commit_id() if self.is_initialized() else None)
+        if not commit:
+            print("No commit to report on: pass --commit <id>.")
+            return False
+        body = {"context": context, "state": state}
+        if url:
+            body["target_url"] = url
+        if description:
+            body["description"] = description
+        try:
+            response = self._authed_post(self._repo_url(repo_id, f"/commits/{commit}/statuses"), json=body)
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Could not report the status: {self._response_error_message(response)}")
+            return False
+        combined = response.json().get("combined") or {}
+        required = combined.get("required") or []
+        print(f"Reported {context}: {state} on {commit[:12]}.")
+        if required:
+            waiting = (combined.get("missing_required") or []) + (combined.get("pending_required") or [])
+            failing = combined.get("failing_required") or []
+            if combined.get("required_satisfied"):
+                print(f"All {len(required)} required check(s) have passed.")
+            else:
+                if failing:
+                    print("Failing required: " + ", ".join(failing))
+                if waiting:
+                    print("Still waiting for: " + ", ".join(waiting))
+        return True
+
+    def status_check_show(self, commit=None, branch=None, repo_id=None, as_json=False):
+        """Where each check on a commit stands, and whether the required ones pass."""
+        repo_id = self._integration_repo_id(repo_id)
+        if not repo_id:
+            print("No repository: run this in a working copy, or pass --repo-id (or set FOXNEST_REPO_ID).")
+            return False
+        commit = commit or (self.get_head_commit_id() if self.is_initialized() else None)
+        if not commit:
+            print("No commit given: pass a commit id.")
+            return False
+        params = {"branch": branch} if branch else None
+        try:
+            response = self._authed_get(self._repo_url(repo_id, f"/commits/{commit}/statuses"), params=params)
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Could not read statuses: {self._response_error_message(response)}")
+            return False
+        combined = response.json().get("combined") or {}
+        if as_json:
+            print(json.dumps(combined, indent=2))
+            return True
+
+        print(f"Commit {commit[:12]}: {combined.get('state')}"
+              + (f" (checks required for merging into {branch})" if branch else ""))
+        required = combined.get("required_checks") or []
+        if required:
+            print("")
+            print(f"{'REQUIRED CHECK':<28} {'STATE':<10} {'COUNTED FROM':<16} DETAIL")
+            for entry in required:
+                status = entry.get("status") or {}
+                who = entry.get("reporter") or "any writer"
+                detail = status.get("description") or status.get("target_url") or ""
+                if entry.get("ignored_report"):
+                    ignored = entry["ignored_report"]
+                    detail = (f"ignored {ignored.get('state')} from {ignored.get('reported_by')}; "
+                              f"only {entry['reporter']} counts")
+                print(f"{entry['context'][:27]:<28} {(entry.get('state') or 'missing'):<10} "
+                      f"{who[:15]:<16} {detail}")
+            print("")
+            print("Required checks pass." if combined.get("required_satisfied")
+                  else "Required checks do not pass yet; a merge would be refused.")
+        others = [s for s in combined.get("statuses") or []
+                  if s.get("context") not in {e["context"] for e in required}]
+        if others:
+            print("")
+            print("Other checks:")
+            for status in others:
+                print(f"  {status['context']:<26} {status['state']:<10} by {status.get('reported_by')}")
+        if not required and not others:
+            print("No checks have reported on this commit.")
+        return True
+
+    def _webhook_scope(self, global_hook=False, repo_id=None):
+        if global_hook:
+            return None, True
+        repo_id = self._integration_repo_id(repo_id)
+        if not repo_id:
+            print("No repository: run this in a working copy, pass --repo-id, or use --global.")
+            return None, False
+        return repo_id, True
+
+    def webhook_list(self, global_hook=False, repo_id=None):
+        repo_id, ok = self._webhook_scope(global_hook, repo_id)
+        if not ok:
+            return False
+        url = f"{self._resolve_server_url()}/api/webhooks"
+        params = {"repository_id": repo_id} if repo_id else None
+        response = self._authed_get(url, params=params)
+        if response.status_code != 200:
+            print(f"Could not list webhooks: {self._response_error_message(response)}")
+            return False
+        hooks = response.json().get("webhooks", [])
+        if not hooks:
+            print("No webhooks. Add one with: fox webhook add <url>")
+            return True
+        print(f"{'ID':<5} {'ACTIVE':<7} {'SIGNED':<7} {'EVENTS':<28} URL")
+        for hook in hooks:
+            print(f"{hook['id']:<5} {('yes' if hook['active'] else 'no'):<7} "
+                  f"{('yes' if hook.get('signed') else 'NO'):<7} "
+                  f"{','.join(hook.get('events') or [])[:27]:<28} {hook['url']}")
+        return True
+
+    def webhook_add(self, url, events=None, secret=None, global_hook=False, repo_id=None):
+        repo_id, ok = self._webhook_scope(global_hook, repo_id)
+        if not ok:
+            return False
+        body = {"url": url, "repository_id": repo_id}
+        if events:
+            body["events"] = list(events)
+        if secret:
+            body["secret"] = secret
+        response = self._authed_post(f"{self._resolve_server_url()}/api/webhooks", json=body)
+        if response.status_code != 200:
+            print(f"Could not add the webhook: {self._response_error_message(response)}")
+            return False
+        data = response.json()
+        hook = data.get("webhook") or {}
+        print(f"Webhook {hook.get('id')} added for {hook.get('url')}.")
+        if data.get("secret_generated"):
+            print("")
+            print(f"  Signing secret: {data.get('secret')}")
+            print("")
+            print("  Configure the receiver with it now; it is not shown again. Each delivery")
+            print("  carries X-Zanbeel-Signature-256: sha256=<HMAC-SHA256 of the body>.")
+        if data.get("warning"):
+            print(f"Note: {data['warning']}")
+        return True
+
+    def webhook_remove(self, hook_id):
+        response = self._authed_delete(f"{self._resolve_server_url()}/api/webhooks/{hook_id}")
+        if response.status_code != 200:
+            print(f"Could not remove webhook {hook_id}: {self._response_error_message(response)}")
+            return False
+        print(f"Webhook {hook_id} removed, with its delivery history.")
+        return True
+
+    def _print_delivery(self, delivery):
+        if not delivery:
+            print("No delivery was recorded.")
+            return
+        outcome = "delivered" if delivery.get("success") else "failed"
+        status = delivery.get("status_code")
+        print(f"{outcome}: {status if status is not None else 'no response'}"
+              f" in {delivery.get('duration_ms')}ms (delivery {(delivery.get('delivery_id') or '')[:12]})")
+        if delivery.get("error"):
+            print(f"  {delivery['error']}")
+
+    def webhook_ping(self, hook_id):
+        response = self._authed_post(f"{self._resolve_server_url()}/api/webhooks/{hook_id}/ping")
+        if response.status_code != 200:
+            print(f"Could not ping webhook {hook_id}: {self._response_error_message(response)}")
+            return False
+        delivery = response.json().get("delivery")
+        self._print_delivery(delivery)
+        return bool(delivery and delivery.get("success"))
+
+    def webhook_deliveries(self, hook_id, limit=20):
+        response = self._authed_get(f"{self._resolve_server_url()}/api/webhooks/{hook_id}/deliveries",
+                                    params={"limit": limit})
+        if response.status_code != 200:
+            print(f"Could not read deliveries: {self._response_error_message(response)}")
+            return False
+        rows = response.json().get("deliveries", [])
+        if not rows:
+            print("No deliveries yet.")
+            return True
+        print(f"{'ROW':<6} {'WHEN':<20} {'EVENT':<22} {'TRY':<4} {'RESULT':<14} DELIVERY")
+        for row in rows:
+            result = (str(row.get("status_code")) if row.get("status_code") is not None else "-") + \
+                     (" ok" if row.get("success") else " failed")
+            print(f"{row['id']:<6} {(row.get('created_at') or '')[:19].replace('T', ' '):<20} "
+                  f"{row['event'][:21]:<22} {row.get('attempt', 1):<4} {result:<14} "
+                  f"{(row.get('delivery_id') or '')[:12]}"
+                  + (" (redelivery)" if row.get("redelivery_of") else ""))
+        print("Send one again with: fox webhook redeliver <hook-id> <row>")
+        return True
+
+    def webhook_redeliver(self, hook_id, row_id):
+        response = self._authed_post(
+            f"{self._resolve_server_url()}/api/webhooks/{hook_id}/deliveries/{row_id}/redeliver")
+        if response.status_code != 200:
+            print(f"Could not redeliver: {self._response_error_message(response)}")
+            return False
+        delivery = response.json().get("delivery")
+        self._print_delivery(delivery)
+        return bool(delivery and delivery.get("success"))
+
+    def webhook_rotate_secret(self, hook_id):
+        response = self._authed_post(f"{self._resolve_server_url()}/api/webhooks/{hook_id}/rotate-secret")
+        if response.status_code != 200:
+            print(f"Could not rotate the secret: {self._response_error_message(response)}")
+            return False
+        print(f"New signing secret for webhook {hook_id}: {response.json().get('secret')}")
+        print("Deliveries are signed with it from now on; update the receiver now.")
+        return True
+
+    # ------------------------------------------------------------------------------
+    # Discovery: search, the activity log, notifications
+    #
+    # In a working copy, `fox search code|files` and `fox activity` look at this
+    # repository; --all looks at everything you can read. Searches exit 1 when nothing
+    # is found, like grep, so a script can test for a match.
+    # ------------------------------------------------------------------------------
+
+    SEARCH_KINDS = ("repos", "commits", "code", "files")
+
+    @staticmethod
+    def _local_time(iso):
+        """A server timestamp (naive UTC) as local time, to the minute."""
+        if not iso:
+            return ""
+        try:
+            from datetime import timezone
+            parsed = datetime.fromisoformat(str(iso).replace("Z", ""))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone().strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return str(iso)[:16].replace("T", " ")
+
+    def _discovery_scope(self, repo_id=None, everywhere=False):
+        if everywhere:
+            return None
+        return self._integration_repo_id(repo_id)
+
+    def search(self, kind, query, repo_id=None, everywhere=False, branch=None, path=None,
+               regex=False, case_sensitive=False, author=None, limit=None, as_json=False):
+        """Search repositories, commit messages, file contents or file paths."""
+        base = f"{self._resolve_server_url()}/api/search"
+        params = {}
+        if kind == "repos":
+            url, params = f"{base}/repositories", {"q": query, "owner": author}
+        elif kind == "commits":
+            url = f"{base}/commits"
+            params = {"q": query, "author": author, "repository_id": self._discovery_scope(repo_id, everywhere)}
+        elif kind == "code":
+            url = f"{base}/code"
+            params = {"q": query, "repository_id": self._discovery_scope(repo_id, everywhere),
+                      "branch": branch, "path": path,
+                      "regex": "true" if regex else None, "case_sensitive": "true" if case_sensitive else None}
+        else:
+            url = f"{base}/paths"
+            params = {"q": query, "repository_id": self._discovery_scope(repo_id, everywhere), "branch": branch}
+        if limit:
+            params["limit"] = limit
+        params = {k: v for k, v in params.items() if v not in (None, "")}
+        try:
+            response = self._authed_get(url, params=params, timeout=60)
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Search failed: {self._response_error_message(response)}")
+            return False
+        data = response.json()
+        if as_json:
+            print(json.dumps(data, indent=2))
+            return True
+
+        if kind == "repos":
+            rows = data.get("repositories") or []
+            for repo in rows:
+                archived = " (archived)" if repo.get("is_archived") else ""
+                print(f"{repo['name']:<30} {repo.get('owner') or '':<14} {repo['id']}  "
+                      f"{(repo.get('description') or '')[:60]}{archived}")
+            total = data.get("total", len(rows))
+        elif kind == "commits":
+            rows = data.get("commits") or []
+            for commit in rows:
+                subject = (commit.get("message") or "").splitlines()[0] if commit.get("message") else ""
+                print(f"{commit['id'][:12]}  {commit.get('repository_name') or '':<20} "
+                      f"{commit.get('author') or '':<12} {self._local_time(commit.get('created_at'))}  {subject[:70]}")
+            total = data.get("total", len(rows))
+        elif kind == "code":
+            rows = data.get("results") or []
+            prefix_repo = data.get("repository_id") is None
+            for result in rows:
+                where = f"{result.get('repository_name')}:" if prefix_repo else ""
+                for match in result.get("matches") or []:
+                    print(f"{where}{result['path']}:{match['line']}: {match['text'].strip()[:200]}")
+            total = data.get("total_matches", 0)
+            notes = []
+            if data.get("timed_out"):
+                notes.append("stopped at the time limit; narrow the search")
+            elif data.get("truncated"):
+                notes.append("more matches than shown")
+            if data.get("repositories_not_indexed"):
+                notes.append("still indexing: " + ", ".join(data["repositories_not_indexed"][:5]))
+            if notes:
+                print(f"({'; '.join(notes)})")
+        else:
+            rows = data.get("files") or []
+            for item in rows:
+                where = f"{item.get('repository_name')}:" if not params.get("repository_id") else ""
+                print(f"{where}{item['path']}")
+            total = data.get("total", len(rows))
+
+        if not rows:
+            print("Nothing found.")
+            return False
+        if kind != "code" and data.get("truncated"):
+            print(f"({total} in all; showing {len(rows)})")
+        return True
+
+    def activity(self, repo_id=None, everywhere=False, user=None, kind=None, since=None, until=None,
+                 grep=None, limit=30, as_json=False):
+        """Recent activity: this repository's in a working copy, or everything you can see."""
+        scope = self._discovery_scope(repo_id, everywhere)
+        url = (self._repo_url(scope, "/activity") if scope
+               else f"{self._resolve_server_url()}/api/activities")
+        params = {k: v for k, v in {"user": user, "type": kind, "since": since, "until": until,
+                                    "q": grep, "limit": limit}.items() if v not in (None, "")}
+        try:
+            response = self._authed_get(url, params=params, timeout=60)
+        except requests.exceptions.RequestException as e:
+            print(f"Network error: {e}")
+            return False
+        if response.status_code != 200:
+            print(f"Could not read the activity log: {self._response_error_message(response)}")
+            return False
+        data = response.json()
+        if as_json:
+            print(json.dumps(data, indent=2))
+            return True
+        rows = data.get("activities") or []
+        if not rows:
+            print("No activity matches.")
+            return True
+        for row in rows:
+            credential = f"  [{row['credential']}]" if row.get("credential") and row["credential"] != "session" else ""
+            repo = f"{row.get('repository')}: " if row.get("repository") and not scope else ""
+            print(f"{self._local_time(row.get('created_at'))}  {row.get('user') or '?':<12} "
+                  f"{repo}{row.get('description') or row.get('label')}{credential}")
+        meta = data.get("pagination") or {}
+        if meta.get("has_more"):
+            print(f"({meta.get('total')} in all; showing {len(rows)}. Narrow with --user, --type, --since or --grep.)")
+        return True
+
+    @staticmethod
+    def _notification_target(target):
+        if not isinstance(target, dict):
+            return ""
+        kind = target.get("kind")
+        if kind == "pull_request":
+            return f"pull request #{target.get('pr_id')}"
+        if kind == "commit":
+            return f"commit {str(target.get('commit_id') or '')[:12]}"
+        if kind == "issue":
+            return f"issue #{target.get('issue_number')}"
+        if kind == "review_queue":
+            return "review queue"
+        if kind == "settings":
+            return "settings"
+        return kind or ""
+
+    def notifications_list(self, unread=False, limit=30, as_json=False):
+        """What the server has told you, newest first."""
+        params = {"limit": limit, "unread_only": "true" if unread else None}
+        response = self._authed_get(f"{self._resolve_server_url()}/api/notifications",
+                                    params={k: v for k, v in params.items() if v is not None})
+        if response.status_code != 200:
+            print(f"Could not read notifications: {self._response_error_message(response)}")
+            return False
+        data = response.json()
+        if as_json:
+            print(json.dumps(data, indent=2))
+            return True
+        rows = data.get("notifications") or []
+        if not rows:
+            print("Nothing unread." if unread else "No notifications.")
+            return True
+        for row in rows:
+            mark = "*" if not row.get("is_read") else " "
+            payload = row.get("payload") or {}
+            where = self._notification_target(payload.get("target"))
+            repo = payload.get("repository_name")
+            about = " · ".join(x for x in (repo, where) if x)
+            print(f"{mark} {row['id']:<6} {self._local_time(row.get('created_at'))}  {row.get('title') or row.get('type')}"
+                  + (f"  ({about})" if about else ""))
+        print(f"{data.get('unread', 0)} unread. Mark read with: fox notifications read <id>... | --all")
+        return True
+
+    def notifications_read(self, ids=None, everything=False):
+        base = f"{self._resolve_server_url()}/api/notifications"
+        if everything:
+            response = self._authed_post(f"{base}/mark-all-read")
+        else:
+            if not ids:
+                print("Give notification ids, or --all.")
+                return False
+            response = self._authed_post(f"{base}/mark-read", json={"ids": [int(i) for i in ids]})
+        if response.status_code != 200:
+            print(f"Could not mark notifications read: {self._response_error_message(response)}")
+            return False
+        data = response.json()
+        print(f"Marked {data.get('updated', 0)} read; {data.get('unread', 0)} unread.")
         return True
 
     def save_global_config(self, config):
@@ -3956,7 +4404,7 @@ class FoxClient:
             print(f"Could not {action}: HTTP {response.status_code}" + (f" [{code}]" if code else ""))
         for blocker in info.get("blockers", []) or []:
             print(f"  - {blocker}")
-        for key in ("unresolved", "paths"):
+        for key in ("reasons", "unresolved", "paths"):
             for path in info.get(key, []) or []:
                 print(f"  - {path}")
 
@@ -5306,6 +5754,8 @@ class FoxClient:
                         print(f"\nError: Bad request (status code 400)")
                         print(f"Response: {response.text if hasattr(response, 'text') else 'No details'}")
                         return False
+                elif response.status_code == 422 and self._print_push_rule_refusal(response, commit["id"]):
+                    return False
                 else:
                     print(f"\nError: HTTP {response.status_code}")
                     try:
@@ -5336,6 +5786,21 @@ class FoxClient:
                 pass
         return True
     
+    @staticmethod
+    def _print_push_rule_refusal(response, commit_id):
+        """Explain a push rule's refusal. False when the 422 is something else."""
+        try:
+            detail = response.json().get("detail")
+        except Exception:
+            return False
+        if not isinstance(detail, dict) or detail.get("code") != "PRE_RECEIVE_REJECTED":
+            return False
+        print(f"\nRefused by the server's push rule '{detail.get('hook')}' (commit {commit_id[:12]}):")
+        for reason in detail.get("reasons") or []:
+            print(f"  - {reason}")
+        print("This commit was not pushed, and neither were any after it: each commit is checked.")
+        return True
+
     def pull(self):
         """Pull commits from remote repository"""
         if not self.check_repository("pull"):
@@ -6219,6 +6684,11 @@ def print_extended_help():
     print("  whoami                  Who you are signed in as, with which credential and scopes")
     print("  token create|list|revoke|use   Personal access tokens (CI: set FOXNEST_TOKEN)")
     print("  ssh add|list|remove|login      SSH keys for password-free sign-in")
+    print("  status-check report|show       Report a CI result on a commit; see if required checks pass")
+    print("  webhook list|add|ping|...      Webhooks: signed event deliveries to other systems")
+    print("  search repos|commits|code|files Search what you can read (code: --regex, --all)")
+    print("  activity                       Who did what: this repository, or --all")
+    print("  notifications [read ID|--all]  What the server has told you")
     print("  config                  Show configuration")
     print("  gc                      Optimize repository (garbage collection)")
     print("  docs [path]             Generate documentation locally")
@@ -6232,6 +6702,11 @@ def print_extended_help():
     print("  fox login --ssh                # from now on, sign in with the key")
     print("  fox token create ci --scope repo:read --expires-in-days 30")
     print("  FOXNEST_TOKEN=fxp_... fox pull # on a build agent: nothing written to disk")
+    print("  fox status-check report ci/build success --url https://ci.example/run/42")
+    print("  fox webhook add https://ci.example/zanbeel --event push --event pull_request.updated")
+    print("  fox search code parse_config --all")
+    print("  fox search commits 'fix login'")
+    print("  fox activity --type push_commit --since 2026-10-01")
     print("  fox set username alice")
     print("  fox init --username alice --repo-name myproject")
     print("  fox set origin 192.168.15.207:502")
@@ -6885,6 +7360,84 @@ def main():
     ssh_sub.add_parser("list", help="List your registered keys")
     ssh_remove = ssh_sub.add_parser("remove", help="Remove a key, ending every sign-in made with it")
     ssh_remove.add_argument("key_id", type=int, help="Key id (see: fox ssh list)")
+    status_check_parser = subparsers.add_parser(
+        "status-check", help="CI status checks: report a result, or see where a commit stands")
+    sc_sub = status_check_parser.add_subparsers(dest="status_check_command", help="Status check commands")
+    sc_report = sc_sub.add_parser("report", help="Report a CI result against a commit")
+    sc_report.add_argument("context", help="The check's name, e.g. ci/build")
+    sc_report.add_argument("state", choices=FoxClient.STATUS_STATES, help="pending, success, failure or error")
+    sc_report.add_argument("--commit", help="Commit id (default: the checked-out commit)")
+    sc_report.add_argument("--url", help="Link to the CI run (http or https)")
+    sc_report.add_argument("--description", help="One line shown next to the result")
+    sc_report.add_argument("--repo-id", dest="sc_repo_id", help="Repository id (default: .fox or FOXNEST_REPO_ID)")
+    sc_show = sc_sub.add_parser("show", help="Checks on a commit and whether the required ones pass")
+    sc_show.add_argument("commit", nargs="?", help="Commit id (default: the checked-out commit)")
+    sc_show.add_argument("--branch", help="Show the checks required for merging into this branch")
+    sc_show.add_argument("--repo-id", dest="sc_repo_id", help="Repository id")
+    sc_show.add_argument("--json", dest="sc_json", action="store_true", help="Print raw JSON")
+
+    webhook_parser = subparsers.add_parser("webhook", help="Webhooks: tell other systems when things happen")
+    wh_sub = webhook_parser.add_subparsers(dest="webhook_command", help="Webhook commands")
+    for name, text_help in (("list", "List this repository's webhooks"),):
+        wh_list = wh_sub.add_parser(name, help=text_help)
+        wh_list.add_argument("--global", dest="wh_global", action="store_true", help="Server-wide webhooks (admins)")
+        wh_list.add_argument("--repo-id", dest="wh_repo_id", help="Repository id")
+    wh_add = wh_sub.add_parser("add", help="Add a webhook; prints its signing secret once")
+    wh_add.add_argument("url", help="Where to send events (http or https)")
+    wh_add.add_argument("--event", dest="wh_events", action="append", metavar="EVENT",
+                        help="Event to send (repeatable; default: all), e.g. push, pull_request.merged")
+    wh_add.add_argument("--secret", dest="wh_secret", help="Signing secret (default: one is generated)")
+    wh_add.add_argument("--global", dest="wh_global", action="store_true", help="Server-wide webhook (admins)")
+    wh_add.add_argument("--repo-id", dest="wh_repo_id", help="Repository id")
+    for name, text_help in (("remove", "Remove a webhook"), ("ping", "Send a test delivery and show the answer"),
+                            ("rotate-secret", "Replace the signing secret; prints the new one")):
+        cmd = wh_sub.add_parser(name, help=text_help)
+        cmd.add_argument("hook_id", type=int, help="Webhook id (see: fox webhook list)")
+    wh_deliveries = wh_sub.add_parser("deliveries", help="Recent delivery attempts")
+    wh_deliveries.add_argument("hook_id", type=int, help="Webhook id")
+    wh_deliveries.add_argument("--limit", type=int, default=20, help="How many (default 20)")
+    wh_redeliver = wh_sub.add_parser("redeliver", help="Send a logged delivery again")
+    wh_redeliver.add_argument("hook_id", type=int, help="Webhook id")
+    wh_redeliver.add_argument("row_id", type=int, help="Delivery row (see: fox webhook deliveries)")
+
+    search_parser = subparsers.add_parser(
+        "search", help="Search repositories, commits, code or file paths you can read")
+    search_parser.add_argument("search_kind", choices=FoxClient.SEARCH_KINDS,
+                               help="repos, commits, code (file contents) or files (paths)")
+    search_parser.add_argument("query", nargs="?", default="", help="What to look for")
+    search_parser.add_argument("--repo-id", dest="search_repo_id", help="Only this repository")
+    search_parser.add_argument("--all", dest="search_all", action="store_true",
+                               help="Every repository you can read, even in a working copy")
+    search_parser.add_argument("--branch", dest="search_branch", help="code/files: this branch (default: default)")
+    search_parser.add_argument("--path", dest="search_path", help="code: only paths containing this")
+    search_parser.add_argument("--regex", dest="search_regex", action="store_true",
+                               help="code: the query is a regular expression (one repository)")
+    search_parser.add_argument("--case-sensitive", dest="search_case", action="store_true", help="code: match case")
+    search_parser.add_argument("--author", dest="search_author", help="commits: by this user; repos: owned by")
+    search_parser.add_argument("--limit", dest="search_limit", type=int, help="At most this many results")
+    search_parser.add_argument("--json", dest="search_json", action="store_true", help="Print raw JSON")
+
+    activity_parser = subparsers.add_parser("activity", help="Who did what: this repository, or --all")
+    activity_parser.add_argument("--repo-id", dest="activity_repo_id", help="Only this repository")
+    activity_parser.add_argument("--all", dest="activity_all", action="store_true",
+                                 help="Everything you can see, even in a working copy")
+    activity_parser.add_argument("--user", dest="activity_user", help="Only this user")
+    activity_parser.add_argument("--type", dest="activity_type", help="Only this type (comma-separated for several)")
+    activity_parser.add_argument("--since", dest="activity_since", help="From this date (YYYY-MM-DD)")
+    activity_parser.add_argument("--until", dest="activity_until", help="Up to this date (YYYY-MM-DD)")
+    activity_parser.add_argument("--grep", dest="activity_grep", help="Words in the description")
+    activity_parser.add_argument("--limit", dest="activity_limit", type=int, default=30, help="How many (default 30)")
+    activity_parser.add_argument("--json", dest="activity_json", action="store_true", help="Print raw JSON")
+
+    notifications_parser = subparsers.add_parser("notifications", help="What the server has told you")
+    notifications_parser.add_argument("--unread", dest="notif_unread", action="store_true", help="Only unread")
+    notifications_parser.add_argument("--limit", dest="notif_limit", type=int, default=30, help="How many (default 30)")
+    notifications_parser.add_argument("--json", dest="notif_json", action="store_true", help="Print raw JSON")
+    notif_sub = notifications_parser.add_subparsers(dest="notifications_command")
+    notif_read = notif_sub.add_parser("read", help="Mark notifications read")
+    notif_read.add_argument("ids", nargs="*", help="Notification ids (see: fox notifications)")
+    notif_read.add_argument("--all", dest="notif_all", action="store_true", help="Every unread notification")
+
     ssh_login = ssh_sub.add_parser("login", help="Sign in with a key (same as: fox login --ssh)")
     ssh_login.add_argument("--key", dest="key_path", metavar="PATH", help="Private key to sign with")
     ssh_login.add_argument("--username", help="Account to sign in to")
@@ -6957,12 +7510,14 @@ def main():
             fox.commit(args.message)
             
     elif args.command == "push":
-        fox.push(
+        # Exit non-zero on failure, so a script or CI job notices a refused push.
+        if not fox.push(
             archive=getattr(args, "archive", False),
             refspec=getattr(args, "refspec", None),
             push_from_branch=getattr(args, "push_from_branch", None),
             push_to_branch=getattr(args, "push_to_branch", None),
-        )
+        ):
+            sys.exit(1)
         
     elif args.command == "pull":
         fox.pull()
@@ -7294,6 +7849,69 @@ def main():
         else:
             print("Usage: fox token create|list|revoke|use")
             ok = False
+        if not ok:
+            sys.exit(1)
+
+    elif args.command == "status-check":
+        sub = getattr(args, "status_check_command", None)
+        if sub == "report":
+            ok = fox.status_check_report(args.context, args.state, commit=args.commit, url=args.url,
+                                         description=args.description, repo_id=args.sc_repo_id)
+        elif sub == "show":
+            ok = fox.status_check_show(commit=args.commit, branch=args.branch,
+                                       repo_id=args.sc_repo_id, as_json=args.sc_json)
+        else:
+            print("Usage: fox status-check report|show")
+            ok = False
+        if not ok:
+            sys.exit(1)
+
+    elif args.command == "webhook":
+        sub = getattr(args, "webhook_command", None)
+        if sub == "list":
+            ok = fox.webhook_list(global_hook=args.wh_global, repo_id=args.wh_repo_id)
+        elif sub == "add":
+            ok = fox.webhook_add(args.url, events=args.wh_events, secret=args.wh_secret,
+                                 global_hook=args.wh_global, repo_id=args.wh_repo_id)
+        elif sub == "remove":
+            ok = fox.webhook_remove(args.hook_id)
+        elif sub == "ping":
+            ok = fox.webhook_ping(args.hook_id)
+        elif sub == "rotate-secret":
+            ok = fox.webhook_rotate_secret(args.hook_id)
+        elif sub == "deliveries":
+            ok = fox.webhook_deliveries(args.hook_id, limit=args.limit)
+        elif sub == "redeliver":
+            ok = fox.webhook_redeliver(args.hook_id, args.row_id)
+        else:
+            print("Usage: fox webhook list|add|remove|ping|deliveries|redeliver|rotate-secret")
+            ok = False
+        if not ok:
+            sys.exit(1)
+
+    elif args.command == "search":
+        if not fox.search(
+            args.search_kind, args.query, repo_id=args.search_repo_id, everywhere=args.search_all,
+            branch=args.search_branch, path=args.search_path, regex=args.search_regex,
+            case_sensitive=args.search_case, author=args.search_author, limit=args.search_limit,
+            as_json=args.search_json,
+        ):
+            sys.exit(1)
+
+    elif args.command == "activity":
+        if not fox.activity(
+            repo_id=args.activity_repo_id, everywhere=args.activity_all, user=args.activity_user,
+            kind=args.activity_type, since=args.activity_since, until=args.activity_until,
+            grep=args.activity_grep, limit=args.activity_limit, as_json=args.activity_json,
+        ):
+            sys.exit(1)
+
+    elif args.command == "notifications":
+        if getattr(args, "notifications_command", None) == "read":
+            ok = fox.notifications_read(args.ids, everything=args.notif_all)
+        else:
+            ok = fox.notifications_list(unread=args.notif_unread, limit=args.notif_limit,
+                                        as_json=args.notif_json)
         if not ok:
             sys.exit(1)
 

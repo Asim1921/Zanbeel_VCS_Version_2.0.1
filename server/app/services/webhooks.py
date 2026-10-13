@@ -4,28 +4,38 @@ Why: without this, an external system could only learn that a push, merge or
 release happened by polling. Everything that integrates with a VCS — CI, chat,
 deployment, audit — needs to be told.
 
-Two decisions shape this module:
+Decisions that shape this module:
 
 * **Delivery never blocks the request that triggered it.** A webhook points at
   a third-party URL that may be slow, wedged or gone. If a push waited on it,
-  one broken integration would take pushing down for everyone. Dispatch happens
-  on a worker thread and the caller returns immediately.
+  one broken integration would take pushing down for everyone. Dispatch hands
+  the work to a small, fixed pool of worker threads and returns at once; a burst
+  of events queues instead of starting one thread per delivery.
 
-* **Every attempt is logged, successful or not.** "Did the integration actually
-  receive the push?" is the first question asked when a pipeline does not run,
-  and without a delivery record the answer is unknowable.
+* **Every attempt is logged, successful or not**, under the delivery's id, so the
+  log shows one delivery and its retries rather than unrelated rows. "Did the
+  integration actually receive the push?" is the first question asked when a
+  pipeline does not run. A failed delivery can be sent again from the log.
 
-Payloads are signed with HMAC-SHA256 over the exact bytes sent, so a receiver
-can verify the request really came from this server rather than from anyone who
-learned the URL.
+* **Every delivery is signed.** Webhooks get a secret when they are created, and
+  the HMAC-SHA256 signature covers the exact bytes sent. The body carries its
+  own ``delivery_id`` and ``delivered_at``, so a receiver can refuse a replay
+  without trusting anything outside the signature.
+
+* **Requests go only where the server may send them** (see outbound.py): no
+  loopback, LAN or metadata addresses unless an administrator allows them, no
+  redirects, and a capped reply.
 """
 
 import hashlib
 import hmac
 import json
-import threading
+import os
+import secrets
 import time
-from datetime import datetime
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -34,14 +44,18 @@ from sqlalchemy.orm import Session
 from database.database import SessionLocal
 from database.models import Webhook, WebhookDelivery
 
+from app.services import outbound
+
 # Event names. Kept as constants so a typo at a call site fails at import rather
 # than silently registering an event nothing is subscribed to.
 EVENT_PUSH = "push"
 EVENT_COMMIT_PENDING = "commit.pending"
 EVENT_COMMIT_REVIEWED = "commit.reviewed"
 EVENT_BRANCH_CREATED = "branch.created"
+EVENT_BRANCH_DELETED = "branch.deleted"
 EVENT_BRANCH_MERGED = "branch.merged"
 EVENT_PR_OPENED = "pull_request.opened"
+EVENT_PR_UPDATED = "pull_request.updated"
 EVENT_PR_MERGED = "pull_request.merged"
 EVENT_PR_CLOSED = "pull_request.closed"
 EVENT_PR_REVIEWED = "pull_request.reviewed"
@@ -56,8 +70,10 @@ ALL_EVENTS = (
     EVENT_COMMIT_PENDING,
     EVENT_COMMIT_REVIEWED,
     EVENT_BRANCH_CREATED,
+    EVENT_BRANCH_DELETED,
     EVENT_BRANCH_MERGED,
     EVENT_PR_OPENED,
+    EVENT_PR_UPDATED,
     EVENT_PR_MERGED,
     EVENT_PR_CLOSED,
     EVENT_PR_REVIEWED,
@@ -75,6 +91,33 @@ REQUEST_TIMEOUT = 10           # seconds per attempt
 MAX_ATTEMPTS = 3
 RETRY_BACKOFF = (1, 4)         # seconds to wait before attempts 2 and 3
 MAX_RESPONSE_CHARS = 2000      # keep a useful excerpt, not a whole HTML page
+MIN_SECRET_LENGTH = 16
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name) or default))
+    except ValueError:
+        return default
+
+
+# How much delivery history to keep. Payloads are stored with every attempt, so an
+# unbounded log grows with every push for as long as the server runs.
+DELIVERY_RETENTION_DAYS = _int_env("FOXNEST_WEBHOOK_RETENTION_DAYS", 30)
+MAX_DELIVERIES_PER_HOOK = _int_env("FOXNEST_WEBHOOK_MAX_DELIVERIES", 500)
+
+_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_int_env("FOXNEST_WEBHOOK_WORKERS", 8),
+    thread_name_prefix="webhook",
+)
+
+
+def generate_secret() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def new_delivery_id() -> str:
+    return uuid.uuid4().hex
 
 
 def sign_payload(secret: Optional[str], body: bytes) -> Optional[str]:
@@ -125,11 +168,31 @@ def hooks_for(db: Session, event: str, repository_id: Optional[str]) -> List[Web
     return [hook for hook in query.all() if subscribes_to(hook, event)]
 
 
+def build_body(
+    event: str,
+    repository_id: Optional[str],
+    data: Dict[str, Any],
+    delivery_id: str,
+    redelivery_of: Optional[str] = None,
+) -> bytes:
+    """The bytes sent and signed. The delivery id and time are inside the signature."""
+    envelope = {
+        "event": event,
+        "delivery_id": delivery_id,
+        "delivered_at": datetime.utcnow().isoformat() + "Z",
+        "repository_id": repository_id,
+        "data": data,
+    }
+    if redelivery_of:
+        envelope["redelivery_of"] = redelivery_of
+    return json.dumps(envelope, separators=(",", ":"), default=str).encode("utf-8")
+
+
 def _deliver_once(hook: Webhook, event: str, body: bytes, delivery_id: str) -> Dict[str, Any]:
     """One HTTP attempt. Never raises — the outcome is the return value."""
     headers = {
         "Content-Type": hook.content_type or "application/json",
-        "User-Agent": "Zanbeel-Webhook/1.0",
+        "User-Agent": "Zanbeel-Webhook/1.1",
         EVENT_HEADER: event,
         DELIVERY_HEADER: delivery_id,
     }
@@ -138,37 +201,56 @@ def _deliver_once(hook: Webhook, event: str, body: bytes, delivery_id: str) -> D
         headers[SIGNATURE_HEADER] = signature
 
     started = time.monotonic()
+
+    def outcome(**kwargs):
+        result = {"status_code": None, "response_body": None, "error": None,
+                  "success": False, "retry": False}
+        result.update(kwargs)
+        result["duration_ms"] = int((time.monotonic() - started) * 1000)
+        return result
+
     try:
-        response = requests.post(
-            hook.url, data=body, headers=headers, timeout=REQUEST_TIMEOUT
-        )
-        duration = int((time.monotonic() - started) * 1000)
-        return {
-            "status_code": response.status_code,
-            "response_body": (response.text or "")[:MAX_RESPONSE_CHARS],
-            "error": None,
-            "duration_ms": duration,
-            # 2xx is success. A 3xx is not followed: a webhook that redirects is
-            # a misconfiguration, and following it could leak the signature to
-            # an unintended host.
-            "success": 200 <= response.status_code < 300,
-        }
+        response = outbound.post(hook.url, data=body, headers=headers, timeout=REQUEST_TIMEOUT)
+    except outbound.OutboundBlocked as exc:
+        # Not sent at all. Retrying would only be refused again.
+        return outcome(error=f"Not sent: {exc.message}")
     except requests.exceptions.RequestException as exc:
-        duration = int((time.monotonic() - started) * 1000)
-        return {
-            "status_code": None,
-            "response_body": None,
-            "error": str(exc)[:MAX_RESPONSE_CHARS],
-            "duration_ms": duration,
-            "success": False,
-        }
+        return outcome(error=str(exc)[:MAX_RESPONSE_CHARS], retry=True)
+
+    text = (response.text or "")[:MAX_RESPONSE_CHARS]
+    status = response.status_code
+    if 300 <= status < 400:
+        # A redirect is a second destination that was never checked, and following
+        # it would hand the signature to whoever it points at.
+        location = response.headers.get("Location") or "an unspecified location"
+        return outcome(status_code=status, response_body=text,
+                       error=f"Redirect to {location} not followed; update the webhook URL")
+    return outcome(
+        status_code=status,
+        response_body=text,
+        success=200 <= status < 300,
+        # A 4xx means the receiver understood and refused; repeating it will not
+        # change the answer, so only network errors and 5xx are retried.
+        retry=status >= 500,
+    )
 
 
-def _record(db: Session, hook_id: int, event: str, body: bytes, attempt: int, outcome: Dict[str, Any]) -> None:
+def _record(
+    db: Session,
+    hook_id: int,
+    event: str,
+    body: bytes,
+    attempt: int,
+    outcome: Dict[str, Any],
+    delivery_id: str,
+    redelivery_of: Optional[str],
+) -> WebhookDelivery:
     """Persist one delivery attempt."""
     delivery = WebhookDelivery(
         webhook_id=hook_id,
         event=event,
+        delivery_guid=delivery_id,
+        redelivery_of=redelivery_of,
         payload=body.decode("utf-8", errors="replace"),
         status_code=outcome["status_code"],
         response_body=outcome["response_body"],
@@ -179,9 +261,67 @@ def _record(db: Session, hook_id: int, event: str, body: bytes, attempt: int, ou
     )
     db.add(delivery)
     db.commit()
+    db.refresh(delivery)
+    return delivery
 
 
-def deliver(hook_id: int, event: str, body: bytes, delivery_id: str) -> bool:
+def prune(db: Session, hook_id: int) -> int:
+    """Drop delivery rows past the retention window or beyond the per-hook cap."""
+    removed = 0
+    cutoff = datetime.utcnow() - timedelta(days=DELIVERY_RETENTION_DAYS)
+    removed += (
+        db.query(WebhookDelivery)
+        .filter(WebhookDelivery.webhook_id == hook_id, WebhookDelivery.created_at < cutoff)
+        .delete(synchronize_session=False)
+    )
+    keep = (
+        db.query(WebhookDelivery.id)
+        .filter(WebhookDelivery.webhook_id == hook_id)
+        .order_by(WebhookDelivery.id.desc())
+        .offset(MAX_DELIVERIES_PER_HOOK)
+        .first()
+    )
+    if keep is not None:
+        removed += (
+            db.query(WebhookDelivery)
+            .filter(WebhookDelivery.webhook_id == hook_id, WebhookDelivery.id <= keep[0])
+            .delete(synchronize_session=False)
+        )
+    db.commit()
+    return removed
+
+
+def attempt_delivery(
+    db: Session,
+    hook: Webhook,
+    event: str,
+    body: bytes,
+    delivery_id: str,
+    *,
+    max_attempts: int = MAX_ATTEMPTS,
+    redelivery_of: Optional[str] = None,
+) -> Optional[WebhookDelivery]:
+    """Send with retries on ``db``, logging every attempt. Returns the last attempt."""
+    last = None
+    for attempt in range(1, max_attempts + 1):
+        outcome = _deliver_once(hook, event, body, delivery_id)
+        try:
+            last = _record(db, hook.id, event, body, attempt, outcome, delivery_id, redelivery_of)
+        except Exception:
+            db.rollback()
+        if outcome["success"] or not outcome["retry"]:
+            break
+        if attempt < max_attempts:
+            time.sleep(RETRY_BACKOFF[min(attempt - 1, len(RETRY_BACKOFF) - 1)])
+    try:
+        prune(db, hook.id)
+    except Exception:
+        db.rollback()
+    return last
+
+
+def deliver(hook_id: int, event: str, body: bytes, delivery_id: str,
+            redelivery_of: Optional[str] = None) -> bool:
     """Attempt delivery with retries, logging every attempt. Own DB session.
 
     Runs on a worker thread, so it must not touch the session belonging to the
@@ -192,27 +332,8 @@ def deliver(hook_id: int, event: str, body: bytes, delivery_id: str) -> bool:
         hook = db.query(Webhook).filter(Webhook.id == hook_id).first()
         if not hook or not hook.active:
             return False
-
-        for attempt in range(1, MAX_ATTEMPTS + 1):
-            outcome = _deliver_once(hook, event, body, delivery_id)
-            try:
-                _record(db, hook.id, event, body, attempt, outcome)
-            except Exception:
-                db.rollback()
-
-            if outcome["success"]:
-                return True
-
-            # A 4xx means the receiver understood and refused; repeating it will
-            # not change the answer, so only network errors and 5xx are retried.
-            status = outcome["status_code"]
-            if status is not None and 400 <= status < 500:
-                return False
-
-            if attempt < MAX_ATTEMPTS:
-                time.sleep(RETRY_BACKOFF[attempt - 1])
-
-        return False
+        last = attempt_delivery(db, hook, event, body, delivery_id, redelivery_of=redelivery_of)
+        return bool(last and last.success)
     except Exception:
         return False
     finally:
@@ -230,40 +351,55 @@ def dispatch(
 
     Wrapped so a webhook failure can never break the operation that emitted it:
     a push that succeeded must not be reported as failed because a chat server
-    was down.
+    was down. Each hook gets its own delivery id.
     """
     try:
         hooks = hooks_for(db, event, repository_id)
     except Exception:
         return 0
 
-    if not hooks:
-        return 0
-
-    envelope = {
-        "event": event,
-        "delivered_at": datetime.utcnow().isoformat() + "Z",
-        "repository_id": repository_id,
-        "data": payload,
-    }
-    body = json.dumps(envelope, separators=(",", ":"), default=str).encode("utf-8")
-    delivery_id = hashlib.sha256(body + str(time.time()).encode()).hexdigest()[:32]
-
     queued = 0
     for hook in hooks:
-        if background:
-            thread = threading.Thread(
-                target=deliver,
-                args=(hook.id, event, body, delivery_id),
-                daemon=True,
-                name=f"webhook-{hook.id}-{event}",
-            )
-            thread.start()
-        else:
-            deliver(hook.id, event, body, delivery_id)
-        queued += 1
-
+        delivery_id = new_delivery_id()
+        body = build_body(event, repository_id, payload, delivery_id)
+        try:
+            if background:
+                _EXECUTOR.submit(deliver, hook.id, event, body, delivery_id)
+            else:
+                deliver(hook.id, event, body, delivery_id)
+            queued += 1
+        except Exception:
+            continue
     return queued
+
+
+def ping(db: Session, hook: Webhook) -> Optional[WebhookDelivery]:
+    """One synchronous test delivery. No retries: the person is waiting for the answer."""
+    delivery_id = new_delivery_id()
+    body = build_body(
+        EVENT_PING, hook.repository_id,
+        {"message": "Ping from Zanbeel", "webhook_id": hook.id}, delivery_id,
+    )
+    return attempt_delivery(db, hook, EVENT_PING, body, delivery_id, max_attempts=1)
+
+
+def redeliver(db: Session, hook: Webhook, original: WebhookDelivery) -> Optional[WebhookDelivery]:
+    """Send a logged delivery again: same event and data, new delivery id, signed afresh.
+
+    The data is taken from the logged payload, so a receiver gets what it would have
+    got the first time. ``redelivery_of`` in the body names the delivery being repeated.
+    """
+    try:
+        logged = json.loads(original.payload or "{}")
+    except ValueError:
+        logged = {}
+    data = logged.get("data") if isinstance(logged, dict) else None
+    delivery_id = new_delivery_id()
+    original_id = original.delivery_guid or str(original.id)
+    body = build_body(original.event, hook.repository_id, data or {}, delivery_id,
+                      redelivery_of=original_id)
+    return attempt_delivery(db, hook, original.event, body, delivery_id,
+                            max_attempts=1, redelivery_of=original_id)
 
 
 def serialize(hook: Webhook, include_secret: bool = False) -> dict:
@@ -281,6 +417,7 @@ def serialize(hook: Webhook, include_secret: bool = False) -> dict:
         "content_type": hook.content_type,
         "active": bool(hook.active),
         "has_secret": bool(hook.secret),
+        "signed": bool(hook.secret),
         "created_at": hook.created_at.isoformat() if hook.created_at else None,
         "updated_at": hook.updated_at.isoformat() if hook.updated_at else None,
     }
@@ -293,6 +430,8 @@ def serialize_delivery(delivery: WebhookDelivery) -> dict:
     return {
         "id": delivery.id,
         "webhook_id": delivery.webhook_id,
+        "delivery_id": getattr(delivery, "delivery_guid", None),
+        "redelivery_of": getattr(delivery, "redelivery_of", None),
         "event": delivery.event,
         "status_code": delivery.status_code,
         "success": bool(delivery.success),

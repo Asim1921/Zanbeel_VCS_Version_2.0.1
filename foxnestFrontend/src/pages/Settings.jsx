@@ -1,4 +1,5 @@
-import React, { useState } from 'react'
+import React from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { FiKey, FiSend, FiTerminal } from 'react-icons/fi'
 import PageHeader from '../components/ui/PageHeader'
 import AccessTokensPanel from '../components/settings/AccessTokensPanel'
@@ -21,7 +22,10 @@ export default function Settings({ isAdmin = false }) {
     ...(isAdmin ? [{ id: 'webhooks', label: 'Global webhooks', icon: FiSend }] : []),
   ]
 
-  const [tab, setTab] = useState('tokens')
+  // In the address, so a notification about a new token or key opens the right tab.
+  const [params, setParams] = useSearchParams()
+  const tab = tabs.some((t) => t.id === params.get('tab')) ? params.get('tab') : 'tokens'
+  const setTab = (id) => setParams(id === 'tokens' ? {} : { tab: id }, { replace: true })
 
   return (
     <div className="p-6">

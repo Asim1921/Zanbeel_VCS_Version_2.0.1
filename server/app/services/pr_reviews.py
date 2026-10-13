@@ -183,11 +183,14 @@ def summarize(db: Session, repository: Repository, pr: PullRequest) -> Dict[str,
 
     # Required status checks are evaluated against the source tip, the same
     # commit approvals are bound to. Checking any other commit would let a green
-    # run on older code authorise whatever is there now.
+    # run on older code authorise whatever is there now. Which checks are required
+    # depends on the target branch: the repository-wide list and that branch's rules.
     from app.services import status_checks
 
-    check_summary = status_checks.combined(db, repository, head) if head else None
-    blockers.extend(status_checks.merge_blockers(db, repository, head))
+    check_summary = (
+        status_checks.combined(db, repository, head, pr.target_branch) if head else None
+    )
+    blockers.extend(status_checks.merge_blockers(db, repository, head, pr.target_branch))
 
     return {
         "pull_request_id": pr.id,

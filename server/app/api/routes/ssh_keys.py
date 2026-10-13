@@ -27,6 +27,8 @@ from app.services import ssh_keys as key_service
 from app.services import sshsig
 
 
+from app.services import audit
+
 router = APIRouter()
 
 
@@ -78,6 +80,9 @@ async def add_ssh_key(
     except key_service.SSHKeyError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message)
     credential_notifications.ssh_key_added(db, current_user, key)
+    audit.record(db, current_user.id, "ssh_key_added",
+                 description=f"Added SSH key '{key.title}' ({key.fingerprint})",
+                 target_type="ssh_key", target_id=key.id)
     return {"success": True, "key": key_service.serialize(key, active_sessions=0)}
 
 
@@ -94,6 +99,8 @@ async def delete_ssh_key(
     """
     if not key_service.delete_key(db, current_user, key_id):
         raise HTTPException(status_code=404, detail="Key not found")
+    audit.record(db, current_user.id, "ssh_key_removed", description=f"Removed SSH key {key_id}",
+                 target_type="ssh_key", target_id=key_id)
     return {"success": True}
 
 

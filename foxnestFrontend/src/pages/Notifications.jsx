@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   FiBell, FiCheck, FiCheckCircle, FiLoader, FiAlertCircle, FiRotateCcw,
   FiGitPullRequest, FiGitMerge, FiMessageSquare, FiUserCheck, FiFolder, FiInbox,
-  FiKey, FiTerminal, FiSlash,
+  FiKey, FiTerminal, FiSlash, FiArrowRight, FiXCircle, FiAtSign, FiGitCommit,
 } from 'react-icons/fi'
+import { hasTarget, openTarget } from '../lib/links'
 import api from '../utils/api'
 import GlassCard from '../components/ui/GlassCard'
 import Button from '../components/ui/Button'
@@ -30,6 +32,12 @@ const ICONS = {
   credential_token_created: FiKey,
   credential_ssh_key_added: FiTerminal,
   credentials_revoked: FiSlash,
+  pr_mention: FiAtSign,
+  pr_closed: FiXCircle,
+  check_failed: FiXCircle,
+  commit_approved: FiGitCommit,
+  commit_rejected: FiXCircle,
+  access_revoked: FiSlash,
 }
 
 const LABELS = {
@@ -40,12 +48,23 @@ const LABELS = {
   credential_token_created: 'new access token',
   credential_ssh_key_added: 'new SSH key',
   credentials_revoked: 'credentials revoked',
+  pr_mention: 'mention',
+  pr_closed: 'closed',
+  check_failed: 'check failed',
+  commit_approved: 'commit approved',
+  commit_rejected: 'commit rejected',
+  access_granted: 'access granted',
+  access_revoked: 'access removed',
 }
+
+// Structure, not information: shown as the Open button, not in the details.
+const HIDDEN_KEYS = new Set(['target', 'actions', 'cli_setup_guide'])
 
 const prettyType = (type) =>
   LABELS[type] || (type || '').replace(/_/g, ' ')
 
 function Row({ notification, onRead, onUnread, busy }) {
+  const navigate = useNavigate()
   const [open, setOpen] = useState(false)
   const Icon = ICONS[notification.type] || FiBell
   const unread = !notification.is_read
@@ -76,7 +95,9 @@ function Row({ notification, onRead, onUnread, busy }) {
                 {prettyType(notification.type)}
               </span>
               <span className="ml-auto shrink-0 font-mono text-[10.5px] text-muted">
-                {(notification.created_at || '').slice(0, 16).replace('T', ' ')}
+                {api.parseServerTimestamp(notification.created_at)?.toLocaleString(undefined, {
+                  year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+                }) || ''}
               </span>
             </div>
             {notification.body && (
@@ -90,6 +111,19 @@ function Row({ notification, onRead, onUnread, busy }) {
           </div>
         </button>
 
+        {hasTarget(notification) && (
+          <button
+            type="button"
+            data-testid="notification-open"
+            onClick={() => {
+              if (unread) onRead(notification.id)
+              openTarget(navigate, notification)
+            }}
+            className="flex shrink-0 items-center gap-1 rounded-lg border border-accent/40 bg-accent/10 px-2 py-1 text-[11px] text-ink hover:bg-accent/20"
+          >
+            Open <FiArrowRight className="h-3 w-3" />
+          </button>
+        )}
         {!unread && (
           <button type="button" title="Mark as unread" disabled={busy}
                   onClick={() => onUnread(notification.id)}
@@ -99,9 +133,9 @@ function Row({ notification, onRead, onUnread, busy }) {
         )}
       </div>
 
-      {open && notification.payload && Object.keys(notification.payload).length > 0 && (
+      {open && notification.payload && Object.keys(notification.payload).some((k) => !HIDDEN_KEYS.has(k)) && (
         <dl className="grid grid-cols-2 gap-x-3 gap-y-1 border-t border-border px-3 py-2 text-[11px] sm:grid-cols-3">
-          {Object.entries(notification.payload).map(([key, value]) => (
+          {Object.entries(notification.payload).filter(([key, value]) => !HIDDEN_KEYS.has(key) && value !== null && value !== '').map(([key, value]) => (
             <div key={key} className="min-w-0">
               <dt className="text-muted">{key.replace(/_/g, ' ')}</dt>
               <dd className="truncate font-mono text-ink-soft">{String(value)}</dd>

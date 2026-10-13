@@ -11,6 +11,7 @@ import GlassCard from '../components/ui/GlassCard'
 import Badge from '../components/ui/Badge'
 import Button from '../components/ui/Button'
 import { cn } from '../lib/utils'
+import ChecksList from '../components/repository/ChecksList'
 
 /**
  * Reviewing a pull request.
@@ -434,6 +435,22 @@ export default function PullRequestDetail({ repo, prId, onBack }) {
           </div>
 
           <div className="space-y-4">
+            {status === 'open' && summary?.status_checks && (
+              <GlassCard className="p-4" hover={false} data-testid="pr-checks">
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold text-ink">Checks</h3>
+                  {summary.source_head_commit_id && (
+                    <span className="font-mono text-[10.5px] text-muted">
+                      {String(summary.source_head_commit_id).slice(0, 8)}
+                    </span>
+                  )}
+                </div>
+                <ChecksList
+                  combined={summary.status_checks}
+                  emptyHint="No checks have reported on this branch's latest commit, and none are required."
+                />
+              </GlassCard>
+            )}
             {status === 'open' && (
               <ConflictPanel
                 mergeability={mergeability}

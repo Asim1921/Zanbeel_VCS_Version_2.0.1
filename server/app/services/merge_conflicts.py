@@ -42,7 +42,7 @@ from app.services.merge import (
     CONFLICT_MODIFY_DELETE, _merge_trees, _try_decode_text, conflict_kind,
     has_conflict_markers, merge_text,
 )
-from app.services import pr_source, refs
+from app.services import pr_source, refs, server_hooks
 from app.services.signing import sign_commit
 
 RESOLUTION_CONTENT = "content"
@@ -606,6 +606,13 @@ def resolve(
         entries.append(
             SimpleNamespace(file_path=path, file_hash=stored.hash, file_size=len(content))
         )
+
+    # Push rules apply to a resolution. Its conflicted files were written by hand,
+    # so they are new content that no push has ever been checked for.
+    server_hooks.check_server_write(
+        db, RepositoryCRUD.get_repository(db, dest_repo_id), dest_branch, dest_head,
+        merged_tree, actor,
+    )
 
     # Ask the branch before writing: create_commit_from_file_hashes() commits its own
     # transaction, so refusing afterwards would leave the merge commit stored on a

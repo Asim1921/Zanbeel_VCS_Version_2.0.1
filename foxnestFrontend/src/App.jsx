@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import Layout from './components/layout/Layout'
 import Dashboard from './pages/Dashboard'
 import UsersManagement from './pages/UsersManagement'
@@ -20,17 +21,84 @@ import Operations from './pages/Operations'
 import BrandLogo from './components/ui/BrandLogo'
 import api from './utils/api'
 import { clearSessionUser, getSessionToken, setSessionUser } from './utils/session'
+import { profileLink, pullRequestLink, repositoryLink } from './lib/links'
+
+// Pages everyone has, whatever their role. One list for both branches is what stops a
+// new page being reachable for an administrator and bounced to the dashboard for
+// everyone else.
+const COMMON_TABS = ['dashboard', 'repositories', 'profile', 'notifications', 'settings', 'search', 'activity']
+const ADMIN_TABS = [
+  'users-management', 'pending-approvals', 'pending-repositories', 'pending-user-registrations',
+  'password-reset', 'archive', 'operations',
+]
+
+/**
+ * A repository or pull request named by the URL. The list page hands over the
+ * repository it already has; a link from elsewhere (search, a notification, a pasted
+ * address) carries only the id, so the repository is fetched.
+ */
+function useRepository(repoId, known) {
+  const [state, setState] = useState(() => ({
+    repo: known && known.id === repoId ? known : null, error: null,
+  }))
+  useEffect(() => {
+    if (!repoId) return undefined
+    if (known && known.id === repoId) {
+      setState({ repo: known, error: null })
+      return undefined
+    }
+    let alive = true
+    setState({ repo: null, error: null })
+    api.getRepository(repoId)
+      .then((response) => { if (alive) setState({ repo: response?.repository || response, error: null }) })
+      .catch((err) => { if (alive) setState({ repo: null, error: err.message || 'Repository not found' }) })
+    return () => { alive = false }
+  }, [repoId, known])
+  return state
+}
+
+function RouteMessage({ error }) {
+  return (
+    <div className="py-20 text-center text-sm text-muted">
+      {error ? `Cannot open this page: ${error}` : 'Loading…'}
+    </div>
+  )
+}
+
+function RepositoryRoute({ repoId, prId, known }) {
+  const navigate = useNavigate()
+  const { repo, error } = useRepository(repoId, known)
+  if (!repo) return <RouteMessage error={error} />
+  if (prId) {
+    return (
+      <PullRequestDetail
+        key={`${repo.id}:${prId}`}
+        repo={repo}
+        prId={Number(prId)}
+        onBack={() => navigate(repositoryLink(repo.id))}
+      />
+    )
+  }
+  // Keyed by repository: going from one repository to another (a search result, a
+  // notification) must start fresh, not carry over the last one's tree and history.
+  return <RepositoryDetail key={repo.id} repo={repo} onBack={() => navigate('/repositories')} />
+}
 
 function App() {
-  const [activeTab, setActiveTab] = useState('dashboard')
-  // The repository browser lives inside the Repositories tab rather than as a tab of
-  // its own, so Back returns to the list and no permission list needs a new entry.
-  const [browsingRepo, setBrowsingRepo] = useState(null)
-  // { repo, prId } while a pull request is open for review. Held here rather than
-  // inside Repositories so the review survives the list re-rendering underneath it.
-  const [reviewing, setReviewing] = useState(null)
-  // Whose profile is open. null means your own; a username means someone else's.
-  const [profileUser, setProfileUser] = useState(null)
+  const location = useLocation()
+  const navigate = useNavigate()
+  // The page is the URL's first segment; the rest names what is open within it.
+  const segments = useMemo(
+    () => location.pathname.split('/').filter(Boolean).map((s) => decodeURIComponent(s)),
+    [location.pathname]
+  )
+  const activeTab = segments[0] || 'dashboard'
+  const setActiveTab = useCallback(
+    (tab) => navigate(tab && tab !== 'dashboard' ? `/${tab}` : '/'),
+    [navigate]
+  )
+  // The repository the list page opened, so it is not fetched a second time.
+  const [knownRepo, setKnownRepo] = useState(null)
   const [currentUser, setCurrentUser] = useState(null)
   const [authLoading, setAuthLoading] = useState(true)
 
@@ -66,52 +134,21 @@ function App() {
   )
 
   useEffect(() => {
-    // Tabs everyone has, whatever their role. Keeping them in one list rather than
-    // repeating them in both branches is what stops a new page being reachable for
-    // an administrator and silently bounced to the dashboard for everyone else.
-    const commonTabs = [
-      'dashboard',
-      'repositories',
-      'profile',
-      'notifications',
-      'settings',
-      'search',
-    ]
-    const adminTabs = [
-      'users-management',
-      'pending-approvals',
-      'pending-repositories',
-      'pending-user-registrations',
-      'password-reset',
-      'archive',
-      'activity',
-      'operations',
-    ]
-    const allowedTabs = isAdmin ? [...commonTabs, ...adminTabs] : commonTabs
-
-    if (!allowedTabs.includes(activeTab)) {
-      setActiveTab('dashboard')
-    }
-    // Leaving the tab closes the browser, so returning to it lands on the list.
-    if (activeTab !== 'repositories') {
-      setBrowsingRepo(null)
-    }
-    // Same for a profile: coming back to the tab should show your own, not whoever
-    // you were last looking at.
-    if (activeTab !== 'profile') {
-      setProfileUser(null)
-    }
-  }, [activeTab, isAdmin])
+    if (!currentUser) return
+    const allowed = isAdmin ? [...COMMON_TABS, ...ADMIN_TABS] : COMMON_TABS
+    if (!allowed.includes(activeTab)) navigate('/', { replace: true })
+  }, [activeTab, isAdmin, currentUser, navigate])
 
   const handleLogout = () => {
     clearSessionUser()
     setCurrentUser(null)
-    setActiveTab('dashboard')
+    navigate('/')
   }
 
+  // Signing in keeps the address that was asked for, so a link opened while signed
+  // out lands where it pointed.
   const handleLoginSuccess = (user) => {
     setCurrentUser(user)
-    setActiveTab('dashboard')
   }
 
   if (authLoading) {
@@ -130,36 +167,44 @@ function App() {
     return <Login onLoginSuccess={handleLoginSuccess} />
   }
 
+  const dashboard = <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
+
   const renderContent = () => {
     switch (activeTab) {
       case 'dashboard':
-        return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
+        return dashboard
       case 'users-management':
-        if (!isAdmin) return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
-        return <UsersManagement />
+        return isAdmin ? <UsersManagement /> : dashboard
       case 'repositories':
-        if (reviewing) {
+        if (segments[1]) {
           return (
-            <PullRequestDetail
-              repo={reviewing.repo}
-              prId={reviewing.prId}
-              onBack={() => setReviewing(null)}
+            <RepositoryRoute
+              repoId={segments[1]}
+              prId={segments[2] === 'pulls' ? segments[3] : null}
+              known={knownRepo}
             />
           )
         }
-        return browsingRepo ? (
-          <RepositoryDetail repo={browsingRepo} onBack={() => setBrowsingRepo(null)} />
-        ) : (
-          <Repositories onBrowseRepo={setBrowsingRepo} onReviewPullRequest={setReviewing} />
+        return (
+          <Repositories
+            onBrowseRepo={(repo) => {
+              setKnownRepo(repo)
+              navigate(repositoryLink(repo.id))
+            }}
+            onReviewPullRequest={({ repo, prId }) => {
+              setKnownRepo(repo)
+              navigate(pullRequestLink(repo.id, prId))
+            }}
+          />
         )
       case 'profile':
         return (
           <Profile
-            username={profileUser}
-            onBack={profileUser ? () => setProfileUser(null) : undefined}
+            username={segments[1] || null}
+            onBack={segments[1] ? () => navigate(profileLink(null)) : undefined}
             onOpenRepo={(repo) => {
-              setBrowsingRepo(repo)
-              setActiveTab('repositories')
+              setKnownRepo(repo)
+              navigate(repositoryLink(repo.id))
             }}
           />
         )
@@ -170,28 +215,21 @@ function App() {
       case 'search':
         return <Search />
       case 'activity':
-        if (!isAdmin) return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
-        return <Activity />
+        return <Activity isAdmin={isAdmin} />
       case 'operations':
-        if (!isAdmin) return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
-        return <Operations />
+        return isAdmin ? <Operations /> : dashboard
       case 'pending-approvals':
-        if (!isAdmin) return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
-        return <PendingApprovals />
+        return isAdmin ? <PendingApprovals /> : dashboard
       case 'pending-repositories':
-        if (!isAdmin) return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
-        return <PendingRepositories />
+        return isAdmin ? <PendingRepositories /> : dashboard
       case 'pending-user-registrations':
-        if (!isAdmin) return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
-        return <PendingUserRegistrations />
+        return isAdmin ? <PendingUserRegistrations /> : dashboard
       case 'password-reset':
-        if (!isAdmin) return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
-        return <PasswordReset />
+        return isAdmin ? <PasswordReset /> : dashboard
       case 'archive':
-        if (!isAdmin) return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
-        return <Archive />
+        return isAdmin ? <Archive /> : dashboard
       default:
-        return <Dashboard setActiveTab={setActiveTab} isAdmin={isAdmin} />
+        return dashboard
     }
   }
 

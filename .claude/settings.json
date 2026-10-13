@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -Hm1 ^description: '/d/Work/101 CD/Zanbeel/Git-Clone-Zanbeel-/.claude/skills/*/SKILL.md')",
+      "Bash(../venv/Scripts/python.exe -m pytest tests/test_access_tokens.py tests/test_ssh_keys.py tests/test_endpoint_auth.py -q)",
+      "Bash(./venv/Scripts/python.exe -)",
+      "Bash(./venv/Scripts/python.exe -m py_compile client/client1/fox.py)",
+      "Bash(./venv/Scripts/python.exe client/client1/fox.py token --help)",
+      "Bash(./venv/Scripts/python.exe client/client1/fox.py login --help)",
+      "Bash(timeout 120 ./venv/Scripts/python.exe -)",
+      "Bash(../venv/Scripts/python.exe -m pytest tests/test_sshsig.py -q -p no:warnings)",
+      "Bash(../venv/Scripts/python.exe -m pytest tests/test_credentials_api.py -q -p no:warnings -x)",
+      "Bash(../venv/Scripts/python.exe -m pytest tests/test_fox_cli_credentials.py -q -p no:warnings)",
+      "Bash(node --check src/extension.js)",
+      "Bash(../venv/Scripts/python.exe tools/e2e_credentials.py --keep)",
+      "Bash(PYTHONIOENCODING=utf-8 ../venv/Scripts/python.exe tools/e2e_credentials.py)",
+      "Bash(../venv/Scripts/python.exe -)",
+      "Bash(PYTHONIOENCODING=utf-8 ../venv/Scripts/python.exe tools/e2e_credentials_ui.py --keep)",
+      "Bash(sed -i 's/subtitle=\"Sign-in protection, verified backups, and whether the database still matches the code.\"/subtitle=\"Sign-in protection, who holds which credentials, verified backups, and whether the database still matches the code.\"/' foxnestFrontend/src/pages/Operations.jsx)",
+      "Bash(rm -rf /c/Users/VICTUS~1/AppData/Local/Temp/zanbeel_e2e_credentials_*)",
+      "Read(//d/Work/101 CD/Zanbeel/**)",
+      "Bash(../venv/Scripts/python.exe -m pytest tests/test_fox_cli_credentials.py tests/test_credentials_api.py -q -p no:warnings -p no:cacheprovider)",
+      "Bash(../venv/Scripts/python.exe -m pytest tests/test_credentials_api.py -q -p no:warnings -p no:cacheprovider -k \"email\")",
+      "Bash(../venv/Scripts/python.exe -m pytest tests/test_profiles.py -q -p no:warnings -p no:cacheprovider)",
+      "Bash(node \"C:/Users/VICTUS~1/AppData/Local/Temp/claude/d--Work-101-CD-Zanbeel-Git-Clone-Zanbeel-/86035080-81fe-4d50-91e9-06b4661bd669/scratchpad/check-doc.mjs\" \"C:/Users/VICTUS~1/AppData/Local/Temp/claude/d--Work-101-CD-Zanbeel-Git-Clone-Zanbeel-/86035080-81fe-4d50-91e9-06b4661bd669/scratchpad\")",
+      "Bash(\"/d/Work/101 CD/Zanbeel/Git-Clone-Zanbeel-/venv/Scripts/python.exe\" -)"
+    ]
+  }
+}

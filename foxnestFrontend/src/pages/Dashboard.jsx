@@ -159,9 +159,8 @@ const Dashboard = ({ setActiveTab, isAdmin: isAdminProp }) => {
               <FiActivity className="mr-2 h-5 w-5 text-muted" />
               Recent activity
             </h3>
-            {/* The activity tab is admin-only; App bounces everyone else back to
-                the dashboard, so offering the link to a developer is a dead end. */}
-            {isPrivileged && activities.length > 0 && (
+            {/* Everyone has the activity page; it shows what each reader can see. */}
+            {activities.length > 0 && (
               <button
                 type="button"
                 onClick={() => goTo('activity')}
