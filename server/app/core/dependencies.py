@@ -25,6 +25,7 @@ Two rules keep a scoped credential from becoming more than its scopes:
   server-wide hooks or edit other people's accounts just because of who made it.
 """
 
+import re
 from typing import Optional
 
 from fastapi import Depends, HTTPException, Request
@@ -57,6 +58,9 @@ _SCOPE_EXEMPT_PATHS = frozenset({
     "/api/tokens/current",
 })
 
+# The one write a repo:status token may make: reporting a commit status.
+_STATUS_REPORT_PATH = re.compile(r"^/api/repository/[^/]+/commits/[^/]+/statuses/?$")
+
 AUTH_SESSION = "session"
 AUTH_ACCESS_TOKEN = "access_token"
 AUTH_SSH_KEY = "ssh_key"
@@ -88,7 +92,12 @@ def _resolve_credential(db: Session, credential: str, request: Optional[Request]
         if request is not None:
             path = request.url.path
             method = request.method.upper()
-            if method in _WRITE_METHODS and path not in _SCOPE_EXEMPT_PATHS:
+            status_report = (
+                method == "POST"
+                and token_service.SCOPE_REPO_STATUS in granted
+                and _STATUS_REPORT_PATH.match(path) is not None
+            )
+            if method in _WRITE_METHODS and path not in _SCOPE_EXEMPT_PATHS and not status_report:
                 if token_service.SCOPE_REPO_WRITE not in granted:
                     raise HTTPException(
                         status_code=403,

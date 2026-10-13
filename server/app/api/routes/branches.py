@@ -20,7 +20,7 @@ from app.schemas import (
     BranchPolicyRequest, BranchPublishRequest, BranchRenameRequest, CopyFilesRequest,
     ResolveConflictsRequest, SaveConflictResolutionRequest,
 )
-from app.services import branch_ops, merge_conflicts, refs
+from app.services import branch_ops, merge_conflicts, refs, server_hooks
 from app.services.branches import _get_default_branch, _normalize_branch_name
 
 
@@ -100,11 +100,14 @@ async def create_branch(
     if head_commit_id and not CommitCRUD.get_commit(db, head_commit_id):
         raise HTTPException(status_code=400, detail="Invalid from_commit")
 
-    refs.check_reference_operation(
+    server_hooks.check_new_branch(db, repository, branch_name, current_user)
+
+    # Through the reference service like every other branch change, so the creation is
+    # checked, recorded in the audit trail and announced to webhooks.
+    branch = refs.update_reference(
         db, repository=repository, actor=current_user, branch_name=branch_name,
-        operation=refs.OP_CREATE, new_commit_id=head_commit_id,
+        new_commit_id=head_commit_id, create_if_missing=True,
     )
-    branch = BranchCRUD.create_branch(db, repo_id, branch_name, head_commit_id=head_commit_id)
     return {
         "success": True,
         "branch": {
@@ -192,10 +195,22 @@ async def set_default_branch(
     resolved_actor = current_user.username if current_user else actor_username
     require_repository_access(db, resolved_actor, repository, "set default branch in", required_scope="manage")
 
+    previous = getattr(_get_default_branch(db, repo_id), "name", None)
     branch = BranchCRUD.set_default_branch(db, repo_id, _normalize_branch_name(branch_name))
     if branch.head_commit_id:
         repository.head_commit_id = branch.head_commit_id
         db.commit()
+    ActivityCRUD.create_activity(
+        db, current_user.id, "set_default_branch",
+        f"Made '{branch.name}' the default branch" + (f" (was '{previous}')" if previous else ""),
+        repo_id, target_type="branch", target_id=branch.name,
+    )
+    # Code search indexes the default branch, so it has to follow.
+    try:
+        from app.services import search_index
+        search_index.schedule(repo_id)
+    except Exception:
+        pass
 
     return {"success": True, "branch": {"name": branch.name, "is_default": branch.is_default}}
 

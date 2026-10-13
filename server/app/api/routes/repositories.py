@@ -33,6 +33,8 @@ from app.services import forks
 from app.services.serializers import repository_to_dict
 
 
+from app.services import audit
+
 router = APIRouter()
 
 
@@ -320,6 +322,14 @@ async def delete_repository(repo_id: str, actor_username: Optional[str] = None, 
         
         # Delete the repository
         RepositoryCRUD.delete_repository(db, repo_id)
+        from app.services import search_index
+        search_index.drop_repository(repo_id)
+        # Recorded without a repository (it is gone) but naming it, after the rows
+        # it leaves behind were detached.
+        audit.record(db, current_user.id, "delete_repository",
+                     description=f"Deleted repository '{repo_name}' (owner {owner_name})",
+                     target_type="repository", target_id=repo_id,
+                     payload={"repository_id": repo_id, "repository_name": repo_name})
         
         return {
             "success": True,
@@ -350,6 +360,8 @@ async def archive_repository(repo_id: str, reason: Optional[str] = None, actor_u
         
         # Archive the repository
         RepositoryCRUD.archive_repository(db, repo_id, reason=reason or "Archived via web interface")
+        audit.record(db, current_user.id, "archive_repository", repository_id=repo_id,
+                     description=f"Archived '{repo_name}'" + (f": {reason}" if reason else ""))
         
         return {
             "success": True,
@@ -547,7 +559,11 @@ async def fork_repository(
     ActivityCRUD.create_activity(
         db, current_user.id, "fork_repository",
         f"Forked '{source.name}' as '{fork.name}'", fork.id,
+        target_type="repository", target_id=source.id,
     )
+    # A fork's branches are copied, not moved through refs, so tell the index here.
+    from app.services import search_index
+    search_index.schedule(fork.id)
     return {
         "success": True,
         "repo_id": fork.id,

@@ -15,6 +15,8 @@ Three things happen together, in one transaction, or not at all:
   operation from anyone, which is separate from whether this actor holds the scope for it.
 * **audit** -- the decision is recorded either way. A refused force-push is the event
   worth having.
+* **events** -- every completed change is announced to webhooks (``ref_events``), so an
+  integration hears about every way a branch can move, not only ``fox push``.
 
 A force update is detected here rather than trusted from the caller: if the proposed
 commit is not a descendant of the current tip, the operation is reclassified as
@@ -34,6 +36,7 @@ from database.crud import BranchCRUD
 from database.models import Branch, BranchUnlock, RefAuditEvent, Repository, User
 
 from app.services import branch_protection as protection
+from app.services import ref_events
 from app.services.branch_protection import (
     OP_CREATE, OP_DELETE, OP_FORCE_UPDATE, OP_MERGE, OP_RENAME, OP_UPDATE,
 )
@@ -308,6 +311,8 @@ def update_reference(
             effective=effective,
         )
         db.commit()
+        ref_events.emit(db, repository=repository, actor=actor, branch=branch_name,
+                        before=None, after=new_commit_id, operation=OP_CREATE, created=True)
         return branch
 
     current_head = branch.head_commit_id
@@ -354,6 +359,9 @@ def update_reference(
         reason=f"unlock grant {grant.id}" if grant else None,
     )
     db.commit()
+    if current_head != new_commit_id:
+        ref_events.emit(db, repository=repository, actor=actor, branch=branch_name,
+                        before=current_head, after=new_commit_id, operation=resolved)
     return branch
 
 
@@ -383,6 +391,8 @@ def delete_reference(
         effective=effective,
     )
     db.commit()
+    ref_events.emit(db, repository=repository, actor=actor, branch=branch_name,
+                    before=head, after=None, operation=OP_DELETE, deleted=True)
 
 
 def rename_reference(
@@ -417,6 +427,11 @@ def rename_reference(
         effective=effective, reason=f"renamed to {new_name}",
     )
     db.commit()
+    # A rename is the old name going and the new one arriving, as git sees it.
+    ref_events.emit(db, repository=repository, actor=actor, branch=old_name,
+                    before=branch.head_commit_id, after=None, operation=OP_RENAME, deleted=True)
+    ref_events.emit(db, repository=repository, actor=actor, branch=new_name,
+                    before=None, after=renamed.head_commit_id, operation=OP_RENAME, created=True)
     return renamed
 
 

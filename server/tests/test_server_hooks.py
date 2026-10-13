@@ -6,6 +6,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 SERVER_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -211,6 +212,11 @@ class ExternalPolicyTests(unittest.TestCase):
     def setUp(self):
         _Policy.allow = True
         _Policy.body_seen = []
+        # The policy service listens on loopback, which the server refuses to call
+        # unless an administrator allows it.
+        env = mock.patch.dict(os.environ, {"FOXNEST_OUTBOUND_ALLOWED_HOSTS": "127.0.0.1"})
+        env.start()
+        self.addCleanup(env.stop)
 
     def test_allow_lets_the_push_through(self):
         self.assertEqual(sh.evaluate({"external_url": self.url}, commit(), None), [])

@@ -11,6 +11,7 @@ import {
   FiPlay,
   FiClock,
   FiKey,
+  FiSearch,
 } from 'react-icons/fi'
 import PageHeader from '../components/ui/PageHeader'
 import GlassCard from '../components/ui/GlassCard'
@@ -18,6 +19,7 @@ import Button from '../components/ui/Button'
 import Badge from '../components/ui/Badge'
 import EmptyState from '../components/ui/EmptyState'
 import CredentialsOverview from '../components/operations/CredentialsOverview'
+import SearchIndexPanel from '../components/operations/SearchIndexPanel'
 import api from '../utils/api'
 import { cn } from '../lib/utils'
 
@@ -50,6 +52,7 @@ const TABS = [
   { id: 'credentials', label: 'Credentials', icon: FiKey },
   { id: 'backups', label: 'Backups', icon: FiHardDrive },
   { id: 'schema', label: 'Schema', icon: FiDatabase },
+  { id: 'search', label: 'Search index', icon: FiSearch },
 ]
 
 export default function Operations() {
@@ -412,6 +415,8 @@ py -3.11 tools/backup.py --restore <path>`}
       {/* ---------------- schema ---------------- */}
       {/* ---------------- credentials ---------------- */}
       {tab === 'credentials' && <CredentialsOverview />}
+
+      {tab === 'search' && <SearchIndexPanel />}
 
       {tab === 'schema' && (
         <div className="space-y-4">

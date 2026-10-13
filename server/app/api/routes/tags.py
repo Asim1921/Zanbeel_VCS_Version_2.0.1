@@ -16,6 +16,8 @@ from app.services.branches import _normalize_branch_name
 from app.services import webhooks as hook_service
 
 
+from app.services import audit
+
 router = APIRouter()
 
 
@@ -68,6 +70,9 @@ async def create_tag(
         raise HTTPException(status_code=400, detail="Commit not found")
 
     tag = TagCRUD.create_tag(db, repo_id, tag_name, commit_id, request.message, current_user.id)
+    audit.record(db, current_user.id, "tag_created", repository_id=repo_id,
+                 description=f"Tagged {commit_id[:8]} as '{tag.name}'", target_type="tag",
+                 target_id=tag.name, commit_id=commit_id)
 
     hook_service.dispatch(db, hook_service.EVENT_TAG_CREATED, repo_id, {
         "repository": {"id": repo_id, "name": repository.name},
@@ -100,4 +105,6 @@ async def delete_tag(
     require_repository_access(db, resolved_actor, repository, "delete tag in", required_scope="manage")
 
     TagCRUD.delete_tag(db, repo_id, tag_name)
+    audit.record(db, current_user.id, "tag_deleted", repository_id=repo_id,
+                 description=f"Deleted tag '{tag_name}'", target_type="tag", target_id=tag_name)
     return {"success": True, "message": f"Tag '{tag_name}' deleted"}

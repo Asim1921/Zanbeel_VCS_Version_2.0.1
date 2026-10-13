@@ -762,6 +762,77 @@ def ensure_server_hooks_table():
         print(f"[warn] Unable to create server_hooks table: {exc}")
 
 
+def ensure_integration_columns():
+    """Delivery ids on the webhook log, and the commit-status index the gate reads by.
+
+    Must run after ensure_webhook_tables() and ensure_commit_statuses_table(). Rows
+    logged before delivery ids existed keep a NULL id and show as single attempts.
+    """
+    columns = (
+        ("webhook_deliveries", "delivery_guid", "VARCHAR(40)"),
+        ("webhook_deliveries", "redelivery_of", "VARCHAR(40)"),
+    )
+    try:
+        for table, column, ddl_type in columns:
+            existing = [c["name"] for c in inspect(engine).get_columns(table)]
+            if not existing or column in existing:
+                continue
+            with engine.begin() as connection:
+                connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+            print(f"[ok] Added missing column {table}.{column}")
+        with engine.begin() as connection:
+            connection.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_webhook_deliveries_delivery_guid "
+                "ON webhook_deliveries(delivery_guid)"
+            ))
+            # Statuses are now read per repository and commit, never by commit alone.
+            connection.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_commit_statuses_repo_commit "
+                "ON commit_statuses(repository_id, commit_id)"
+            ))
+        print("[ok] Integration columns verified")
+    except Exception as exc:
+        print(f"[warn] Unable to add integration columns: {exc}")
+
+
+def ensure_activity_columns():
+    """Structured audit fields on the activity log, and the indexes it is filtered by.
+
+    Rows written before this keep NULL in the new columns and show as free text.
+    """
+    columns = (
+        ("target_type", "VARCHAR(30)"),
+        ("target_id", "VARCHAR(200)"),
+        ("commit_id", "VARCHAR(40)"),
+        ("payload_json", "TEXT"),
+        ("credential", "VARCHAR(120)"),
+        ("client_ip", "VARCHAR(64)"),
+        ("repository_name", "VARCHAR(200)"),
+        ("actor_username", "VARCHAR(50)"),
+    )
+    try:
+        existing = [c["name"] for c in inspect(engine).get_columns("activities")]
+        if not existing:
+            return
+        for column, ddl_type in columns:
+            if column in existing:
+                continue
+            with engine.begin() as connection:
+                connection.execute(text(f"ALTER TABLE activities ADD COLUMN {column} {ddl_type}"))
+            print(f"[ok] Added missing column activities.{column}")
+        with engine.begin() as connection:
+            for name, cols in (
+                ("ix_activities_created_at", "created_at"),
+                ("ix_activities_repository_time", "repository_id, created_at"),
+                ("ix_activities_user_time", "user_id, created_at"),
+                ("ix_activities_type_time", "activity_type, created_at"),
+            ):
+                connection.execute(text(f"CREATE INDEX IF NOT EXISTS {name} ON activities({cols})"))
+        print("[ok] Activity columns verified")
+    except Exception as exc:
+        print(f"[warn] Unable to add activity columns: {exc}")
+
+
 def ensure_security_tables():
     """Create the login-attempt, lockout and backup tables."""
     try:

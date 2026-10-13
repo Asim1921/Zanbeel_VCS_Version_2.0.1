@@ -24,7 +24,7 @@ from app.services.branches import _get_default_branch, _resolve_branch
 from app.services.commit_graph import _get_commit_tree, _is_ancestor
 from app.services.history_ops import HistoryOpError, cherry_pick, rebase, revert
 from app.services.merge import _tree_to_commit_payload
-from app.services import refs
+from app.services import refs, server_hooks
 from app.services.signing import sign_commit
 from app.services.paths import normalize as normalize_path
 
@@ -103,6 +103,12 @@ async def rollback_file(
         "message": rollback_message,
         "files": _tree_to_commit_payload(new_tree)
     }
+
+    # A rollback can put back a file that was removed for a reason, a secret say, so
+    # push rules apply to what it restores.
+    server_hooks.check_server_write(
+        db, repository, rollback_branch.name, head_commit_id, new_tree, current_user,
+    )
 
     # Ask the branch before writing: create_commit() commits its own transaction,
     # so refusing afterwards would leave the rollback commit stored on a branch
@@ -195,6 +201,10 @@ async def rollback_branch(
         "message": rollback_message,
         "files": _tree_to_commit_payload(target_tree)
     }
+
+    server_hooks.check_server_write(
+        db, repository, rollback_branch_obj.name, current_head, target_tree, current_user,
+    )
 
     # Ask the branch before writing: create_commit() commits its own transaction,
     # so refusing afterwards would leave the rollback commit stored on a branch
@@ -294,9 +304,10 @@ def _run_history_op(op, db, repo_id, request, current_user, verb):
 
     if result.get("commit_id"):
         ActivityCRUD.create_activity(
-            db, current_user.id, verb.replace(" ", "_"),
+            db, current_user.id, verb.replace("-", "_").replace(" ", "_"),
             f"{verb} {request.commit_id[:8]} on '{request.branch}' as {result['commit_id'][:8]}",
-            repo_id,
+            repo_id, commit_id=result["commit_id"],
+            payload={"source_commit": request.commit_id},
         )
 
     return {"success": True, **result}

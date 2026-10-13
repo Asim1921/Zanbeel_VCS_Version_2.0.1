@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   FiArrowLeft, FiCode, FiGitCommit, FiUsers, FiFileText,
-  FiLoader, FiAlertCircle, FiGitBranch, FiShield, FiShare2,
+  FiLoader, FiAlertCircle, FiGitBranch, FiShield, FiShare2, FiActivity,
 } from 'react-icons/fi'
 import api from '../utils/api'
+import ActivityBrowser from '../components/ActivityBrowser'
 import FileTree from '../components/FileTree'
 import { ancestorsOf, normalizePath } from '../lib/fileTree'
 import CodeView from '../components/CodeView'
@@ -21,6 +23,10 @@ import { cn } from '../lib/utils'
  *
  * A page rather than a dialog because this carries a tree, source, a diff and a
  * blame view at once, and a dialog cannot give any of them room.
+ *
+ * What is open -- branch, file, line, commit, tab -- is held in the address, not in
+ * component state, so any of it can be linked to (search results and notifications
+ * do) and Back steps through it.
  */
 
 
@@ -29,6 +35,7 @@ const TABS = [
   { id: 'commits', label: 'Commits', icon: FiGitCommit },
   { id: 'graph', label: 'Graph', icon: FiShare2 },
   { id: 'contributors', label: 'Contributors', icon: FiUsers },
+  { id: 'activity', label: 'Activity', icon: FiActivity },
   { id: 'protection', label: 'Protection', icon: FiShield },
 ]
 
@@ -61,15 +68,38 @@ function Breadcrumbs({ path, onNavigate }) {
 }
 
 export default function RepositoryDetail({ repo, onBack }) {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const urlBranch = searchParams.get('branch')
+  const selectedFile = searchParams.get('path')
+  const tab = searchParams.get('tab') || 'code'
+  const openCommitId = searchParams.get('commit')
+  const line = Number(searchParams.get('line')) || null
+
+  // Change what is open. A new file, commit or tab is a step Back can return from;
+  // pointing at a line within the open file replaces the address instead.
+  const go = useCallback((changes, { replace = false } = {}) => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current)
+      for (const [key, value] of Object.entries(changes)) {
+        if (value === null || value === undefined || value === '') next.delete(key)
+        else next.set(key, String(value))
+      }
+      return next
+    }, { replace })
+  }, [setSearchParams])
+
   const [branches, setBranches] = useState([])
-  const [branch, setBranch] = useState(null)
+  const [defaultBranch, setDefaultBranch] = useState(null)
+  // Until the branch list arrives the default branch is unknown; fetching the tree
+  // before then loaded it twice and made a linked file flicker.
+  const [branchesLoaded, setBranchesLoaded] = useState(false)
+  const branch = urlBranch || defaultBranch
   const [files, setFiles] = useState({})
   const [filesLoading, setFilesLoading] = useState(true)
   const [filesError, setFilesError] = useState('')
 
-  const [selectedFile, setSelectedFile] = useState(null)
   const [expanded, setExpanded] = useState(() => new Set())
-  const [tab, setTab] = useState('code')
+  const setTab = (id) => go({ tab: id === 'code' ? null : id, commit: null })
 
   // 'code' | 'diff' | 'blame' -- which rendering of the selected file is showing.
   const [fileMode, setFileMode] = useState('code')
@@ -86,9 +116,9 @@ export default function RepositoryDetail({ repo, onBack }) {
   const [graphLoading, setGraphLoading] = useState(false)
   const [graphError, setGraphError] = useState('')
   const [selectedGraphCommit, setSelectedGraphCommit] = useState(null)
-  // The commit whose changes are open. Held here so the Back button returns to
-  // whichever tab the commit was opened from.
-  const [openCommitId, setOpenCommitId] = useState(null)
+  // The commit whose changes are open, in the address; Back returns to the tab it was
+  // opened from.
+  const setOpenCommitId = (id) => go({ commit: id })
   const [commitsLoading, setCommitsLoading] = useState(false)
 
   useEffect(() => {
@@ -101,9 +131,11 @@ export default function RepositoryDetail({ repo, onBack }) {
         setBranches(list)
         const preferred =
           list.find((b) => b.is_default) || list.find((b) => b.name === 'main') || list[0]
-        setBranch(preferred?.name || null)
+        setDefaultBranch(preferred?.name || null)
       } catch {
-        if (alive) setBranch(null)
+        if (alive) setDefaultBranch(null)
+      } finally {
+        if (alive) setBranchesLoaded(true)
       }
     }
     load()
@@ -113,6 +145,7 @@ export default function RepositoryDetail({ repo, onBack }) {
   // One request per branch brings the whole tree *with* content, so opening a
   // file is instant and needs no further round trip.
   useEffect(() => {
+    if (!branch && !branchesLoaded) return undefined
     let alive = true
     setFilesLoading(true)
     setFilesError('')
@@ -129,7 +162,7 @@ export default function RepositoryDetail({ repo, onBack }) {
     }
     load()
     return () => { alive = false }
-  }, [repo.id, branch])
+  }, [repo.id, branch, branchesLoaded])
 
   useEffect(() => {
     if (tab !== 'commits' || commits.length) return undefined
@@ -169,19 +202,32 @@ export default function RepositoryDetail({ repo, onBack }) {
     return () => { alive = false }
   }, [tab, repo.id, graph])
 
-  const paths = useMemo(() => Object.keys(files).sort(), [files])
-  const currentFile = selectedFile ? files[selectedFile] : null
+  // A different branch has different history.
+  useEffect(() => {
+    setCommits([])
+  }, [branch])
 
-  const openFile = useCallback((path) => {
-    setSelectedFile(path)
+  // Whatever opened the file -- a click, a link, Back -- starts it fresh, with its
+  // folders unfolded so the tree shows where it is.
+  useEffect(() => {
     setFileMode('code')
     setBlame(null)
     setDiffRows(null)
     setDiffStats(null)
     setPaneError('')
     setPaneNote('')
-    setTab('code')
-  }, [])
+    if (selectedFile) {
+      setExpanded((prev) => new Set([...prev, ...ancestorsOf(normalizePath(selectedFile))]))
+    }
+  }, [selectedFile, branch])
+
+  const paths = useMemo(() => Object.keys(files).sort(), [files])
+  const currentFile = selectedFile ? files[selectedFile] : null
+  const missingFile = Boolean(selectedFile && !filesLoading && !filesError && !currentFile)
+
+  const openFile = useCallback((path) => {
+    go({ path, line: null, tab: null, commit: null })
+  }, [go])
 
   const revealFolder = (folderPath) => {
     setExpanded((prev) => new Set([...prev, ...ancestorsOf(`${folderPath}/x`), folderPath]))
@@ -292,11 +338,7 @@ export default function RepositoryDetail({ repo, onBack }) {
           <FiGitBranch className="h-4 w-4 text-muted" />
           <select
             value={branch || ''}
-            onChange={(e) => {
-              setBranch(e.target.value)
-              setSelectedFile(null)
-              setCommits([])
-            }}
+            onChange={(e) => go({ branch: e.target.value, path: null, line: null, commit: null })}
             className="rounded-xl border border-border bg-cream-mid px-3 py-1.5 text-sm text-ink outline-none focus:border-ink"
           >
             {branches.map((b) => (
@@ -362,6 +404,13 @@ export default function RepositoryDetail({ repo, onBack }) {
               <div className="px-4 py-20 text-center">
                 <FiFileText className="mx-auto mb-3 h-7 w-7 text-muted" />
                 <p className="text-sm text-muted">Select a file to read it.</p>
+              </div>
+            ) : missingFile ? (
+              <div className="px-4 py-20 text-center" data-testid="file-missing">
+                <FiAlertCircle className="mx-auto mb-3 h-7 w-7 text-warning-fg" />
+                <p className="text-sm text-muted">
+                  <span className="font-mono text-ink">{selectedFile}</span> is not on {branch ? `'${branch}'` : 'this branch'}.
+                </p>
               </div>
             ) : (
               <>
@@ -440,6 +489,8 @@ export default function RepositoryDetail({ repo, onBack }) {
                       content={currentFile?.content}
                       blame={blame}
                       rows={diffRows || []}
+                      highlightLine={line}
+                      onLineClick={(number) => go({ line: number }, { replace: true })}
                     />
                   )}
                 </div>
@@ -552,6 +603,8 @@ export default function RepositoryDetail({ repo, onBack }) {
       )}
 
       {tab === 'protection' && <BranchProtectionPanel repo={repo} />}
+
+      {tab === 'activity' && <ActivityBrowser repoId={repo.id} />}
 
       </>
       )}

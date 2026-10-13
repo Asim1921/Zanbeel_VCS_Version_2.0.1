@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   FiSend,
   FiPlus,
@@ -12,6 +12,10 @@ import {
   FiChevronRight,
   FiLock,
   FiUnlock,
+  FiRotateCw,
+  FiCopy,
+  FiCheck,
+  FiRepeat,
 } from 'react-icons/fi'
 import GlassCard from '../ui/GlassCard'
 import Button from '../ui/Button'
@@ -26,16 +30,22 @@ import api from '../../utils/api'
  *
  * The delivery log is the point of this screen as much as the configuration is:
  * "did the integration actually receive the push" is the first thing anyone
- * asks when a pipeline does not run, and it is unanswerable without it.
+ * asks when a pipeline does not run, and it is unanswerable without it. Attempts
+ * are grouped by delivery, and any delivery can be sent again.
+ *
+ * Every webhook is signed. A secret is generated when none is given and shown
+ * once, like an access token, because the server cannot show it again.
  */
 
-const ALL_EVENTS = [
+const FALLBACK_EVENTS = [
   'push',
   'commit.pending',
   'commit.reviewed',
   'branch.created',
+  'branch.deleted',
   'branch.merged',
   'pull_request.opened',
+  'pull_request.updated',
   'pull_request.merged',
   'pull_request.closed',
   'pull_request.reviewed',
@@ -45,69 +55,114 @@ const ALL_EVENTS = [
   'status.reported',
 ]
 
-function DeliveryRow({ delivery }) {
+const when = (iso) => {
+  const parsed = api.parseServerTimestamp(iso)
+  return parsed ? parsed.toLocaleString() : ''
+}
+
+/** Rows are attempts; a delivery is all the attempts that share a delivery id. */
+function groupDeliveries(rows) {
+  const groups = []
+  const byId = new Map()
+  for (const row of rows) {
+    const key = row.delivery_id || `row-${row.id}`
+    if (!byId.has(key)) {
+      const group = { key, attempts: [] }
+      byId.set(key, group)
+      groups.push(group)
+    }
+    byId.get(key).attempts.push(row)
+  }
+  for (const group of groups) {
+    group.attempts.sort((a, b) => a.attempt - b.attempt)
+    group.last = group.attempts[group.attempts.length - 1]
+  }
+  return groups
+}
+
+function prettyBody(payload) {
+  try {
+    return JSON.stringify(JSON.parse(payload), null, 2)
+  } catch {
+    return payload
+  }
+}
+
+function DeliveryGroup({ group, onRedeliver, busy }) {
   const [open, setOpen] = useState(false)
+  const { last, attempts } = group
   return (
-    <div className="border-b border-border last:border-0">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-3 px-3 py-2 text-left transition-colors hover:bg-white/[0.03]"
-      >
-        {open ? (
-          <FiChevronDown className="h-3.5 w-3.5 shrink-0 text-muted" />
-        ) : (
-          <FiChevronRight className="h-3.5 w-3.5 shrink-0 text-muted" />
-        )}
-        {delivery.success ? (
-          <FiCheckCircle className="h-4 w-4 shrink-0 text-success-fg" />
-        ) : (
-          <FiXCircle className="h-4 w-4 shrink-0 text-danger-fg" />
-        )}
-        <span className="ref shrink-0">{delivery.event}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted">
-          {delivery.created_at?.slice(0, 19).replace('T', ' ')}
-        </span>
-        <span className="shrink-0 font-mono text-[11px] text-muted">
-          {delivery.status_code ?? 'no response'}
-          {delivery.duration_ms != null && ` · ${delivery.duration_ms}ms`}
-          {delivery.attempt > 1 && ` · try ${delivery.attempt}`}
-        </span>
-      </button>
+    <div className="border-b border-border last:border-0" data-testid="delivery-group">
+      <div className="flex w-full flex-wrap items-center gap-3 px-3 py-2">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex min-w-0 flex-1 items-center gap-3 text-left"
+        >
+          {open ? (
+            <FiChevronDown className="h-3.5 w-3.5 shrink-0 text-muted" />
+          ) : (
+            <FiChevronRight className="h-3.5 w-3.5 shrink-0 text-muted" />
+          )}
+          {last.success ? (
+            <FiCheckCircle className="h-4 w-4 shrink-0 text-success-fg" />
+          ) : (
+            <FiXCircle className="h-4 w-4 shrink-0 text-danger-fg" />
+          )}
+          <span className="ref shrink-0">{last.event}</span>
+          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted">
+            {when(attempts[0].created_at)}
+            {last.redelivery_of && ' · redelivery'}
+          </span>
+          <span className="shrink-0 font-mono text-[11px] text-muted">
+            {last.status_code ?? 'no response'}
+            {last.duration_ms != null && ` · ${last.duration_ms}ms`}
+            {attempts.length > 1 && ` · ${attempts.length} attempts`}
+          </span>
+        </button>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => onRedeliver(last)}
+          disabled={busy}
+          className="flex shrink-0 items-center gap-1.5"
+          title="Send this delivery again"
+        >
+          <FiRepeat className="h-3.5 w-3.5" />
+          Redeliver
+        </Button>
+      </div>
 
       {open && (
         <div className="space-y-3 bg-black/20 px-3 py-3">
-          {delivery.error && (
-            <div>
-              <p className="mb-1 font-mono text-[10px] uppercase tracking-wider text-danger-fg">
-                Error
-              </p>
-              <pre className="overflow-x-auto rounded bg-black/40 p-2 font-mono text-[11px] text-danger-fg">
-                {delivery.error}
-              </pre>
+          <p className="font-mono text-[11px] text-muted">
+            Delivery {last.delivery_id || '(from before delivery ids)'}
+            {last.redelivery_of && ` — repeats ${last.redelivery_of}`}
+          </p>
+          {attempts.map((attempt) => (
+            <div key={attempt.id} className="flex flex-wrap items-center gap-2 font-mono text-[11px]">
+              <span className="text-muted">try {attempt.attempt}</span>
+              <span className={attempt.success ? 'text-success-fg' : 'text-danger-fg'}>
+                {attempt.status_code ?? 'no response'}
+              </span>
+              {attempt.error && <span className="break-all text-danger-fg">{attempt.error}</span>}
             </div>
-          )}
+          ))}
           <div>
             <p className="mb-1 font-mono text-[10px] uppercase tracking-wider text-muted">
-              Request body
+              Signed body
             </p>
             <pre className="max-h-52 overflow-auto rounded bg-black/40 p-2 font-mono text-[11px] text-ink-soft">
-              {(() => {
-                try {
-                  return JSON.stringify(JSON.parse(delivery.payload), null, 2)
-                } catch {
-                  return delivery.payload
-                }
-              })()}
+              {prettyBody(last.payload)}
             </pre>
           </div>
-          {delivery.response_body && (
+          {last.response_body && (
             <div>
               <p className="mb-1 font-mono text-[10px] uppercase tracking-wider text-muted">
                 Response
               </p>
               <pre className="max-h-32 overflow-auto rounded bg-black/40 p-2 font-mono text-[11px] text-ink-soft">
-                {delivery.response_body}
+                {last.response_body}
               </pre>
             </div>
           )}
@@ -119,6 +174,7 @@ function DeliveryRow({ delivery }) {
 
 export default function WebhooksPanel({ repositoryId = null }) {
   const [hooks, setHooks] = useState([])
+  const [validEvents, setValidEvents] = useState(FALLBACK_EVENTS)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [notice, setNotice] = useState(null)
@@ -128,10 +184,14 @@ export default function WebhooksPanel({ repositoryId = null }) {
   const [secret, setSecret] = useState('')
   const [events, setEvents] = useState([])
   const [saving, setSaving] = useState(false)
+  const [formError, setFormError] = useState(null)
+
+  const [revealed, setRevealed] = useState(null) // { url, secret, warning }
+  const [copied, setCopied] = useState(false)
 
   const [expanded, setExpanded] = useState(null)
   const [deliveries, setDeliveries] = useState({})
-  const [pinging, setPinging] = useState(null)
+  const [busy, setBusy] = useState(null)
 
   const load = useCallback(async () => {
     try {
@@ -139,6 +199,7 @@ export default function WebhooksPanel({ repositoryId = null }) {
       setError(null)
       const response = await api.listWebhooks(repositoryId)
       setHooks(response.webhooks || [])
+      if (response.valid_events?.length) setValidEvents(response.valid_events)
     } catch (err) {
       setError(err.message || 'Failed to load webhooks')
     } finally {
@@ -156,12 +217,17 @@ export default function WebhooksPanel({ repositoryId = null }) {
     )
   }
 
+  const closeCreate = () => {
+    setCreateOpen(false)
+    setFormError(null)
+  }
+
   const handleCreate = async () => {
     if (!url.trim()) return
     try {
       setSaving(true)
-      setError(null)
-      await api.createWebhook({
+      setFormError(null)
+      const response = await api.createWebhook({
         url: url.trim(),
         repository_id: repositoryId,
         secret: secret.trim() || null,
@@ -173,11 +239,36 @@ export default function WebhooksPanel({ repositoryId = null }) {
       setUrl('')
       setSecret('')
       setEvents([])
+      if (response.secret_generated) {
+        setRevealed({ url: response.webhook?.url, secret: response.secret, warning: response.warning })
+      } else if (response.warning) {
+        setNotice(response.warning)
+      }
       await load()
     } catch (err) {
-      setError(err.message || 'Failed to create webhook')
+      // In the dialog, next to the URL the server refused.
+      setFormError(err.message || 'Failed to create webhook')
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleRotate = async (hook) => {
+    const ok = window.confirm(
+      hook.signed
+        ? `Replace the signing secret for ${hook.url}? Deliveries are signed with the new one straight away, so the receiver must be updated.`
+        : `Give ${hook.url} a signing secret? Its deliveries are unsigned today.`
+    )
+    if (!ok) return
+    try {
+      setBusy(`rotate:${hook.id}`)
+      const response = await api.rotateWebhookSecret(hook.id)
+      setRevealed({ url: hook.url, secret: response.secret })
+      await load()
+    } catch (err) {
+      setError(err.message || 'Failed to rotate the secret')
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -200,34 +291,50 @@ export default function WebhooksPanel({ repositoryId = null }) {
     }
   }
 
+  const loadDeliveries = async (hookId) => {
+    try {
+      const response = await api.listWebhookDeliveries(hookId, 60)
+      setDeliveries((current) => ({ ...current, [hookId]: response.deliveries || [] }))
+    } catch (err) {
+      setError(err.message || 'Failed to load deliveries')
+    }
+  }
+
+  const report = (hook, delivery, verb) => {
+    if (delivery?.success) {
+      setNotice(`${verb}: ${hook.url} answered ${delivery.status_code} in ${delivery.duration_ms}ms.`)
+      setError(null)
+    } else {
+      setNotice(null)
+      setError(`${verb} failed: ${delivery?.error || `HTTP ${delivery?.status_code ?? 'no response'}`}`)
+    }
+  }
+
   const handlePing = async (hook) => {
     try {
-      setPinging(hook.id)
+      setBusy(`ping:${hook.id}`)
       setNotice(null)
       setError(null)
       const response = await api.pingWebhook(hook.id)
-      const delivery = response.delivery
-      if (delivery?.success) {
-        setNotice(`${hook.url} answered ${delivery.status_code} in ${delivery.duration_ms}ms.`)
-      } else {
-        setError(
-          `Ping failed: ${delivery?.error || `HTTP ${delivery?.status_code ?? 'no response'}`}`
-        )
-      }
+      report(hook, response.delivery, 'Ping')
       if (expanded === hook.id) await loadDeliveries(hook.id)
     } catch (err) {
       setError(err.message || 'Ping failed')
     } finally {
-      setPinging(null)
+      setBusy(null)
     }
   }
 
-  const loadDeliveries = async (hookId) => {
+  const handleRedeliver = async (hook, delivery) => {
     try {
-      const response = await api.listWebhookDeliveries(hookId)
-      setDeliveries((current) => ({ ...current, [hookId]: response.deliveries || [] }))
+      setBusy(`redeliver:${hook.id}`)
+      const response = await api.redeliverWebhookDelivery(hook.id, delivery.id)
+      report(hook, response.delivery, 'Redelivery')
+      await loadDeliveries(hook.id)
     } catch (err) {
-      setError(err.message || 'Failed to load deliveries')
+      setError(err.message || 'Redelivery failed')
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -240,6 +347,22 @@ export default function WebhooksPanel({ repositoryId = null }) {
     if (!deliveries[hookId]) await loadDeliveries(hookId)
   }
 
+  const grouped = useMemo(() => {
+    const out = {}
+    for (const [hookId, rows] of Object.entries(deliveries)) out[hookId] = groupDeliveries(rows)
+    return out
+  }, [deliveries])
+
+  const copySecret = async () => {
+    try {
+      await navigator.clipboard.writeText(revealed.secret)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      /* the value is on screen to select by hand */
+    }
+  }
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -249,7 +372,7 @@ export default function WebhooksPanel({ repositoryId = null }) {
           </h2>
           <p className="mt-1 max-w-2xl text-sm text-muted">
             {repositoryId
-              ? 'POST a signed JSON payload to an external service when something happens in this repository.'
+              ? 'POST a signed JSON payload to an external service when something happens in this repository — every push, merge and branch change, however it was made.'
               : 'Server-wide hooks fire for every repository — useful for an audit sink or a chat relay.'}
           </p>
         </div>
@@ -291,9 +414,9 @@ export default function WebhooksPanel({ repositoryId = null }) {
           action={<Button onClick={() => setCreateOpen(true)}>Add a webhook</Button>}
         />
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-3" data-testid="webhook-list">
           {hooks.map((hook) => (
-            <GlassCard key={hook.id} hover={false} className="overflow-hidden">
+            <GlassCard key={hook.id} hover={false} className="overflow-hidden" data-testid="webhook-row">
               <div className="flex flex-wrap items-center gap-3 p-4">
                 <div
                   className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border ${
@@ -313,7 +436,7 @@ export default function WebhooksPanel({ repositoryId = null }) {
                     ) : (
                       <Badge variant="default">Paused</Badge>
                     )}
-                    {hook.has_secret ? (
+                    {hook.signed ? (
                       <span
                         className="flex items-center gap-1 text-[11px] text-success-fg"
                         title="Deliveries are signed with HMAC-SHA256"
@@ -327,7 +450,7 @@ export default function WebhooksPanel({ repositoryId = null }) {
                         title="Without a secret a receiver cannot tell a real delivery from a forged one"
                       >
                         <FiUnlock className="h-3 w-3" />
-                        unsigned
+                        unsigned — generate a secret
                       </span>
                     )}
                   </div>
@@ -336,16 +459,27 @@ export default function WebhooksPanel({ repositoryId = null }) {
                   </p>
                 </div>
 
-                <div className="flex shrink-0 items-center gap-1.5">
+                <div className="flex shrink-0 flex-wrap items-center gap-1.5">
                   <Button
                     variant="secondary"
                     size="sm"
                     onClick={() => handlePing(hook)}
-                    disabled={pinging === hook.id}
+                    disabled={busy === `ping:${hook.id}`}
                     className="flex items-center gap-1.5"
                   >
-                    <FiZap className={`h-3.5 w-3.5 ${pinging === hook.id ? 'animate-pulse' : ''}`} />
-                    {pinging === hook.id ? 'Pinging…' : 'Ping'}
+                    <FiZap className={`h-3.5 w-3.5 ${busy === `ping:${hook.id}` ? 'animate-pulse' : ''}`} />
+                    {busy === `ping:${hook.id}` ? 'Pinging…' : 'Ping'}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => handleRotate(hook)}
+                    disabled={busy === `rotate:${hook.id}`}
+                    className="flex items-center gap-1.5"
+                    title={hook.signed ? 'Replace the signing secret' : 'Give this webhook a signing secret'}
+                  >
+                    <FiRotateCw className="h-3.5 w-3.5" />
+                    {hook.signed ? 'Rotate secret' : 'Generate secret'}
                   </Button>
                   <Button variant="ghost" size="sm" onClick={() => handleToggleActive(hook)}>
                     {hook.active ? 'Pause' : 'Resume'}
@@ -377,14 +511,21 @@ export default function WebhooksPanel({ repositoryId = null }) {
 
               {expanded === hook.id && (
                 <div className="border-t border-border">
-                  {!deliveries[hook.id] ? (
+                  {!grouped[hook.id] ? (
                     <p className="px-4 py-4 text-sm text-muted">Loading…</p>
-                  ) : deliveries[hook.id].length === 0 ? (
+                  ) : grouped[hook.id].length === 0 ? (
                     <p className="px-4 py-4 text-sm text-muted">
                       Nothing delivered yet. Use Ping to send a test.
                     </p>
                   ) : (
-                    deliveries[hook.id].map((d) => <DeliveryRow key={d.id} delivery={d} />)
+                    grouped[hook.id].map((group) => (
+                      <DeliveryGroup
+                        key={group.key}
+                        group={group}
+                        busy={busy === `redeliver:${hook.id}`}
+                        onRedeliver={(delivery) => handleRedeliver(hook, delivery)}
+                      />
+                    ))
                   )}
                 </div>
               )}
@@ -395,34 +536,36 @@ export default function WebhooksPanel({ repositoryId = null }) {
 
       <Modal
         open={createOpen}
-        onClose={() => setCreateOpen(false)}
+        onClose={closeCreate}
         title="Add a webhook"
-        subtitle="Zanbeel will POST a JSON payload to this URL."
+        subtitle="Zanbeel will POST a signed JSON payload to this URL."
       >
         <div className="space-y-5">
           <Input
             label="Payload URL"
-            placeholder="https://example.com/zanbeel-hook"
+            placeholder="https://ci.example.com/zanbeel-hook"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
+            hint="Addresses on this server, the private network or the cloud metadata service are refused unless an administrator allows them."
           />
 
           <Input
             label="Secret (optional)"
             type="password"
-            placeholder="Used to sign each delivery"
+            placeholder="Leave empty to have one generated"
             value={secret}
             onChange={(e) => setSecret(e.target.value)}
-            hint="Deliveries are signed with HMAC-SHA256 in X-Zanbeel-Signature-256. Without a secret the receiver cannot tell a real delivery from a forged one."
+            hint="At least 16 characters. Each delivery carries X-Zanbeel-Signature-256: sha256=<HMAC-SHA256 of the body>."
           />
 
           <div className="space-y-2">
             <span className="text-[13px] font-medium text-ink-soft">Events</span>
             <p className="text-xs text-muted">
-              Leave everything unchecked to receive all events.
+              Leave everything unchecked to receive all events. CI usually wants{' '}
+              <code className="ref">push</code> and <code className="ref">pull_request.updated</code>.
             </p>
             <div className="grid max-h-56 grid-cols-1 gap-1.5 overflow-y-auto pr-1 sm:grid-cols-2">
-              {ALL_EVENTS.map((event) => (
+              {validEvents.map((event) => (
                 <label
                   key={event}
                   className="flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-white/[0.02] px-2.5 py-1.5 transition-colors hover:border-border-strong"
@@ -439,13 +582,58 @@ export default function WebhooksPanel({ repositoryId = null }) {
             </div>
           </div>
 
+          {formError && (
+            <div className="flex items-start gap-2 rounded-lg border border-danger-fg/25 bg-danger-bg p-3 text-sm text-danger-fg">
+              <FiAlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span className="min-w-0 break-words">{formError}</span>
+            </div>
+          )}
+
           <div className="flex justify-end gap-2 pt-1">
-            <Button variant="secondary" onClick={() => setCreateOpen(false)}>
+            <Button variant="secondary" onClick={closeCreate}>
               Cancel
             </Button>
             <Button onClick={handleCreate} disabled={!url.trim() || saving}>
               {saving ? 'Adding…' : 'Add webhook'}
             </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        open={Boolean(revealed)}
+        onClose={() => setRevealed(null)}
+        title="Copy the signing secret now"
+        subtitle="The server cannot show it again. The receiver needs it to verify deliveries."
+      >
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 rounded-lg border border-border bg-cream-mid p-3">
+            <code data-testid="webhook-secret" className="min-w-0 flex-1 break-all font-mono text-[13px] text-ink">
+              {revealed?.secret}
+            </code>
+            <Button variant="secondary" size="sm" onClick={copySecret} className="shrink-0">
+              {copied ? (
+                <>
+                  <FiCheck className="mr-1.5 h-3.5 w-3.5 text-success-fg" />
+                  Copied
+                </>
+              ) : (
+                <>
+                  <FiCopy className="mr-1.5 h-3.5 w-3.5" />
+                  Copy
+                </>
+              )}
+            </Button>
+          </div>
+          <div className="rounded-lg border border-border bg-white/[0.02] p-3 text-xs text-muted">
+            The receiver computes HMAC-SHA256 of the raw request body with this secret and
+            compares it with <code className="ref">X-Zanbeel-Signature-256</code>. The body carries
+            its own <code className="ref">delivery_id</code> and <code className="ref">delivered_at</code>,
+            so a replayed delivery can be refused.
+          </div>
+          {revealed?.warning && <p className="text-xs text-warning-fg">{revealed.warning}</p>}
+          <div className="flex justify-end">
+            <Button onClick={() => setRevealed(null)}>I have saved it</Button>
           </div>
         </div>
       </Modal>

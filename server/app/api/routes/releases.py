@@ -16,6 +16,8 @@ from app.services.semver import _validate_semver
 from app.services import webhooks as hook_service
 
 
+from app.services import audit
+
 router = APIRouter()
 
 
@@ -75,6 +77,9 @@ async def create_release(
         tag = TagCRUD.create_tag(db, repo_id, tag_name, commit_id, f"Release {version}", current_user.id)
 
     release = ReleaseCRUD.create_release(db, repo_id, tag.id, version, request.title, request.notes, current_user.id)
+    audit.record(db, current_user.id, "release_created", repository_id=repo_id,
+                 description=f"Published release {release.version} ({tag.name})",
+                 target_type="release", target_id=release.version, commit_id=tag.commit_id)
 
     hook_service.dispatch(db, hook_service.EVENT_RELEASE_PUBLISHED, repo_id, {
         "repository": {"id": repo_id, "name": repository.name},

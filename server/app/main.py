@@ -15,14 +15,17 @@ from database.database import create_tables
 from app.api import register_routers
 from app.config import CORS_ORIGINS
 from app.services.refs import ReferenceError
+from app.services.audit import AuditContextMiddleware
 from app.db.schema_check import verify_or_fail
 from app.db.migrations import (
     ensure_access_tokens_table,
+    ensure_activity_columns,
     ensure_branch_protection_tables,
     ensure_credential_columns,
     ensure_commit_signatures_table,
     ensure_commit_statuses_table,
     ensure_fork_columns,
+    ensure_integration_columns,
     ensure_merge_conflict_branch_sessions,
     ensure_merge_conflict_resolution_columns,
     ensure_merge_conflict_tables,
@@ -56,6 +59,9 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
 )
+
+# Lets the activity log see the request (credential, client address) from any layer.
+app.add_middleware(AuditContextMiddleware)
 
 
 # A refused reference change answers in one shape everywhere, whichever route it came
@@ -111,12 +117,31 @@ async def startup_event():
     ensure_webhook_tables()
     ensure_commit_statuses_table()
     ensure_server_hooks_table()
+    # After the webhook, status and hook tables above.
+    ensure_integration_columns()
+    ensure_activity_columns()
     ensure_security_tables()
 
     # The patches above each swallow their own errors, so "nothing raised"
     # has never meant "the schema is right". Ask the database instead, and
     # refuse to serve requests against a schema we know is wrong.
     verify_or_fail()
+
+    # Code search: open the index and queue whatever is behind its default branch.
+    # Runs on a background thread, so a large backlog does not delay startup.
+    from app.services import search_index
+    search_index.start()
+
+    # The activity log is kept forever unless an administrator sets a retention period.
+    from app.services import audit
+    from database.database import SessionLocal
+    db = SessionLocal()
+    try:
+        removed = audit.prune(db)
+        if removed:
+            print(f"[ok] Pruned {removed} activity record(s) past FOXNEST_ACTIVITY_RETENTION_DAYS")
+    finally:
+        db.close()
 
     print("✓ Database tables created/verified")
     print("  - users (with role and team_lead_id)")
@@ -137,6 +162,13 @@ async def startup_event():
     print("  - user_permissions")
     print("  - repository_stars")
     print("=" * 60)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop background indexing so shutdown does not wait for a queue of repositories."""
+    from app.services import search_index
+    search_index.stop()
 
 
 register_routers(app)

@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react'
+import React, { useEffect, useMemo, useRef } from 'react'
 import { cn } from '../lib/utils'
 import { authorClass } from '../lib/blame'
 
@@ -11,18 +11,45 @@ import { authorClass } from '../lib/blame'
 
 const GUTTER = 'select-none border-r border-border pr-2 text-right font-mono text-[10.5px] text-muted'
 
-/** Plain source with line numbers. */
-function PlainLines({ content }) {
+/**
+ * Plain source with line numbers.
+ *
+ * ``highlightLine`` marks one line and scrolls to it -- where a search result or a
+ * link points. Clicking a line number calls ``onLineClick``, which the repository
+ * page uses to put the line in the address so it can be shared.
+ */
+function PlainLines({ content, highlightLine, onLineClick }) {
   const lines = useMemo(() => String(content ?? '').split('\n'), [content])
+  const marked = useRef(null)
+  useEffect(() => {
+    if (highlightLine && marked.current) marked.current.scrollIntoView({ block: 'center' })
+  }, [highlightLine, content])
   return (
     <table className="w-full border-collapse font-mono text-[12px] leading-[1.55]">
       <tbody>
-        {lines.map((text, i) => (
-          <tr key={i} className="hover:bg-white/[0.03]">
-            <td className={cn(GUTTER, 'w-[1%] whitespace-nowrap align-top')}>{i + 1}</td>
-            <td className="whitespace-pre-wrap break-words pl-3 align-top text-ink">{text || ' '}</td>
-          </tr>
-        ))}
+        {lines.map((text, i) => {
+          const number = i + 1
+          const isMarked = number === highlightLine
+          return (
+            <tr
+              key={i}
+              id={`L${number}`}
+              ref={isMarked ? marked : undefined}
+              data-highlighted={isMarked ? 'true' : undefined}
+              className={cn('hover:bg-white/[0.03]', isMarked && 'bg-accent/15 hover:bg-accent/20')}
+            >
+              <td className={cn(GUTTER, 'w-[1%] whitespace-nowrap align-top')}>
+                {onLineClick ? (
+                  <button type="button" onClick={() => onLineClick(number)} className="hover:text-ink"
+                          title="Link to this line">
+                    {number}
+                  </button>
+                ) : number}
+              </td>
+              <td className="whitespace-pre-wrap break-words pl-3 align-top text-ink">{text || ' '}</td>
+            </tr>
+          )
+        })}
       </tbody>
     </table>
   )
@@ -124,12 +151,12 @@ function DiffLines({ rows }) {
   )
 }
 
-export default function CodeView({ mode = 'code', content, blame, rows, className }) {
+export default function CodeView({ mode = 'code', content, blame, rows, className, highlightLine, onLineClick }) {
   return (
     <div className={cn('overflow-x-auto', className)}>
       {mode === 'blame' && <BlameLines blame={blame} />}
       {mode === 'diff' && <DiffLines rows={rows} />}
-      {mode === 'code' && <PlainLines content={content} />}
+      {mode === 'code' && <PlainLines content={content} highlightLine={highlightLine} onLineClick={onLineClick} />}
     </div>
   )
 }

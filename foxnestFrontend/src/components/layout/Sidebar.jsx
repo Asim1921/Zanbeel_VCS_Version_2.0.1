@@ -33,12 +33,12 @@ const Sidebar = ({ isOpen, setIsOpen, activeTab, setActiveTab, currentUser }) =>
     { name: 'Repositories', id: 'repositories', icon: FiFolder, description: 'Browse all repositories' },
     { name: 'Search', id: 'search', icon: FiSearch, description: 'Find repositories, commits and code' },
     { name: 'Notifications', id: 'notifications', icon: FiBell, description: 'Everything you have been told' },
+    { name: 'Activity', id: 'activity', icon: FiActivity, description: 'Who did what, in what you can see' },
     { name: 'Profile', id: 'profile', icon: FiUser, description: 'Your repositories, commits and details' },
     { name: 'Settings', id: 'settings', icon: FiSettings, description: 'Access tokens and SSH keys' },
   ]
 
   const adminNavigation = [
-    { name: 'Activity', id: 'activity', icon: FiActivity, description: 'Audit log of everything that happened' },
     { name: 'Users & Permissions', id: 'users-management', icon: FiShield, description: 'Manage users and permissions' },
     { name: 'Password Reset', id: 'password-reset', icon: FiKey, description: 'Reset user passwords' },
     { name: 'Pending Approvals', id: 'pending-approvals', icon: FiClock, description: 'Review pending commits' },

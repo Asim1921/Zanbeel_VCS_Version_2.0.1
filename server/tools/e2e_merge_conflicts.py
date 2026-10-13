@@ -122,6 +122,8 @@ def server_env(workdir):
         FOXNEST_AUTH_SECRET=hashlib.sha256(b"e2e-auth").hexdigest() * 2,
         FOXNEST_PASSWORD_SETUP_KEY=hashlib.sha256(b"e2e-setup").hexdigest() * 2,
         FOXNEST_BLOB_DIR=str(workdir / "blobs"),
+        # The code search index too, or every harness server writes into server/.
+        FOXNEST_SEARCH_INDEX_PATH=str(workdir / "search_index.db"),
         PYTHONIOENCODING="utf-8",
     )
 

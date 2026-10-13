@@ -1,6 +1,6 @@
 """Request bodies for branches, tags, releases, pull requests and rollbacks."""
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel
 
@@ -110,7 +110,8 @@ class BranchPolicyRequest(BaseModel):
     protected_branches: Optional[List[str]] = None
     required_approvals: Optional[int] = None
     # Status check contexts that must be green before a merge, e.g. ["ci/unit-tests"].
-    required_status_checks: Optional[List[str]] = None
+    # An entry may pin who may report it: {"context": "ci/build", "reporter": "jenkins"}.
+    required_status_checks: Optional[List[Union[str, Dict[str, Any]]]] = None
 
 
 class BranchMergeRequest(BaseModel):

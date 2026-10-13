@@ -210,6 +210,8 @@ async def upsert_branch_protection(
     ActivityCRUD.create_activity(
         db, current_user.id, "branch_policy_changed",
         f"Set '{pattern}' protection to {request.mode}", repo_id,
+        target_type="branch_protection", target_id=pattern,
+        payload={"mode": request.mode, "rules": request.rules},
     )
     return {
         "success": True,

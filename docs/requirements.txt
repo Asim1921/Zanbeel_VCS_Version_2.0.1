@@ -16,3 +16,6 @@ httpx>=0.27,<0.28
 cryptography>=42.0.0
 # Test runner for server/tests, the regression baseline.
 pytest>=8.0.0
+# Push-rule patterns are written by repository owners and run on every push; the
+# regex module can stop a pathological pattern, the standard re module cannot.
+regex>=2024.4.16

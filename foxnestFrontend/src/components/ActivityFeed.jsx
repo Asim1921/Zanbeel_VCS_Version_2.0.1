@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
   FiGitCommit,
   FiGitMerge,
@@ -9,124 +10,79 @@ import {
   FiTrash2,
   FiArchive,
   FiCheckCircle,
+  FiXCircle,
   FiActivity,
   FiChevronDown,
   FiFileText,
   FiKey,
+  FiSend,
+  FiFilter,
+  FiTag,
+  FiArrowRight,
 } from 'react-icons/fi'
+import api from '../utils/api'
+import { activityTargetLink, profileLink } from '../lib/links'
 import { cn } from '../lib/utils'
 
 /**
- * The platform activity feed.
+ * The activity log as a timeline: events in order, newest first.
  *
- * The API has served this for a long time and nothing ever rendered it, so
- * administrators had no way to see who did what. Laid out as a timeline rather
- * than a table: these are events in order, and the eye should follow the thread.
+ * Rows now carry what they are about -- the branch, the commit before and after, the
+ * pull request -- and how the person was signed in, so each row links to the thing
+ * it describes. Rows written before that existed show their description only.
  */
 
 const ICONS = {
+  code: FiGitCommit,
+  review: FiCheckCircle,
+  repository: FiFolder,
+  settings: FiShield,
+  access: FiKey,
+}
+
+const TYPE_ICONS = {
   push_commit: FiGitCommit,
-  pending_commit: FiGitCommit,
+  branch_created: FiGitBranch,
+  branch_deleted: FiTrash2,
+  branch_renamed: FiGitBranch,
+  branch_force_updated: FiGitBranch,
   merge_branch: FiGitMerge,
-  publish_branch: FiGitBranch,
-  copy_files: FiGitBranch,
-  create_repository: FiFolder,
-  request_repository: FiFolder,
-  fork_repository: FiGitBranch,
-  create_pull_request: FiGitMerge,
-  review_pull_request: FiCheckCircle,
   merge_pull_request: FiGitMerge,
   resolve_merge_conflicts: FiGitMerge,
-  update_branch_policy: FiShield,
+  reject_commit: FiXCircle,
+  close_pull_request: FiXCircle,
   archive_repository: FiArchive,
+  delete_repository: FiTrash2,
   gc: FiTrash2,
-  register_user: FiUserPlus,
   generate_docs: FiFileText,
   generate_project_docs: FiFileText,
-  grant_access_to_issue: FiKey,
-  password_reset: FiKey,
-  password_reset_otp_sent: FiKey,
+  webhook_created: FiSend,
+  webhook_updated: FiSend,
+  webhook_deleted: FiSend,
+  webhook_secret_rotated: FiSend,
+  push_rule_created: FiFilter,
+  push_rule_updated: FiFilter,
+  push_rule_deleted: FiFilter,
+  tag_created: FiTag,
+  tag_deleted: FiTag,
+  release_created: FiTag,
+  create_user: FiUserPlus,
 }
 
 const TONES = {
-  push_commit: 'text-accent',
-  merge_branch: 'text-success-fg',
-  create_pull_request: 'text-info-fg',
-  review_pull_request: 'text-success-fg',
-  merge_pull_request: 'text-success-fg',
-  archive_repository: 'text-warning-fg',
-  gc: 'text-danger-fg',
+  code: 'text-accent',
+  review: 'text-success-fg',
+  repository: 'text-ink-soft',
+  settings: 'text-warning-fg',
+  access: 'text-info-fg',
 }
 
-const TYPE_LABELS = {
-  push_commit: 'Commit pushed',
-  pending_commit: 'Commit submitted for review',
-  merge_branch: 'Branch merged',
-  publish_branch: 'Branch published',
-  copy_files: 'Files copied between branches',
-  create_repository: 'Repository created',
-  request_repository: 'Repository requested',
-  fork_repository: 'Repository forked',
-  create_pull_request: 'Pull request opened',
-  review_pull_request: 'Pull request reviewed',
-  merge_pull_request: 'Pull request merged',
-  resolve_merge_conflicts: 'Merge conflicts resolved',
-  generate_docs: 'Documentation generated',
-  generate_project_docs: 'Project documentation generated',
-  grant_access_to_issue: 'Issue access granted',
-  update_branch_policy: 'Branch policy updated',
-  archive_repository: 'Repository archived',
-  gc: 'Garbage collection',
-  register_user: 'User registered',
-  password_reset: 'Password reset',
-  password_reset_otp_sent: 'Password reset code sent',
-  cherry_pick: 'Commit cherry-picked',
-  revert: 'Commit reverted',
-  rebase: 'Branch rebased',
-}
-
-function humanType(type) {
-  return TYPE_LABELS[type] || (type ? type.replace(/_/g, ' ') : 'Activity')
-}
-
-/**
- * Pull the identifiers already embedded in a description into named fields.
- *
- * The server writes descriptions like "Pushed commit to 'resetPass' from aa3fe0cc
- * to 272690889b6dce81: ..." -- the useful parts are in there, but the row truncates
- * them. Surfacing them separately means a full commit id can be read and copied
- * without another request, since the feed endpoint returns no structured detail.
- */
-function extractDetails(description) {
-  const text = description || ''
-  const details = []
-
-  const quoted = [...text.matchAll(/'([^']{1,80})'/g)].map((m) => m[1])
-  if (quoted.length === 1) {
-    details.push({ label: 'Branch', value: quoted[0] })
-  } else if (quoted.length > 1) {
-    details.push({ label: 'Branches', value: quoted.join(' → ') })
-  }
-
-  // 8+ hex characters is a commit id here; shorter runs are too easy to hit by chance.
-  const hashes = [...new Set([...text.matchAll(/\b[0-9a-f]{8,40}\b/g)].map((m) => m[0]))]
-  if (hashes.length === 1) {
-    details.push({ label: 'Commit', value: hashes[0], mono: true })
-  } else if (hashes.length >= 2) {
-    details.push({ label: 'From', value: hashes[0], mono: true })
-    details.push({ label: 'To', value: hashes[1], mono: true })
-  }
-
-  const pr = text.match(/\bPR #(\d+)/i) || text.match(/\bpull request #(\d+)/i)
-  if (pr) details.push({ label: 'Pull request', value: `#${pr[1]}` })
-
-  return details
-}
+const DANGER = new Set(['branch_deleted', 'branch_force_updated', 'delete_repository', 'credentials_revoked',
+  'rollback_branch', 'delete_commit', 'gc'])
 
 function absoluteTime(iso) {
-  if (!iso) return ''
-  const when = new Date(iso)
-  if (Number.isNaN(when.getTime())) return ''
+  const when = api.parseServerTimestamp(iso)
+  if (!when) return ''
   return when.toLocaleString(undefined, {
     year: 'numeric', month: 'short', day: 'numeric',
     hour: '2-digit', minute: '2-digit', second: '2-digit',
@@ -134,10 +90,10 @@ function absoluteTime(iso) {
 }
 
 function relativeTime(iso) {
-  if (!iso) return ''
-  const then = new Date(iso).getTime()
-  if (Number.isNaN(then)) return ''
-  const seconds = Math.round((Date.now() - then) / 1000)
+  // Server times are naive UTC; new Date() alone would read them as local time.
+  const when = api.parseServerTimestamp(iso)
+  if (!when) return ''
+  const seconds = Math.round((Date.now() - when.getTime()) / 1000)
   if (seconds < 60) return 'just now'
   const minutes = Math.round(seconds / 60)
   if (minutes < 60) return `${minutes}m ago`
@@ -145,12 +101,33 @@ function relativeTime(iso) {
   if (hours < 24) return `${hours}h ago`
   const days = Math.round(hours / 24)
   if (days < 30) return `${days}d ago`
-  return new Date(iso).toLocaleDateString()
+  return when.toLocaleDateString()
 }
 
-export default function ActivityFeed({ activities = [], loading, emptyHint, className }) {
-  // Which row is expanded. One at a time: these panels are tall enough that several
-  // open at once turns the timeline back into a wall of text.
+function credentialText(credential) {
+  if (!credential) return null
+  if (credential === 'session') return 'password sign-in'
+  const [kind, ...rest] = credential.split(':')
+  const name = rest.join(':')
+  if (kind === 'token') return `access token “${name}”`
+  if (kind === 'ssh_key') return `SSH key “${name}”`
+  return credential
+}
+
+function Detail({ label, children, mono }) {
+  return (
+    <div className="flex gap-2">
+      <dt className="w-24 shrink-0 text-muted">{label}</dt>
+      <dd className={cn('min-w-0 flex-1 break-words text-ink', mono && 'break-all font-mono text-[11px]')}>
+        {children}
+      </dd>
+    </div>
+  )
+}
+
+export default function ActivityFeed({ activities = [], loading, emptyHint, className, showRepository = true }) {
+  // One row open at a time: the panels are tall enough that several open at once
+  // turns the timeline back into a wall of text.
   const [openId, setOpenId] = useState(null)
 
   if (loading) {
@@ -179,26 +156,27 @@ export default function ActivityFeed({ activities = [], loading, emptyHint, clas
   }
 
   return (
-    <ol className={cn('relative space-y-1', className)}>
-      {/* the thread the timeline hangs from */}
+    <ol className={cn('relative space-y-1', className)} data-testid="activity-feed">
       <span
         className="absolute bottom-4 left-[15px] top-4 w-px bg-gradient-to-b from-border via-border to-transparent"
         aria-hidden
       />
       {activities.map((item, index) => {
         const type = item.activity_type || item.type || ''
-        const Icon = ICONS[type] || FiActivity
-        const tone = TONES[type] || 'text-ink-soft'
-        // Fall back to the index so rows without an id still toggle independently.
+        const Icon = TYPE_ICONS[type] || ICONS[item.category] || FiActivity
+        const tone = DANGER.has(type) ? 'text-danger-fg' : TONES[item.category] || 'text-ink-soft'
         const rowId = item.id ?? `idx-${index}`
         const isOpen = openId === rowId
         const username = item.username || item.user
         const repository = item.repository_name || item.repository
-        const description = item.description || humanType(type)
-        const details = isOpen ? extractDetails(item.description) : []
+        const label = item.label || type.replace(/_/g, ' ')
+        const description = item.description || label
+        const ref = item.payload?.ref
+        const link = activityTargetLink(item)
+        const credential = credentialText(item.credential)
 
         return (
-          <li key={rowId} className="relative">
+          <li key={rowId} className="relative" data-testid="activity-row">
             <button
               type="button"
               onClick={() => setOpenId(isOpen ? null : rowId)}
@@ -223,75 +201,74 @@ export default function ActivityFeed({ activities = [], loading, emptyHint, clas
                   {username && <span className="font-medium text-ink">{username}</span>}{' '}
                   <span className={cn(!isOpen && 'line-clamp-2')}>{description}</span>
                 </span>
-                <span className="mt-1 flex items-center gap-2 font-mono text-[10.5px] text-muted">
-                  <span>{relativeTime(item.created_at)}</span>
-                  {repository && (
+                <span className="mt-1 flex flex-wrap items-center gap-x-2 font-mono text-[10.5px] text-muted">
+                  <span title={absoluteTime(item.created_at)}>{relativeTime(item.created_at)}</span>
+                  <span aria-hidden>·</span>
+                  <span>{label}</span>
+                  {showRepository && repository && (
                     <>
                       <span aria-hidden>·</span>
                       <span className="truncate">{repository}</span>
                     </>
                   )}
+                  {credential && item.credential !== 'session' && (
+                    <>
+                      <span aria-hidden>·</span>
+                      <span className="truncate">via {credential}</span>
+                    </>
+                  )}
                 </span>
               </span>
               <FiChevronDown
-                className={cn(
-                  'mt-1.5 h-3.5 w-3.5 shrink-0 text-muted transition-transform',
-                  isOpen && 'rotate-180'
-                )}
+                className={cn('mt-1.5 h-3.5 w-3.5 shrink-0 text-muted transition-transform', isOpen && 'rotate-180')}
                 aria-hidden
               />
             </button>
 
             {isOpen && (
-              <div className="ml-11 mr-1 mb-2 rounded-xl border border-border bg-white/[0.03] p-3">
+              <div className="mb-2 ml-11 mr-1 rounded-xl border border-border bg-white/[0.03] p-3">
                 <dl className="space-y-2 text-[12px]">
-                  <div className="flex gap-2">
-                    <dt className="w-20 shrink-0 text-muted">Event</dt>
-                    <dd className="min-w-0 flex-1 text-ink">{humanType(type)}</dd>
-                  </div>
+                  <Detail label="Event">{label}</Detail>
                   {username && (
-                    <div className="flex gap-2">
-                      <dt className="w-20 shrink-0 text-muted">By</dt>
-                      <dd className="min-w-0 flex-1 text-ink">{username}</dd>
-                    </div>
+                    <Detail label="By">
+                      <Link to={profileLink(username)} className="text-accent hover:underline">{username}</Link>
+                      {credential && <span className="ml-1.5 text-muted">with {credential}</span>}
+                    </Detail>
                   )}
-                  {repository && (
-                    <div className="flex gap-2">
-                      <dt className="w-20 shrink-0 text-muted">Repository</dt>
-                      <dd className="min-w-0 flex-1 break-words text-ink">{repository}</dd>
-                    </div>
-                  )}
+                  {repository && <Detail label="Repository">{repository}</Detail>}
                   {item.created_at && (
-                    <div className="flex gap-2">
-                      <dt className="w-20 shrink-0 text-muted">When</dt>
-                      <dd className="min-w-0 flex-1 text-ink">
-                        {absoluteTime(item.created_at)}
-                        <span className="ml-1.5 text-muted">({relativeTime(item.created_at)})</span>
-                      </dd>
-                    </div>
+                    <Detail label="When">
+                      {absoluteTime(item.created_at)}
+                      <span className="ml-1.5 text-muted">({relativeTime(item.created_at)})</span>
+                    </Detail>
                   )}
-                  {details.map((detail) => (
-                    <div key={detail.label} className="flex gap-2">
-                      <dt className="w-20 shrink-0 text-muted">{detail.label}</dt>
-                      <dd
-                        className={cn(
-                          'min-w-0 flex-1 break-all text-ink',
-                          detail.mono && 'font-mono text-[11px]'
-                        )}
-                      >
-                        {detail.value}
-                      </dd>
-                    </div>
-                  ))}
+                  {ref?.branch && <Detail label="Branch">{ref.renamed_from ? `${ref.renamed_from} → ${ref.branch}` : ref.branch}</Detail>}
+                  {ref && (ref.before || ref.after) && (
+                    <Detail label="Moved" mono>
+                      {(ref.before || 'none').slice(0, 12)} → {(ref.after || 'none').slice(0, 12)}
+                      {ref.operation && <span className="ml-1.5 font-sans text-muted">({ref.operation.replace('_', ' ')})</span>}
+                      {ref.created && <span className="ml-1.5 font-sans text-muted">— new branch</span>}
+                    </Detail>
+                  )}
+                  {item.commit_id && !ref && <Detail label="Commit" mono>{item.commit_id}</Detail>}
+                  {item.client_ip && <Detail label="From" mono>{item.client_ip}</Detail>}
+                  {item.payload?.system && <Detail label="Note">Made by the server on the owner's behalf.</Detail>}
                   {item.description && (
                     <div className="flex gap-2 border-t border-border pt-2">
-                      <dt className="w-20 shrink-0 text-muted">Details</dt>
-                      <dd className="min-w-0 flex-1 whitespace-pre-wrap break-words text-ink-soft">
-                        {item.description}
-                      </dd>
+                      <dt className="w-24 shrink-0 text-muted">Details</dt>
+                      <dd className="min-w-0 flex-1 whitespace-pre-wrap break-words text-ink-soft">{item.description}</dd>
                     </div>
                   )}
                 </dl>
+                {link && (
+                  <Link
+                    to={link}
+                    className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-accent/40 bg-accent/10 px-2.5 py-1 text-[12px] text-ink hover:bg-accent/20"
+                    data-testid="activity-open"
+                  >
+                    Open <FiArrowRight className="h-3 w-3" />
+                  </Link>
+                )}
               </div>
             )}
           </li>

@@ -51,7 +51,7 @@ PUBLIC = {
 }
 
 ROUTE_RE = re.compile(
-    r'@router\.(get|post|put|delete|patch)\("([^"]+)"\)\s*\nasync def (\w+)\(([\s\S]*?)\):'
+    r'@router\.(get|post|put|delete|patch)\("([^"]+)"\)\s*\n(?:async )?def (\w+)\(([\s\S]*?)\):'
 )
 AUTH_MARKERS = ("current_user", "require_admin_user", "require_reviewer_user",
                 "get_optional_user")

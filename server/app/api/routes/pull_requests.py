@@ -33,13 +33,15 @@ from app.services import webhooks as hook_service
 from app.services.commit_graph import _find_merge_base, _get_commit_tree
 from app.services.issues import _sync_issues_for_pr_created, _sync_issues_for_pr_merged
 from app.services.merge import _merge_trees
-from app.services import refs
+from app.services import refs, server_hooks
 from app.services.signing import sign_commit
 from app.services import (
     codeowners, forks, merge_conflicts, pr_comments, pr_files, pr_reviews, pr_source,
     review_notifications,
 )
 
+
+from app.services import notifications as notify
 
 router = APIRouter()
 
@@ -112,6 +114,13 @@ async def create_pull_request(
         current_user.id
     )
     _sync_issues_for_pr_created(db, repo_id, pr)
+    ActivityCRUD.create_activity(
+        db, current_user.id, "create_pull_request",
+        f"Opened #{pr.id} {pr.title} ({pr.source_branch} -> {pr.target_branch})", repo_id,
+        target_type="pull_request", target_id=pr.id,
+    )
+    notify.mentions_in_pull_request(db, repository, pr, current_user, request.description,
+                                    where="the description", dedupe=f"{repo_id}:{pr.id}:description")
 
     hook_service.dispatch(db, hook_service.EVENT_PR_OPENED, repo_id, {
         "repository": {"id": repo_id, "name": repository.name},
@@ -199,6 +208,21 @@ async def close_pull_request(
         raise HTTPException(status_code=403, detail="Not allowed to close this pull request")
 
     pr = PullRequestCRUD.close_pull_request(db, pr, reviewer_id=actor.id)
+    ActivityCRUD.create_activity(
+        db, actor.id, "close_pull_request", f"Closed #{pr.id} {pr.title}", repo_id,
+        target_type="pull_request", target_id=pr.id,
+    )
+    notify.pull_request_closed(db, repository, pr, actor)
+    hook_service.dispatch(db, hook_service.EVENT_PR_CLOSED, repo_id, {
+        "repository": {"id": repo_id, "name": repository.name},
+        "pull_request": {
+            "id": pr.id,
+            "title": pr.title,
+            "source_branch": pr.source_branch,
+            "target_branch": pr.target_branch,
+        },
+        "closed_by": actor.username,
+    })
     return {"success": True, "status": pr.status}
 
 @router.post("/api/repository/{repo_id}/pull-requests/{pr_id}/merge")
@@ -282,6 +306,20 @@ async def merge_pull_request(
             status_code=exc.status_code,
             content={"success": False, "detail": exc.message, **exc.payload},
         )
+
+    # Push rules apply to what lands, however it lands. A fork's commits were only ever
+    # checked against the fork's own rules, so without this a pull request from a fork
+    # carried anything the upstream forbids straight onto its branch.
+    server_hooks.check_server_write(
+        db, repository, target_branch.name, target_branch.head_commit_id, merged_tree,
+        current_user,
+    )
+    # And ask the branch before writing, as every other merge path does:
+    # create_commit_from_file_hashes() commits its own transaction.
+    refs.precheck_by_id(
+        db, repository_id=repo_id, actor_username=current_user.username,
+        branch_name=target_branch.name, operation=refs.OP_MERGE,
+    )
 
     commit_id = hashlib.sha256(
         f"merge:{repo_id}:{pr.id}:{datetime.utcnow().isoformat()}".encode()
@@ -679,6 +717,11 @@ async def add_pull_request_comment(
         raise HTTPException(status_code=exc.status_code, detail=exc.message)
 
     review_notifications.comment_added(db, repository, pr, current_user, comment)
+    notify.mentions_in_pull_request(
+        db, repository, pr, current_user, request.body,
+        where=f"{comment.file_path}:{comment.line}" if comment.file_path else "the discussion",
+        dedupe=f"{repo_id}:{pr.id}:comment:{comment.id}",
+    )
 
     return {"success": True, "comment_id": comment.id,
             **pr_comments.threads(db, repository, pr)}
@@ -840,7 +883,10 @@ async def create_cross_repo_pull_request(
         db, current_user.id, "create_pull_request",
         f"Opened PR #{pr.id} from fork '{fork.name}' "
         f"({pr.source_branch} -> {pr.target_branch})", upstream.id,
+        target_type="pull_request", target_id=pr.id,
     )
+    notify.mentions_in_pull_request(db, upstream, pr, current_user, request.description,
+                                    where="the description", dedupe=f"{upstream.id}:{pr.id}:description")
     return {
         "success": True,
         "pull_request": {

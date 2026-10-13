@@ -37,7 +37,8 @@ def token_created(db: Session, user: User, token: AccessToken) -> None:
             f"{token.scopes.replace(',', ', ')} was added to your account. It expires: {expiry}. "
             "If this was not you, revoke it under Settings → Access tokens and change your password."
         ),
-        payload={"token_id": token.id, "name": token.name, "scopes": token.scopes},
+        payload={"token_id": token.id, "name": token.name, "scopes": token.scopes,
+                 "target": {"kind": "settings", "tab": "tokens"}},
     )
 
 
@@ -51,7 +52,8 @@ def ssh_key_added(db: Session, user: User, key: SSHKey) -> None:
             f"{(key.scopes or '').replace(',', ', ')}. If this was not you, remove it under "
             "Settings → SSH keys and change your password."
         ),
-        payload={"key_id": key.id, "fingerprint": key.fingerprint},
+        payload={"key_id": key.id, "fingerprint": key.fingerprint,
+                 "target": {"kind": "settings", "tab": "ssh"}},
     )
 
 
@@ -64,5 +66,6 @@ def credentials_revoked(db: Session, user: User, actor: User, tokens: int, keys:
             f"{actor.username} revoked {tokens} access token(s) and removed {keys} SSH key(s) "
             "from your account. Sign in with your password to create new ones."
         ),
-        payload={"tokens": tokens, "keys": keys, "by": actor.username},
+        payload={"tokens": tokens, "keys": keys, "by": actor.username,
+                 "target": {"kind": "settings", "tab": "tokens"}},
     )
