@@ -11,21 +11,34 @@ class BranchCreateRequest(BaseModel):
     # Branch off another branch by name. Resolved to that branch's head; callers usually
     # know a branch name, not a commit id.
     from_branch: Optional[str] = None
+    # Or off a tag: how a hotfix branch for an old release is started.
+    from_tag: Optional[str] = None
 
 class BranchRenameRequest(BaseModel):
     new_name: str
 
 class BranchHeadUpdateRequest(BaseModel):
     head_commit_id: str
+    # Refuse if the branch has moved since the caller looked at it.
+    expected_head_commit_id: Optional[str] = None
 
 class TagCreateRequest(BaseModel):
     name: str
     commit_id: Optional[str] = None
+    # A branch, tag or commit to tag, when the caller has a name rather than an id.
+    target: Optional[str] = None
     message: Optional[str] = None
 
 class ReleaseCreateRequest(BaseModel):
     version: str
     tag: Optional[str] = None
+    # Where a new tag is created when ``tag`` does not exist yet: a branch, tag or
+    # commit. Defaults to the default branch.
+    target: Optional[str] = None
+    title: Optional[str] = None
+    notes: Optional[str] = None
+
+class ReleaseUpdateRequest(BaseModel):
     title: Optional[str] = None
     notes: Optional[str] = None
 

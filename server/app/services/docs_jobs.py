@@ -1,23 +1,51 @@
-"""Background documentation-generation jobs and their in-process job registry."""
+"""Background documentation-generation jobs and their in-process job registry.
 
+Generated documentation is kept in two places: under ``DOCS_DIR/<repo>`` on the server,
+where the web client and ``/docs`` read it, and -- when the person asking may land
+changes on the default branch directly -- committed under ``docs/`` on that branch, which
+is what ``fox generate-docs`` pulls afterwards.
+
+The commit used to be built by hand, and wrongly in four ways:
+
+* its tree was the union of every file seen in the last 200 commits on *any* branch, so
+  generating docs put deleted files back and copied other branches' files onto the
+  default branch -- and it skipped binaries, large files and vendored directories while
+  doing so, which deleted them from the branch;
+* its parent was the newest commit in the repository, whichever branch that was on;
+* it moved ``repository.head_commit_id`` without moving any branch, past branch
+  protection, push rules, the activity log and webhooks;
+* and it was attributed to the repository owner whoever asked, with no permission
+  checked at all -- anyone signed in could generate for any repository.
+
+Now the docs are generated from the default branch's tip, and committed the way every
+other server-side write is (push rules, protection, compare-and-swap, the reference
+service), as the person who asked -- or not at all, with the reason recorded, when they
+could not have pushed that change themselves.
+"""
+
+import hashlib
+import json
 import os
 import re
-import hashlib
 import shutil
+import tempfile
 import threading
 
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from database.crud import ActivityCRUD, CommitCRUD, FileObjectCRUD, RepositoryCRUD
+from database.crud import BranchCRUD, CommitCRUD, FileObjectCRUD, RepositoryCRUD, UserPermissionCRUD
 from database.database import SessionLocal
+from database.models import Commit, Repository, User
 
 from app.config import DOCS_DIR
+from app.services import audit, branch_ops, refs, repo_refs, server_hooks
+from app.services.commit_graph import _get_commit_tree
 from app.services.files import _is_vendor_path
 from app.services.paths import normalize as normalize_path
 from app.services.signing import sign_commit
@@ -29,6 +57,16 @@ import project_docs_generator
 
 DOCS_GENERATION_JOBS: Dict[str, Dict[str, Any]] = {}
 DOCS_GENERATION_LOCK = threading.Lock()
+
+#: What the last successful generation was made from and where it went. A dotfile, so
+#: listings, archives and the commit leave it out.
+MANIFEST_NAME = ".zanbeel-docs.json"
+
+#: The document templates, where the generator itself looks for them (<repo>/docs/
+#: templates). This was computed relative to this file, which pointed at app/docs/
+#: once the code moved out of server.py: AutoDocs v2 then skipped every document as
+#: "Missing template" and every generation from the server failed.
+TEMPLATES_DIR = Path(os.getenv("FOXNEST_DOCS_TEMPLATES_DIR") or project_docs_generator._TEMPLATES_DIR)
 
 
 def _update_docs_job(repo_id: str, **fields):
@@ -70,6 +108,27 @@ def _resolve_progress_steps(selected_docs: Optional[List[str]]) -> tuple[List[st
     return steps, sorted(selected_names), invalid
 
 
+#: The documents a caller may choose, by the key ``selected_docs`` takes (the same keys
+#: ``fox generate-docs --docs`` accepts).
+SELECTABLE_DOCUMENTS = (
+    ("readme", "README.md"),
+    ("api", "API Documentation"),
+    ("architecture", "Architecture"),
+    ("installation", "Installation Guide"),
+    ("database", "Database Schema"),
+    ("requirements", "Requirements (SRS)"),
+    ("use_cases", "Use Cases"),
+    ("release_notes", "Release Notes"),
+    ("user_manual", "User Manual"),
+    ("api_usage", "API Usage Guide"),
+    ("database_er", "Database ER"),
+)
+
+
+def selectable_documents() -> List[Dict[str, str]]:
+    return [{"key": key, "name": name} for key, name in SELECTABLE_DOCUMENTS]
+
+
 def _make_docs_progress_callback(repo_id: str):
     """Return a callback that updates per-document progress in the job dict."""
     def callback(doc_name: str, status: str):
@@ -92,49 +151,309 @@ def _make_docs_progress_callback(repo_id: str):
     return callback
 
 
-def _generate_repository_docs_sync(repo_id: str, lang_filter: Optional[str] = None):
+# --- the manifest -------------------------------------------------------------------
+
+def read_manifest(repo_id: str) -> Optional[Dict[str, Any]]:
+    path = DOCS_DIR / repo_id / MANIFEST_NAME
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _write_manifest(repo_id: str, data: Dict[str, Any]) -> None:
+    root = DOCS_DIR / repo_id
+    root.mkdir(parents=True, exist_ok=True)
+    (root / MANIFEST_NAME).write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+
+
+def generated_files(docs_root: Path) -> List[Path]:
+    """Every generated file, without the manifest or any other dotfile."""
+    if not docs_root.is_dir():
+        return []
+    out = []
+    for path in sorted(docs_root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(docs_root)
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        out.append(path)
+    return out
+
+
+# --- what the docs are generated from -------------------------------------------------
+
+class DocsError(Exception):
+    pass
+
+
+def _docs_base(db: Session, repository: Repository) -> Tuple[Any, Commit]:
+    """The default branch and its tip: what the documentation describes."""
+    branch = repo_refs.default_branch(db, repository.id)
+    if branch is None or not branch.head_commit_id:
+        raise DocsError("Repository has no commits. Push code first.")
+    commit = db.query(Commit).filter(Commit.id == branch.head_commit_id).first()
+    if commit is None:
+        raise DocsError(f"The tip of '{branch.name}' is missing.")
+    return branch, commit
+
+
+_SKIP_DIR_PREFIXES = (
+    "docs/", "node_modules/", "vendor/", ".git/", "venv/", ".venv/",
+    "__pycache__/", "build/", "dist/", ".mypy_cache/", ".pytest_cache/",
+    ".tox/", ".idea/", ".vscode/", ".next/", ".nuxt/", "_archived_",
+    ".fox/",
+)
+_SKIP_BINARY_EXT = {
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp",
+    ".pdf", ".docx", ".xlsx", ".pptx", ".doc", ".xls",
+    ".zip", ".tar", ".gz", ".bz2", ".7z", ".rar",
+    ".exe", ".dll", ".so", ".dylib", ".lib", ".a",
+    ".pyc", ".pyo", ".class", ".o",
+    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    ".mp4", ".mp3", ".avi", ".mov", ".wav",
+    ".db", ".sqlite", ".sqlite3",
+}
+_MAX_FILE_BYTES = 2 * 1024 * 1024  # 2 MB per file
+
+
+def _source_files(commit: Commit) -> Dict[str, bytes]:
+    """The files of ``commit`` worth showing a documentation generator.
+
+    These filters choose what the generator *reads*. They used to choose what the docs
+    commit *kept* as well, which is how generating documentation deleted every image,
+    archive and large file from the branch.
+    """
+    chosen: Dict[str, bytes] = {}
+    for commit_file in commit.files:
+        path = normalize_path(commit_file.file_path)
+        if not path or path in chosen and commit_file.file_path != path:
+            continue
+        if any(path.startswith(prefix) for prefix in _SKIP_DIR_PREFIXES) or _is_vendor_path(path):
+            continue
+        if Path(path).suffix.lower() in _SKIP_BINARY_EXT:
+            continue
+        if not commit_file.file_object:
+            continue
+        content = commit_file.file_object.content
+        if not content or len(content) > _MAX_FILE_BYTES:
+            continue
+        chosen[path] = content
+    return chosen
+
+
+def _materialise(files: Dict[str, bytes], prefix: str) -> Path:
+    root = Path(tempfile.mkdtemp(prefix=prefix))
+    for rel_path, content in files.items():
+        target = root / rel_path
+        try:
+            target.resolve().relative_to(root.resolve())
+        except ValueError:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            target.write_bytes(content)
+        except OSError:
+            pass
+    return root
+
+
+# --- landing the docs on the branch ---------------------------------------------------
+
+def _landing_refusal(db: Session, repository: Repository, actor: Optional[User],
+                     branch_name: str) -> Optional[str]:
+    """Why ``actor`` could not push this change to ``branch_name`` themselves, if so.
+
+    The same rules as ``POST /push``: a developer's pushes wait for review, the branch
+    policy's scope applies, and only the owner or a team lead pushes directly.
+    """
+    if actor is None:
+        return "There is no one to attribute the commit to."
+    if repository.is_archived:
+        return "The repository is archived."
+    if (getattr(actor, "role", None) or "developer") == "developer":
+        return (f"Changes you push to '{branch_name}' go through review, so the documents "
+                "were not committed. They are available here, and a team lead can "
+                "generate them again to commit them.")
+    try:
+        branch_ops.enforce(db, actor, repository, "push", branch_name)
+    except branch_ops.BranchOpError as exc:
+        return exc.message
+    if repository.owner_id != actor.id and not UserPermissionCRUD.has_permission(
+            db, actor.username, repository.id, "team_lead"):
+        return f"Committing to '{branch_name}' directly needs team lead permission on this repository."
+    return None
+
+
+def _commit_docs(db: Session, repository: Repository, actor: Optional[User], branch_name: str,
+                 docs_files: Dict[str, bytes], message: str) -> Dict[str, Any]:
+    """Put ``docs_files`` on ``branch_name`` as one commit, the way any server write is.
+
+    Generation takes minutes, so the branch may have moved meanwhile. The documents
+    then land on top of whatever is there now -- they only touch ``docs/`` -- rather
+    than a long job failing at the last step.
+    """
+    refusal = _landing_refusal(db, repository, actor, branch_name)
+    if refusal:
+        return {"committed": False, "reason": refusal}
+
+    branch = BranchCRUD.get_branch(db, repository.id, branch_name)
+    if branch is None or not branch.head_commit_id:
+        return {"committed": False, "reason": f"'{branch_name}' no longer exists."}
+    base_id = branch.head_commit_id
+    base = db.query(Commit).filter(Commit.id == base_id).first()
+
+    old_tree = _get_commit_tree(db, base_id)
+    new_tree = dict(old_tree)
+    new_tree.update(docs_files)
+    if new_tree == old_tree:
+        return {"committed": False, "unchanged": True,
+                "reason": f"The documents on '{branch_name}' are already up to date."}
+
+    try:
+        server_hooks.check_server_write(db, repository, branch_name, base_id, new_tree, actor,
+                                        message=message)
+    except server_hooks.HookRejection as rejection:
+        return {"committed": False,
+                "reason": f"Push rule '{rejection.hook_name}' refused the documents: "
+                          + "; ".join(rejection.reasons)}
+    try:
+        refs.check_reference_operation(db, repository=repository, actor=actor,
+                                       branch_name=branch_name, operation=refs.OP_UPDATE,
+                                       current_head=base_id)
+    except refs.ReferenceError as exc:
+        return {"committed": False, "reason": exc.message}
+
+    # The branch's own rows, except the paths the documents replace: content that is not
+    # documentation passes through untouched, by hash, without being read.
+    replaced = set(docs_files)
+    entries = [
+        SimpleNamespace(file_path=cf.file_path, file_hash=cf.file_hash, file_size=cf.file_size)
+        for cf in base.files if normalize_path(cf.file_path) not in replaced
+    ]
+    for path, content in sorted(docs_files.items()):
+        stored = FileObjectCRUD.store_file_object(db, content)
+        entries.append(SimpleNamespace(file_path=path, file_hash=stored.hash, file_size=len(content)))
+
+    commit_id = hashlib.sha256(
+        f"{repository.id}:docs:{base_id}:{datetime.utcnow().isoformat()}".encode()
+    ).hexdigest()[:40]
+    commit = CommitCRUD.create_commit_from_file_hashes(db, {
+        "id": commit_id,
+        "repository_id": repository.id,
+        "author": actor.username,
+        "message": message,
+        "parents": [base_id],
+        "timestamp": datetime.utcnow().isoformat(),
+    }, entries)
+    try:
+        refs.update_reference(db, repository=repository, actor=actor, branch_name=branch_name,
+                              new_commit_id=commit.id, expected_commit_id=base_id)
+    except refs.ReferenceError as exc:
+        # Stored, but no branch took it. create_commit_from_file_hashes() moved the
+        # repository head to it; put that back where the branch is.
+        db.rollback()
+        current = BranchCRUD.get_branch(db, repository.id, branch_name)
+        fresh = RepositoryCRUD.get_repository(db, repository.id)
+        if fresh is not None and current is not None and current.is_default:
+            fresh.head_commit_id = current.head_commit_id
+            db.commit()
+        return {"committed": False, "reason": exc.message}
+    sign_commit(db, commit, actor.username, actor.id)
+    return {"committed": True, "commit_id": commit.id, "branch": branch_name, "based_on": base_id}
+
+
+def _valid_generated_doc(path: Path, content: bytes) -> bool:
+    if not content or len(content) < 64:
+        return False
+    if path.suffix.lower() == ".md":
+        text_content = content.decode("utf-8", errors="ignore")
+        if len(text_content.strip()) < 120:
+            return False
+        if "## " not in text_content and "# " not in text_content:
+            return False
+        if re.search(r"\[(Project Name|Your Name)\]|TODO|YYYY-MM-DD", text_content, flags=re.IGNORECASE):
+            return False
+    return True
+
+
+def _docs_to_commit(docs_root: Path, validate: bool) -> Dict[str, bytes]:
+    files: Dict[str, bytes] = {}
+    for path in generated_files(docs_root):
+        content = path.read_bytes()
+        if validate and not _valid_generated_doc(path, content):
+            continue
+        files[f"docs/{path.relative_to(docs_root).as_posix()}"] = content
+    return files
+
+
+def _finish(db: Session, repository: Repository, actor: Optional[User], *, action: str,
+            branch, source: Commit, docs_files: Dict[str, bytes], commit_docs: bool,
+            message: str, extra: Dict[str, Any]) -> Dict[str, Any]:
+    """Commit (or not), write the manifest, record the activity."""
+    with audit.background():
+        if not commit_docs:
+            landing = {"committed": False, "reason": "Generated without committing, as asked."}
+        else:
+            landing = _commit_docs(db, repository, actor, branch.name, docs_files, message)
+
+        manifest = {
+            "mode": extra.get("mode"),
+            "generated_at": datetime.utcnow().isoformat(),
+            "generated_by": getattr(actor, "username", None),
+            "source_branch": branch.name,
+            "source_commit": source.id,
+            "llm_model": extra.get("llm_model"),
+            "documents": sorted(docs_files),
+            "committed": landing.get("committed", False),
+            "commit_id": landing.get("commit_id"),
+            "commit_skipped_reason": None if landing.get("committed") else landing.get("reason"),
+        }
+        _write_manifest(repository.id, manifest)
+
+        user_id = getattr(actor, "id", None) or repository.owner_id
+        description = (
+            f"Generated {len(docs_files)} documentation file(s) from {source.id[:8]} on '{branch.name}'"
+            + ("" if landing.get("committed") else f" (not committed: {landing.get('reason')})")
+        )
+        audit.record(db, user_id, action, repository_id=repository.id, description=description,
+                     target_type="branch", target_id=branch.name,
+                     commit_id=landing.get("commit_id") or source.id,
+                     payload={"documents": len(docs_files), "committed": landing.get("committed", False),
+                              "source_commit": source.id})
+    return {"landing": landing, "manifest": manifest}
+
+
+# --- per-symbol code documentation (generate-docs with a language filter) --------------
+
+def _generate_repository_docs_sync(repo_id: str, lang_filter: Optional[str] = None,
+                                   actor_id: Optional[int] = None, commit_docs: bool = True):
     db = SessionLocal()
+    temp_dir = None
     try:
         repository = RepositoryCRUD.get_repository(db, repo_id)
         if not repository:
             raise ValueError("Repository not found")
+        actor = db.query(User).filter(User.id == actor_id).first() if actor_id else None
 
-        commits_desc = CommitCRUD.get_commits_by_repository(db, repo_id, limit=200)
-        if not commits_desc:
+        try:
+            branch, source_commit = _docs_base(db, repository)
+        except DocsError as exc:
+            return {"success": False, "error": str(exc), "repo_id": repo_id}
+
+        sources = {path: content for path, content in _source_files(source_commit).items()}
+        if not sources:
             return {
                 "success": False,
-                "error": "Repository has no commits. Push code first.",
+                "error": f"No source code files found on '{branch.name}'.",
                 "repo_id": repo_id
             }
 
-        latest_commit = commits_desc[0]
-        source_commit = None
-        for commit in commits_desc:
-            if any(not normalize_path(f.file_path).startswith("docs/") for f in commit.files):
-                source_commit = commit
-                break
-        if not source_commit:
-            return {
-                "success": False,
-                "error": "No source code files found in repository commits.",
-                "repo_id": repo_id
-            }
-
-        temp_dir = Path("/tmp") / f"foxnest_docs_{repo_id}"
-        temp_dir.mkdir(parents=True, exist_ok=True)
-
-        for commit_file in source_commit.files:
-            if normalize_path(commit_file.file_path).startswith("docs/"):
-                continue
-            if _is_vendor_path(commit_file.file_path):
-                continue
-            file_path = temp_dir / commit_file.file_path
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-
-            if commit_file.file_object:
-                with open(file_path, "wb") as f:
-                    f.write(commit_file.file_object.content)
-
+        temp_dir = _materialise(sources, f"foxnest_docs_{repo_id}_")
         docs_output = DOCS_DIR / repo_id
         docs_output.mkdir(parents=True, exist_ok=True)
 
@@ -146,8 +465,6 @@ def _generate_repository_docs_sync(repo_id: str, lang_filter: Optional[str] = No
         )
 
         docx_utils.convert_markdown_tree(docs_output)
-
-        shutil.rmtree(temp_dir, ignore_errors=True)
 
         if isinstance(results, dict) and results.get("error"):
             return {
@@ -175,84 +492,39 @@ def _generate_repository_docs_sync(repo_id: str, lang_filter: Optional[str] = No
 
         coverage = (total_documented / total_symbols * 100) if total_symbols > 0 else 0
 
-        doc_files = []
-        file_entries = []
-
-        for commit_file in source_commit.files:
-            if normalize_path(commit_file.file_path).startswith("docs/"):
-                continue
-            file_size = commit_file.file_size
-            if file_size is None and commit_file.file_object:
-                file_size = commit_file.file_object.size
-            file_entries.append(SimpleNamespace(
-                file_path=commit_file.file_path,
-                file_hash=commit_file.file_hash,
-                file_size=file_size or 0
-            ))
-
-        for doc_file_path in docs_output.rglob("*"):
-            if doc_file_path.is_file():
-                rel_path = doc_file_path.relative_to(docs_output)
-                with open(doc_file_path, "rb") as f:
-                    content = f.read()
-
-                file_obj = FileObjectCRUD.store_file_object(db, content)
-                doc_path = f"docs/{rel_path}"
-
-                doc_files.append(doc_path)
-                file_entries.append(SimpleNamespace(
-                    file_path=doc_path,
-                    file_hash=file_obj.hash,
-                    file_size=len(content)
-                ))
-
-        if doc_files:
-            commit_id = hashlib.sha256(
-                f"{repo_id}:docs:{datetime.now().isoformat()}".encode()
-            ).hexdigest()[:40]
-
-            commit_data = {
-                "id": commit_id,
-                "repository_id": repo_id,
-                "author": repository.owner.username,
-                "message": f"Auto-generate documentation ({len(doc_files)} files, {coverage:.1f}% coverage)",
-                "parent": latest_commit.id,
-                "timestamp": datetime.now().isoformat()
-            }
-
-            docs_commit = CommitCRUD.create_commit_from_file_hashes(db, commit_data, file_entries)
-            # Generated on the owner's behalf, so the owner is recorded as the pusher.
-            sign_commit(db, docs_commit, repository.owner.username, repository.owner_id)
-
-        ActivityCRUD.create_activity(
-            db=db,
-            user_id=repository.owner_id,
-            activity_type="generate_docs",
-            description=f"Generated docs for repo {repo_id}. Languages: {', '.join(languages)}" if languages else f"Generated docs for repo {repo_id}.",
-            repository_id=repo_id
+        docs_files = _docs_to_commit(docs_output, validate=False)
+        finished = _finish(
+            db, repository, actor, action="generate_docs", branch=branch, source=source_commit,
+            docs_files=docs_files, commit_docs=commit_docs,
+            message=(f"Auto-generate documentation ({len(docs_files)} files, {coverage:.1f}% coverage)"
+                     f"\n\nGenerated from {source_commit.id[:12]} on {branch.name}."),
+            extra={"mode": "code"},
         )
 
         return {
             "success": True,
-            "message": "Documentation generated and committed to repository",
+            "message": ("Documentation generated and committed to repository"
+                        if finished["landing"].get("committed") else
+                        "Documentation generated; not committed: " + str(finished["landing"].get("reason"))),
             "repo_id": repo_id,
             "docs_url": f"/api/repository/{repo_id}/docs",
             "coverage": round(coverage, 1),
             "files_analyzed": total_files,
             "languages": languages,
-            "docs_files_added": len(doc_files),
+            "docs_files_added": len(docs_files) if finished["landing"].get("committed") else 0,
+            "commit": finished["landing"],
+            "source_commit": source_commit.id,
+            "branch": branch.name,
             "results": results
         }
-    except Exception as e:
-        temp_dir = Path("/tmp") / f"foxnest_docs_{repo_id}"
-        if temp_dir.exists():
-            shutil.rmtree(temp_dir, ignore_errors=True)
-        raise
     finally:
+        if temp_dir is not None:
+            shutil.rmtree(temp_dir, ignore_errors=True)
         db.close()
 
 
-def _run_generate_docs_job(repo_id: str, lang_filter: Optional[str] = None):
+def _run_generate_docs_job(repo_id: str, lang_filter: Optional[str] = None,
+                           actor_id: Optional[int] = None, commit_docs: bool = True):
     _update_docs_job(
         repo_id,
         status="running",
@@ -261,7 +533,7 @@ def _run_generate_docs_job(repo_id: str, lang_filter: Optional[str] = None):
         error=None
     )
     try:
-        result = _generate_repository_docs_sync(repo_id, lang_filter)
+        result = _generate_repository_docs_sync(repo_id, lang_filter, actor_id, commit_docs)
         if result.get("success"):
             _update_docs_job(
                 repo_id,
@@ -271,7 +543,8 @@ def _run_generate_docs_job(repo_id: str, lang_filter: Optional[str] = None):
                     "coverage": result.get("coverage"),
                     "files_analyzed": result.get("files_analyzed"),
                     "languages": result.get("languages", []),
-                    "docs_files_added": result.get("docs_files_added", 0)
+                    "docs_files_added": result.get("docs_files_added", 0),
+                    "commit": result.get("commit"),
                 },
                 error=None
             )
@@ -291,137 +564,53 @@ def _run_generate_docs_job(repo_id: str, lang_filter: Optional[str] = None):
         )
 
 
-def _generate_project_documentation_internal(repo_id: str, llm_model: str, db: Session, selected_docs: Optional[List[str]] = None, progress_callback=None) -> Dict[str, Any]:
+# --- project documentation (README, architecture, ... through the LLM) -----------------
+
+def _generate_project_documentation_internal(repo_id: str, llm_model: str, db: Session,
+                                             selected_docs: Optional[List[str]] = None,
+                                             progress_callback=None,
+                                             actor_id: Optional[int] = None,
+                                             commit_docs: bool = True) -> Dict[str, Any]:
     repository = RepositoryCRUD.get_repository(db, repo_id)
     if not repository:
         raise HTTPException(status_code=404, detail="Repository not found")
+    actor = db.query(User).filter(User.id == actor_id).first() if actor_id else None
 
-    commits_desc = CommitCRUD.get_commits_by_repository(db, repo_id, limit=200)
-    if not commits_desc:
-        return {
-            "success": False,
-            "error": "Repository has no commits. Push code first."
-        }
+    try:
+        branch, source_commit = _docs_base(db, repository)
+    except DocsError as exc:
+        return {"success": False, "error": str(exc)}
 
-    def _is_source_extension(path: str) -> bool:
-        return Path(path).suffix.lower() in {
-            ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".kt", ".kts", ".go", ".rs",
-            ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".php", ".rb", ".swift", ".sql",
-            ".sh", ".ps1", ".yml", ".yaml", ".toml", ".json", ".md"
-        }
-
-    def _score_commit(commit_obj) -> tuple:
-        non_doc_files = [
-            f for f in commit_obj.files
-            if f.file_path and not normalize_path(f.file_path).startswith("docs/") and f.file_object
-        ]
-        source_files = [f for f in non_doc_files if _is_source_extension(f.file_path)]
-
-        approx_lines = 0
-        sampled = 0
-        for f in source_files:
-            if sampled >= 120:
-                break
-            try:
-                text = f.file_object.content.decode("utf-8", errors="ignore")
-                approx_lines += len(text.splitlines())
-            except Exception:
-                continue
-            sampled += 1
-
-        return (len(source_files), approx_lines, len(non_doc_files))
-
-    source_commit = None
-    candidate_commits = [
-        c for c in commits_desc
-        if any(f.file_path and not normalize_path(f.file_path).startswith("docs/") for f in c.files)
-    ]
-    if candidate_commits:
-        source_commit = max(candidate_commits, key=_score_commit)
-
-    if not source_commit:
-        return {
-            "success": False,
-            "error": "No source code files found in repository commits."
-        }
-
-    # ── Reconstruct the full HEAD file tree ──────────────────────────────────
-    # Each commit only stores the files that changed in that push (delta model).
-    # To get the COMPLETE project state at HEAD we must walk ALL commits newest→
-    # oldest and keep the first (= latest) version of every path seen.
-    _SKIP_DIR_PREFIXES = (
-        "docs/", "node_modules/", "vendor/", ".git/", "venv/", ".venv/",
-        "__pycache__/", "build/", "dist/", ".mypy_cache/", ".pytest_cache/",
-        ".tox/", ".idea/", ".vscode/", ".next/", ".nuxt/", "_archived_",
-        ".fox/",
-    )
-    _SKIP_BINARY_EXT = {
-        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp",
-        ".pdf", ".docx", ".xlsx", ".pptx", ".doc", ".xls",
-        ".zip", ".tar", ".gz", ".bz2", ".7z", ".rar",
-        ".exe", ".dll", ".so", ".dylib", ".lib", ".a",
-        ".pyc", ".pyo", ".class", ".o",
-        ".woff", ".woff2", ".ttf", ".eot", ".otf",
-        ".mp4", ".mp3", ".avi", ".mov", ".wav",
-        ".db", ".sqlite", ".sqlite3",
-    }
-    _MAX_FILE_BYTES = 2 * 1024 * 1024  # 2 MB per file
-
-    # path → (content_bytes, file_hash, file_size)
-    head_tree: Dict[str, tuple] = {}
-    for commit in commits_desc:          # newest → oldest (already sorted)
-        for cf in commit.files:
-            path = cf.file_path
-            if not path or path in head_tree:
-                continue
-            if any(path.startswith(pfx) for pfx in _SKIP_DIR_PREFIXES):
-                continue
-            if Path(path).suffix.lower() in _SKIP_BINARY_EXT:
-                continue
-            if cf.file_object and cf.file_object.content:
-                raw = cf.file_object.content
-                if len(raw) > _MAX_FILE_BYTES:
-                    continue
-                head_tree[path] = (raw, cf.file_hash, cf.file_size or len(raw))
-
+    # The default branch's tip, as it is: a commit is a whole snapshot, so this is the
+    # project's current state with nothing deleted brought back and nothing from other
+    # branches mixed in.
+    head_tree = _source_files(source_commit)
     if not head_tree:
         return {
             "success": False,
-            "error": "No readable source files found in repository history.",
+            "error": f"No readable source files found on '{branch.name}'.",
         }
 
-    print(f"  📂 HEAD tree: {len(head_tree)} files collected across all commits")
+    print(f"  📂 {branch.name} @ {source_commit.id[:8]}: {len(head_tree)} files for documentation")
 
-    temp_dir = Path("/tmp") / f"foxnest_project_docs_{repo_id}"
-    # Always wipe the temp dir so stale files from a previous run don't pollute
-    if temp_dir.exists():
-        shutil.rmtree(temp_dir, ignore_errors=True)
-    temp_dir.mkdir(parents=True, exist_ok=True)
-
+    temp_dir = _materialise(head_tree, f"foxnest_project_docs_{repo_id}_")
     try:
-        for rel_path, (content_bytes, _fhash, _fsize) in head_tree.items():
-            file_path = temp_dir / rel_path
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                with open(file_path, "wb") as f:
-                    f.write(content_bytes)
-            except Exception:
-                pass
-
         docs_output = DOCS_DIR / repo_id / "project"
 
         # Isolated AutoDocs v2 pipeline with safe fallback to legacy generator.
         use_v2 = os.getenv("FOXNEST_AUTODOCS_V2_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
         if use_v2:
             try:
-                service = autodocs_v2.AutoDocsV2Service(
-                    templates_dir=Path(__file__).resolve().parent.parent / "docs" / "templates"
-                )
+                service = autodocs_v2.AutoDocsV2Service(templates_dir=TEMPLATES_DIR)
+                # AutoDocs v2 selects by document name ("README.md"); callers send the
+                # keys the CLI and the API take ("readme"). Handed the keys, it matched
+                # none of them and wrote only the index for any selection at all.
+                selected_names, _invalid = project_docs_generator.parse_selected_project_docs(selected_docs)
                 results = service.generate(
                     project_path=temp_dir,
                     output_dir=docs_output,
                     llm_model=llm_model,
-                    selected_docs=selected_docs,
+                    selected_docs=sorted(selected_names) if selected_names else None,
                     project_name_override=repository.name,
                 )
             except Exception as v2_err:
@@ -462,26 +651,14 @@ def _generate_project_documentation_internal(repo_id: str, llm_model: str, db: S
 
         # Markdown → Word only after AutoDocs v2 has finished: Qwen, templates, repo-aware context,
         # and per-document validation/retries. Do not convert partial or failed runs.
+        # (This called two docx_utils functions that were never written; the AttributeError
+        # was caught below, so no Word file was ever produced.) The index stays Markdown:
+        # its links are what the web client follows between documents.
         if (results.get("stats") or {}).get("pipeline") == "autodocs_v2":
             try:
-                docx_utils.convert_project_autodocs_md_to_docx(docs_output)
-                docx_utils.rewrite_autodocs_project_index(docs_output, repository.name)
+                docx_utils.convert_markdown_tree(docs_output, exclude_names=["index.md"])
             except Exception as conv_err:
                 print(f"  ⚠ Project docs MD→DOCX (post-v2 only): {conv_err}")
-
-        doc_files = []
-        file_entries_by_path = {}
-
-        def add_file_entry(path, file_hash, file_size):
-            file_entries_by_path[path] = SimpleNamespace(
-                file_path=path,
-                file_hash=file_hash,
-                file_size=file_size
-            )
-
-        # Register all HEAD-tree source files in the commit entries
-        for rel_path, (_content, fhash, fsize) in head_tree.items():
-            add_file_entry(rel_path, fhash, fsize)
 
         docs_root = DOCS_DIR / repo_id
         index_path = docs_root / "index.md"
@@ -511,56 +688,8 @@ def _generate_project_documentation_internal(repo_id: str, llm_model: str, db: S
         with open(index_path, "w", encoding="utf-8") as f:
             f.write(index_content)
 
-        def _is_valid_generated_doc(path: Path, content: bytes) -> bool:
-            if not content or len(content) < 64:
-                return False
-            if path.suffix.lower() == ".md":
-                text_content = content.decode("utf-8", errors="ignore")
-                if len(text_content.strip()) < 120:
-                    return False
-                if "## " not in text_content and "# " not in text_content:
-                    return False
-                if re.search(r"\[(Project Name|Your Name)\]|TODO|YYYY-MM-DD", text_content, flags=re.IGNORECASE):
-                    return False
-            return True
-
-        valid_doc_files = []
-        if docs_root.exists():
-            for doc_file_path in docs_root.rglob("*"):
-                if not doc_file_path.is_file():
-                    continue
-                rel_path = doc_file_path.relative_to(docs_root)
-                with open(doc_file_path, "rb") as f:
-                    content = f.read()
-                if _is_valid_generated_doc(doc_file_path, content):
-                    valid_doc_files.append((rel_path, content))
-
-        for rel_path, content in valid_doc_files:
-            file_obj = FileObjectCRUD.store_file_object(db, content)
-            doc_path = f"docs/{rel_path}"
-            doc_files.append(doc_path)
-            add_file_entry(doc_path, file_obj.hash, len(content))
-
-        file_entries = list(file_entries_by_path.values())
-
-        if doc_files:
-            commit_id = hashlib.sha256(
-                f"{repo_id}:project_docs:{datetime.now().isoformat()}".encode()
-            ).hexdigest()[:40]
-
-            commit_data = {
-                "id": commit_id,
-                "repository_id": repo_id,
-                "author": repository.owner.username,
-                "message": f"Auto-generate project documentation ({len(doc_files)} files)",
-                "parent": commits_desc[0].id,
-                "timestamp": datetime.now().isoformat()
-            }
-
-            docs_commit = CommitCRUD.create_commit_from_file_hashes(db, commit_data, file_entries)
-            # Generated on the owner's behalf, so the owner is recorded as the pusher.
-            sign_commit(db, docs_commit, repository.owner.username, repository.owner_id)
-        else:
+        docs_files = _docs_to_commit(docs_root, validate=True)
+        if not docs_files:
             return {
                 "success": False,
                 "error": "Generated documentation failed validation; no docs were committed.",
@@ -568,17 +697,20 @@ def _generate_project_documentation_internal(repo_id: str, llm_model: str, db: S
                 "skipped_docs": results.get("skipped_docs", [])
             }
 
-        ActivityCRUD.create_activity(
-            db=db,
-            user_id=repository.owner_id,
-            activity_type="generate_project_docs",
-            description=f"Generated comprehensive project docs for repo {repo_id}",
-            repository_id=repo_id
+        finished = _finish(
+            db, repository, actor, action="generate_project_docs", branch=branch,
+            source=source_commit, docs_files=docs_files, commit_docs=commit_docs,
+            message=(f"Auto-generate project documentation ({len(docs_files)} files)"
+                     f"\n\nGenerated from {source_commit.id[:12]} on {branch.name}."),
+            extra={"mode": "project", "llm_model": llm_model},
         )
 
         return {
             "success": True,
-            "message": "Project documentation generated and committed to repository",
+            "message": ("Project documentation generated and committed to repository"
+                        if finished["landing"].get("committed") else
+                        "Project documentation generated; not committed: "
+                        + str(finished["landing"].get("reason"))),
             "repo_id": repo_id,
             "llm_model": llm_model,
             "docs_url": f"/api/repository/{repo_id}/docs/project",
@@ -586,6 +718,9 @@ def _generate_project_documentation_internal(repo_id: str, llm_model: str, db: S
             "skipped_docs": results.get("skipped_docs", []),
             "stats": results.get("stats", {}),
             "selected_docs": results.get("stats", {}).get("selected_docs", ["all"]),
+            "commit": finished["landing"],
+            "source_commit": source_commit.id,
+            "branch": branch.name,
             "project_info": {
                 "name": results.get("project_info", {}).get("name", repository.name),
                 "languages": list(results.get("project_info", {}).get("languages", [])),
@@ -598,7 +733,8 @@ def _generate_project_documentation_internal(repo_id: str, llm_model: str, db: S
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def _run_generate_project_docs_job(repo_id: str, llm_model: str, selected_docs: Optional[List[str]] = None):
+def _run_generate_project_docs_job(repo_id: str, llm_model: str, selected_docs: Optional[List[str]] = None,
+                                   actor_id: Optional[int] = None, commit_docs: bool = True):
     progress_steps, selected_doc_names, invalid = _resolve_progress_steps(selected_docs)
     if invalid:
         _update_docs_job(
@@ -633,7 +769,9 @@ def _run_generate_project_docs_job(repo_id: str, llm_model: str, selected_docs: 
             llm_model=llm_model,
             db=db,
             selected_docs=selected_docs,
-            progress_callback=callback
+            progress_callback=callback,
+            actor_id=actor_id,
+            commit_docs=commit_docs,
         )
 
         if isinstance(result, dict) and result.get("success"):
@@ -649,6 +787,7 @@ def _run_generate_project_docs_job(repo_id: str, llm_model: str, selected_docs: 
                     "project_info": result.get("project_info", {}),
                     "skipped_docs": result.get("skipped_docs", []),
                     "selected_docs": result.get("selected_docs", selected_doc_names or ["all"]),
+                    "commit": result.get("commit"),
                 },
                 error=None
             )

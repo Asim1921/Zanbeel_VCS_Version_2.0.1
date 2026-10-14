@@ -40,8 +40,10 @@ class LLMHelper:
     its real setting rather than as an isolated snippet.
     """
 
-    def __init__(self, model: str = None, base_url: str = "http://localhost:11434"):
+    def __init__(self, model: str = None, base_url: str = None):
         self.model = model or os.getenv("FOXNEST_DOCS_MODEL", "qwen2.5-coder:7b")
+        # Ollama on another host, or a stand-in for tests: FOXNEST_OLLAMA_URL.
+        base_url = (base_url or os.getenv("FOXNEST_OLLAMA_URL") or "http://localhost:11434").rstrip("/")
         self.base_url = base_url
         self.api_url = f"{base_url}/api/generate"
 

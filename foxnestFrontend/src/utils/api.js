@@ -577,10 +577,15 @@ class FoxNestAPI {
     })
   }
 
-  async createBranch(repoId, { name, fromBranch, fromCommit } = {}) {
+  async createBranch(repoId, { name, fromBranch, fromCommit, fromTag } = {}) {
     return this.request(`/repository/${repoId}/branches`, {
       method: 'POST',
-      body: { name, from_branch: fromBranch || null, from_commit: fromCommit || null },
+      body: {
+        name,
+        from_branch: fromBranch || null,
+        from_commit: fromCommit || null,
+        from_tag: fromTag || null,
+      },
     })
   }
 
@@ -1360,12 +1365,19 @@ class FoxNestAPI {
     })
   }
 
-  async moveBranchHead(repoId, branchName, commitId) {
+  async moveBranchHead(repoId, branchName, commitId, expectedHeadCommitId = null) {
     return this.request(`/repository/${repoId}/branches/${encodeURIComponent(branchName)}/head`, {
       method: 'PUT',
       // The server's BranchHeadUpdateRequest field is head_commit_id, not commit_id.
-      body: { head_commit_id: commitId },
+      // The expected head makes the move refuse if someone else moved the branch first.
+      body: { head_commit_id: commitId, expected_head_commit_id: expectedHeadCommitId || null },
     })
+  }
+
+  // Branches with their last commit, distance from the default branch, protection and
+  // the open pull requests that use them. Walks history, so only the branch list asks.
+  async getBranchesDetailed(repoId) {
+    return this.request(`/repository/${repoId}/branches?details=true`, { timeout: 30000 })
   }
 
   // --- Tags and releases -----------------------------------------------------
@@ -1374,9 +1386,12 @@ class FoxNestAPI {
     return this.request(`/repository/${repoId}/tags`)
   }
 
-  async createTag(repoId, { name, commitId = null, message = null }) {
+  // `target` is a branch, tag or commit; without it (and without commitId) the tag
+  // names the tip of the default branch.
+  async createTag(repoId, { name, commitId = null, target = null, message = null }) {
     const body = { name }
     if (commitId) body.commit_id = commitId
+    if (target) body.target = target
     if (message) body.message = message
     return this.request(`/repository/${repoId}/tags`, { method: 'POST', body })
   }
@@ -1391,12 +1406,41 @@ class FoxNestAPI {
     return this.request(`/repository/${repoId}/releases`)
   }
 
-  async createRelease(repoId, { version, title = null, notes = null, tag = null }) {
+  async createRelease(repoId, { version, title = null, notes = null, tag = null, target = null }) {
     const body = { version }
     if (title) body.title = title
     if (notes) body.notes = notes
     if (tag) body.tag = tag
+    if (target) body.target = target
     return this.request(`/repository/${repoId}/releases`, { method: 'POST', body })
+  }
+
+  async updateRelease(repoId, version, { title, notes }) {
+    return this.request(`/repository/${repoId}/releases/${encodeURIComponent(version)}`, {
+      method: 'PATCH',
+      body: { title: title ?? null, notes: notes ?? null },
+    })
+  }
+
+  async deleteRelease(repoId, version) {
+    return this.request(`/repository/${repoId}/releases/${encodeURIComponent(version)}`, {
+      method: 'DELETE',
+    })
+  }
+
+  // Notes drafted from the pull requests and commits since the previous release.
+  async draftReleaseNotes(repoId, { target = null, previousTag = null } = {}) {
+    const params = new URLSearchParams()
+    if (target) params.append('target', target)
+    if (previousTag) params.append('previous_tag', previousTag)
+    const suffix = params.toString() ? `?${params.toString()}` : ''
+    return this.request(`/repository/${repoId}/releases/notes${suffix}`, { timeout: 30000 })
+  }
+
+  /** The files at a branch, tag or commit as a zip. Needs the session token. */
+  sourceZipUrl(repoId, ref = null) {
+    const suffix = ref ? `?ref=${encodeURIComponent(ref)}` : ''
+    return `${this.baseURL}/repository/${repoId}/source.zip${suffix}`
   }
 
   // --- Generated documentation ----------------------------------------------
@@ -1405,13 +1449,26 @@ class FoxNestAPI {
     return this.request(`/repository/${repoId}/docs-status`)
   }
 
-  async generateProjectDocs(repoId, payload = {}) {
-    // The LLM pipeline takes minutes, not seconds.
-    return this.request(`/repository/${repoId}/generate-project-docs`, {
+  // The server reads these as query parameters; a JSON body was silently ignored, so
+  // a selection made in the browser never reached the generator.
+  async generateProjectDocs(repoId, { selectedDocs = [], commit = true, llmModel = null } = {}) {
+    const params = new URLSearchParams()
+    if (selectedDocs.length) params.append('selected_docs', selectedDocs.join(','))
+    params.append('commit', commit ? 'true' : 'false')
+    if (llmModel) params.append('llm_model', llmModel)
+    return this.request(`/repository/${repoId}/generate-project-docs?${params.toString()}`, {
       method: 'POST',
-      body: payload,
-      timeout: 300000,
     })
+  }
+
+  /** A generated file, path segments encoded. Needs the session token. */
+  docFileUrl(repoId, path) {
+    const encoded = String(path).split('/').map(encodeURIComponent).join('/')
+    return `${this.baseURL}/repository/${repoId}/docs/${encoded}`
+  }
+
+  docsArchiveUrl(repoId) {
+    return `${this.baseURL}/repository/${repoId}/docs/archive.zip`
   }
 
   async searchCode({ repositoryId = null, q, branch = null, path = null, regex = false, caseSensitive = false, limit = 200 } = {}) {

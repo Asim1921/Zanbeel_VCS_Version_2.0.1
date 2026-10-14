@@ -60,7 +60,10 @@ EVENT_PR_MERGED = "pull_request.merged"
 EVENT_PR_CLOSED = "pull_request.closed"
 EVENT_PR_REVIEWED = "pull_request.reviewed"
 EVENT_TAG_CREATED = "tag.created"
+EVENT_TAG_DELETED = "tag.deleted"
 EVENT_RELEASE_PUBLISHED = "release.published"
+EVENT_RELEASE_EDITED = "release.edited"
+EVENT_RELEASE_DELETED = "release.deleted"
 EVENT_REPOSITORY_CREATED = "repository.created"
 EVENT_STATUS_REPORTED = "status.reported"
 EVENT_PING = "ping"
@@ -78,7 +81,10 @@ ALL_EVENTS = (
     EVENT_PR_CLOSED,
     EVENT_PR_REVIEWED,
     EVENT_TAG_CREATED,
+    EVENT_TAG_DELETED,
     EVENT_RELEASE_PUBLISHED,
+    EVENT_RELEASE_EDITED,
+    EVENT_RELEASE_DELETED,
     EVENT_REPOSITORY_CREATED,
     EVENT_STATUS_REPORTED,
 )

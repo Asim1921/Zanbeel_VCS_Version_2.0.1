@@ -8136,6 +8136,7 @@ def main():
                         "documents": job_result.get("documents", []),
                         "skipped_docs": job_result.get("skipped_docs", []),
                         "docs_url": job_result.get("docs_url", f"/api/repository/{repo_id}/docs/project"),
+                        "commit": job_result.get("commit"),
                     }
 
                 print(f"\n✅ Documentation generated on server!")
@@ -8162,11 +8163,21 @@ def main():
                     print(f"  ... and {len(docs) - 10} more files")
                 print(f"\n🔗 Index: {fox._resolve_server_url()}/api/repository/{repo_id}/docs/project/index.md")
 
-                print("\n🔄 Syncing generated docs to local repository...")
-                if fox.pull():
-                    print("✅ Local repository updated with generated docs")
+                # The server commits the documents only when you could have pushed that
+                # change yourself (protection, push rules, review); otherwise it keeps them
+                # and says why, and there is nothing to pull.
+                landing = result.get("commit") or {}
+                if landing and not landing.get("committed"):
+                    print(f"\n📌 Kept on the server, not committed: {landing.get('reason')}")
+                    print("   Read them in the web client's Docs tab, or download them from there.")
                 else:
-                    print("⚠️ Docs were generated on server, but local sync failed. Run: fox pull")
+                    if landing.get("commit_id"):
+                        print(f"\n📝 Committed to {landing.get('branch')} as {landing['commit_id'][:12]}")
+                    print("\n🔄 Syncing generated docs to local repository...")
+                    if fox.pull():
+                        print("✅ Local repository updated with generated docs")
+                    else:
+                        print("⚠️ Docs were generated on server, but local sync failed. Run: fox pull")
             else:
                 error_msg = fox._response_error_message(response)
                 print(f"❌ Server error: {error_msg}")

@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
-  FiArrowLeft, FiCode, FiGitCommit, FiUsers, FiFileText,
-  FiLoader, FiAlertCircle, FiGitBranch, FiShield, FiShare2, FiActivity,
+  FiArrowLeft, FiCode, FiGitCommit, FiUsers, FiFileText, FiDownload,
+  FiLoader, FiAlertCircle, FiGitBranch, FiShield, FiShare2, FiActivity, FiPackage, FiBookOpen,
 } from 'react-icons/fi'
 import api from '../utils/api'
+import { downloadAuthed } from '../utils/authedDownload'
 import ActivityBrowser from '../components/ActivityBrowser'
 import FileTree from '../components/FileTree'
 import { ancestorsOf, normalizePath } from '../lib/fileTree'
@@ -12,6 +13,9 @@ import CodeView from '../components/CodeView'
 import BranchProtectionPanel from '../components/BranchProtectionPanel'
 import CommitGraph from '../components/CommitGraph'
 import CommitDetail from '../components/CommitDetail'
+import BranchesTab from '../components/repository/BranchesTab'
+import ReleasesTab from '../components/repository/ReleasesTab'
+import DocsTab from '../components/repository/DocsTab'
 import { authorClass, blameSummary } from '../lib/blame'
 import GlassCard from '../components/ui/GlassCard'
 import Badge from '../components/ui/Badge'
@@ -24,15 +28,22 @@ import { cn } from '../lib/utils'
  * A page rather than a dialog because this carries a tree, source, a diff and a
  * blame view at once, and a dialog cannot give any of them room.
  *
- * What is open -- branch, file, line, commit, tab -- is held in the address, not in
- * component state, so any of it can be linked to (search results and notifications
- * do) and Back steps through it.
+ * What is open -- branch, file, line, commit, tab, document -- is held in the address,
+ * not in component state, so any of it can be linked to (search results and
+ * notifications do) and Back steps through it.
+ *
+ * Branches, releases and tags, and the generated documentation were reachable only
+ * from the CLI or from a dialog behind a "Manage" button; they are tabs here now.
  */
 
 
 const TABS = [
   { id: 'code', label: 'Code', icon: FiCode },
   { id: 'commits', label: 'Commits', icon: FiGitCommit },
+  { id: 'branches', label: 'Branches', icon: FiGitBranch },
+  // Tags are a view of the Releases tab: a release is a tag with notes.
+  { id: 'releases', label: 'Releases', icon: FiPackage, also: ['tags'] },
+  { id: 'docs', label: 'Docs', icon: FiBookOpen },
   { id: 'graph', label: 'Graph', icon: FiShare2 },
   { id: 'contributors', label: 'Contributors', icon: FiUsers },
   { id: 'activity', label: 'Activity', icon: FiActivity },
@@ -74,6 +85,7 @@ export default function RepositoryDetail({ repo, onBack }) {
   const tab = searchParams.get('tab') || 'code'
   const openCommitId = searchParams.get('commit')
   const line = Number(searchParams.get('line')) || null
+  const docPath = searchParams.get('doc')
 
   // Change what is open. A new file, commit or tab is a step Back can return from;
   // pointing at a line within the open file replaces the address instead.
@@ -99,7 +111,10 @@ export default function RepositoryDetail({ repo, onBack }) {
   const [filesError, setFilesError] = useState('')
 
   const [expanded, setExpanded] = useState(() => new Set())
-  const setTab = (id) => go({ tab: id === 'code' ? null : id, commit: null })
+  const setTab = (id) => go({ tab: id === 'code' ? null : id, commit: null, doc: null })
+  // Bumped when a branch is created, renamed or deleted, so the selector follows.
+  const [branchesVersion, setBranchesVersion] = useState(0)
+  const [counts, setCounts] = useState({ tags: null, releases: null })
 
   // 'code' | 'diff' | 'blame' -- which rendering of the selected file is showing.
   const [fileMode, setFileMode] = useState('code')
@@ -140,7 +155,23 @@ export default function RepositoryDetail({ repo, onBack }) {
     }
     load()
     return () => { alive = false }
-  }, [repo.id])
+  }, [repo.id, branchesVersion])
+
+  // A branch renamed or deleted from the Branches tab: stop pointing at it.
+  useEffect(() => {
+    if (!branchesLoaded || !urlBranch || !branches.length) return
+    if (!branches.some((b) => (b.name || b) === urlBranch)) go({ branch: null }, { replace: true })
+  }, [branches, branchesLoaded, urlBranch, go])
+
+  // How many tags and releases, for the summary under the name.
+  useEffect(() => {
+    let alive = true
+    Promise.all([
+      api.listTags(repo.id).then((r) => (r.tags || []).length).catch(() => null),
+      api.listReleases(repo.id).then((r) => (r.releases || []).length).catch(() => null),
+    ]).then(([tags, releases]) => { if (alive) setCounts({ tags, releases }) })
+    return () => { alive = false }
+  }, [repo.id, tab])
 
   // One request per branch brings the whole tree *with* content, so opening a
   // file is instant and needs no further round trip.
@@ -330,8 +361,28 @@ export default function RepositoryDetail({ repo, onBack }) {
         </button>
         <div className="min-w-0">
           <h1 className="truncate text-xl font-semibold text-ink">{repo.name}</h1>
-          <p className="truncate text-xs text-muted">
-            {repo.owner ? `${repo.owner} · ` : ''}{paths.length} files
+          <p className="flex flex-wrap items-center gap-x-1.5 text-xs text-muted" data-testid="repo-summary">
+            {repo.owner ? <span>{repo.owner} ·</span> : null}
+            <span>{filesLoading ? '…' : paths.length} files ·</span>
+            <button type="button" className="hover:text-ink hover:underline" onClick={() => setTab('branches')}>
+              {branches.length} {branches.length === 1 ? 'branch' : 'branches'}
+            </button>
+            {counts.tags !== null && (
+              <>
+                <span>·</span>
+                <button type="button" className="hover:text-ink hover:underline" onClick={() => setTab('tags')}>
+                  {counts.tags} {counts.tags === 1 ? 'tag' : 'tags'}
+                </button>
+              </>
+            )}
+            {counts.releases !== null && (
+              <>
+                <span>·</span>
+                <button type="button" className="hover:text-ink hover:underline" onClick={() => setTab('releases')}>
+                  {counts.releases} {counts.releases === 1 ? 'release' : 'releases'}
+                </button>
+              </>
+            )}
           </p>
         </div>
         <div className="ml-auto flex items-center gap-2">
@@ -339,6 +390,7 @@ export default function RepositoryDetail({ repo, onBack }) {
           <select
             value={branch || ''}
             onChange={(e) => go({ branch: e.target.value, path: null, line: null, commit: null })}
+            aria-label="Branch"
             className="rounded-xl border border-border bg-cream-mid px-3 py-1.5 text-sm text-ink outline-none focus:border-ink"
           >
             {branches.map((b) => (
@@ -347,20 +399,34 @@ export default function RepositoryDetail({ repo, onBack }) {
               </option>
             ))}
           </select>
+          {branch && (
+            <button
+              type="button"
+              title={`Download the files on ${branch} as a zip`}
+              onClick={() => downloadAuthed(api.sourceZipUrl(repo.id, branch),
+                `${repo.name}-${branch.replace(/[^A-Za-z0-9._-]+/g, '-')}.zip`).catch(() => {})}
+              className="flex items-center gap-1.5 rounded-xl border border-border bg-white/[0.04] px-3 py-1.5 text-sm text-ink-soft transition hover:border-border-strong hover:text-ink"
+            >
+              <FiDownload className="h-4 w-4" /> ZIP
+            </button>
+          )}
         </div>
       </div>
 
-      <div className="flex gap-1 border-b border-border">
+      <div className="flex gap-1 overflow-x-auto border-b border-border" role="tablist">
         {TABS.map((entry) => {
           const Icon = entry.icon
+          const active = tab === entry.id || (entry.also || []).includes(tab)
           return (
           <button
             key={entry.id}
             type="button"
+            role="tab"
+            aria-selected={active}
             onClick={() => setTab(entry.id)}
             className={cn(
-              'flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm transition',
-              tab === entry.id
+              'flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2 text-sm transition',
+              active
                 ? 'border-accent text-ink'
                 : 'border-transparent text-muted hover:text-ink'
             )}
@@ -605,6 +671,35 @@ export default function RepositoryDetail({ repo, onBack }) {
       {tab === 'protection' && <BranchProtectionPanel repo={repo} />}
 
       {tab === 'activity' && <ActivityBrowser repoId={repo.id} />}
+
+      {tab === 'branches' && (
+        <BranchesTab
+          repo={repo}
+          onOpenBranch={(name) => go({ branch: name, tab: null, path: null, line: null, commit: null })}
+          onOpenCommit={(id) => setOpenCommitId(id)}
+          onChanged={() => setBranchesVersion((v) => v + 1)}
+        />
+      )}
+
+      {(tab === 'releases' || tab === 'tags') && (
+        <ReleasesTab
+          repo={repo}
+          view={tab}
+          onViewChange={(view) => setTab(view)}
+          onOpenCommit={(id) => setOpenCommitId(id)}
+          branches={branches}
+          defaultBranch={defaultBranch}
+        />
+      )}
+
+      {tab === 'docs' && (
+        <DocsTab
+          repo={repo}
+          docPath={docPath}
+          onOpenDoc={(path) => go({ doc: path })}
+          onOpenCommit={(id) => setOpenCommitId(id)}
+        />
+      )}
 
       </>
       )}

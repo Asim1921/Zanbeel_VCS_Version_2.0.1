@@ -50,7 +50,10 @@ const FALLBACK_EVENTS = [
   'pull_request.closed',
   'pull_request.reviewed',
   'tag.created',
+  'tag.deleted',
   'release.published',
+  'release.edited',
+  'release.deleted',
   'repository.created',
   'status.reported',
 ]

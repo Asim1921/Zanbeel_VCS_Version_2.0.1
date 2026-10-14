@@ -1,4 +1,10 @@
-"""Branch listing and mutation."""
+"""Branch listing and mutation.
+
+Routes that name a branch in the path use the ``:path`` converter. Branch names contain
+slashes (``feature/login``), and a plain ``{branch_name}`` stops at the first one, so a
+rename, delete, default change or move of any such branch answered 404 -- and the web
+client, which only knows branches by name, could not manage them at all.
+"""
 
 from typing import Optional
 
@@ -6,33 +12,49 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from database.crud import ActivityCRUD, BranchCRUD, CommitCRUD, RepositoryCRUD
+from database.crud import ActivityCRUD, BranchCRUD, RepositoryCRUD
 from database.database import get_db
-from database.models import MergeConflictSession, User
+from database.models import BranchProtectionPolicy, MergeConflictSession, PullRequest, User
 
 from app.core.dependencies import get_current_user
 from app.core.permissions import (
     _require_repository_checkout_access, _require_repository_read_access,
-    can_manage_repository, require_repository_access, user_sees_all_repository_branches,
+    can_manage_repository, can_write_repository, require_repository_access,
+    user_sees_all_repository_branches,
 )
 from app.schemas import (
     BranchCreateRequest, BranchHeadUpdateRequest, BranchMergeRequest,
     BranchPolicyRequest, BranchPublishRequest, BranchRenameRequest, CopyFilesRequest,
     ResolveConflictsRequest, SaveConflictResolutionRequest,
 )
-from app.services import branch_ops, merge_conflicts, refs, server_hooks
+from app.services import branch_ops, merge_conflicts, refs, repo_refs, server_hooks
 from app.services.branches import _get_default_branch, _normalize_branch_name
 
 
 router = APIRouter()
 
 
+def _permissions(db: Session, user: User, repository) -> dict:
+    """What the caller may do here, so a client offers only what will be accepted."""
+    return {
+        "can_write": can_write_repository(db, user, repository),
+        "can_manage": can_manage_repository(db, user, repository),
+    }
+
+
 @router.get("/api/repository/{repo_id}/branches")
-async def list_branches(
+def list_branches(
     repo_id: str,
+    details: bool = False,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    """Every branch, default first.
+
+    ``details=true`` adds what a branch list needs to be useful: the last commit, how far
+    each branch is ahead of and behind the default branch, its protection, and the open
+    pull requests that use it. It walks history, so plain listings leave it off.
+    """
     repository = RepositoryCRUD.get_repository(db, repo_id)
     if not repository:
         raise HTTPException(status_code=404, detail="Repository not found")
@@ -47,9 +69,10 @@ async def list_branches(
         branches,
         key=lambda b: (not bool(b.is_default), (b.name or "").lower()),
     )
-    return {
-        "success": True,
-        "branches": [
+    if details:
+        listed = repo_refs.branch_overview(db, repository, branches)
+    else:
+        listed = [
             {
                 "name": b.name,
                 "head_commit_id": b.head_commit_id,
@@ -59,6 +82,11 @@ async def list_branches(
             }
             for b in branches
         ]
+    return {
+        "success": True,
+        "branches": listed,
+        "default_branch": next((b.name for b in branches if b.is_default), None),
+        "permissions": _permissions(db, current_user, repository),
     }
 
 
@@ -88,17 +116,28 @@ async def create_branch(
     if BranchCRUD.get_branch(db, repo_id, branch_name):
         raise HTTPException(status_code=400, detail="Branch already exists")
 
-    head_commit_id = request.from_commit
-    if not head_commit_id and request.from_branch:
+    # Where the new branch starts: a commit, a tag, another branch, or the default
+    # branch. A commit must belong to this repository -- any id on the server used to
+    # do, which let a branch here expose another repository's files.
+    if request.from_commit:
+        head_commit_id = repo_refs.require_commit(db, repository, request.from_commit).id
+    elif getattr(request, "from_tag", None):
+        tag = repo_refs.resolve(db, repository, request.from_tag)
+        if tag["kind"] != "tag":
+            raise HTTPException(status_code=404, detail=f"Tag '{request.from_tag}' not found")
+        head_commit_id = tag["commit_id"]
+    elif request.from_branch:
         source = BranchCRUD.get_branch(db, repo_id, _normalize_branch_name(request.from_branch))
         if not source:
             raise HTTPException(
                 status_code=404, detail=f"Branch '{request.from_branch}' not found"
             )
         head_commit_id = source.head_commit_id
-    head_commit_id = head_commit_id or repository.head_commit_id
-    if head_commit_id and not CommitCRUD.get_commit(db, head_commit_id):
-        raise HTTPException(status_code=400, detail="Invalid from_commit")
+    else:
+        # The default branch's tip, not repository.head_commit_id: the latter is moved by
+        # writes that never touch a branch and is not what anyone means by "current".
+        default = repo_refs.default_branch(db, repo_id)
+        head_commit_id = (default.head_commit_id if default else None) or repository.head_commit_id
 
     server_hooks.check_new_branch(db, repository, branch_name, current_user)
 
@@ -117,7 +156,7 @@ async def create_branch(
         }
     }
 
-@router.put("/api/repository/{repo_id}/branches/{branch_name}/rename")
+@router.put("/api/repository/{repo_id}/branches/{branch_name:path}/rename")
 async def rename_branch(
     repo_id: str,
     branch_name: str,
@@ -135,6 +174,10 @@ async def rename_branch(
 
     old_name = _normalize_branch_name(branch_name)
     new_name = _normalize_branch_name(request.new_name)
+    if old_name == new_name:
+        raise HTTPException(status_code=400, detail="The new name is the same as the old one")
+    if not BranchCRUD.get_branch(db, repo_id, old_name):
+        raise HTTPException(status_code=404, detail=f"Branch '{old_name}' not found")
     if BranchCRUD.get_branch(db, repo_id, new_name):
         raise HTTPException(status_code=400, detail="Target branch name already exists")
 
@@ -142,9 +185,41 @@ async def rename_branch(
         db, repository=repository, actor=current_user,
         old_name=old_name, new_name=new_name,
     )
-    return {"success": True, "branch": {"name": branch.name, "head_commit_id": branch.head_commit_id}}
 
-@router.put("/api/repository/{repo_id}/branches/{branch_name}/head")
+    # What referred to the old name follows it, as on GitHub. An open pull request kept
+    # pointing at a branch that no longer existed and could be neither merged nor shown,
+    # and a rule written for exactly this branch silently stopped applying to it. (A
+    # pattern rule is about names, not this branch, so it stays as written.)
+    retargeted = []
+    for pr in db.query(PullRequest).filter(PullRequest.status == "open").all():
+        source_repo = pr.source_repository_id or pr.repository_id
+        changed = False
+        if source_repo == repo_id and pr.source_branch == old_name:
+            pr.source_branch = new_name
+            changed = True
+        if pr.repository_id == repo_id and pr.target_branch == old_name:
+            pr.target_branch = new_name
+            changed = True
+        if changed:
+            retargeted.append(pr.id)
+    moved_rules = (
+        db.query(BranchProtectionPolicy)
+        .filter(BranchProtectionPolicy.repository_id == repo_id,
+                BranchProtectionPolicy.branch_pattern == old_name)
+        .all()
+    )
+    for rule in moved_rules:
+        rule.branch_pattern = new_name
+    db.commit()
+
+    return {
+        "success": True,
+        "branch": {"name": branch.name, "head_commit_id": branch.head_commit_id},
+        "retargeted_pull_requests": retargeted,
+        "moved_protection_rules": len(moved_rules),
+    }
+
+@router.put("/api/repository/{repo_id}/branches/{branch_name:path}/head")
 async def update_branch_head(
     repo_id: str,
     branch_name: str,
@@ -160,16 +235,15 @@ async def update_branch_head(
     resolved_actor = current_user.username if current_user else actor_username
     require_repository_access(db, resolved_actor, repository, "update branch head in", required_scope="manage")
 
-    if not CommitCRUD.get_commit(db, request.head_commit_id):
-        raise HTTPException(status_code=400, detail="Commit not found")
+    commit = repo_refs.require_commit(db, repository, request.head_commit_id)
 
     # Straight through the reference service: this endpoint could previously move any
     # branch to any commit on a bare "manage" check, protection notwithstanding.
     branch = refs.update_reference(
         db, repository=repository, actor=current_user,
         branch_name=_normalize_branch_name(branch_name),
-        new_commit_id=request.head_commit_id,
-        expected_commit_id=getattr(request, "expected_head_commit_id", None),
+        new_commit_id=commit.id,
+        expected_commit_id=request.expected_head_commit_id,
     )
     return {
         "success": True,
@@ -180,7 +254,7 @@ async def update_branch_head(
         },
     }
 
-@router.put("/api/repository/{repo_id}/branches/{branch_name}/default")
+@router.put("/api/repository/{repo_id}/branches/{branch_name:path}/default")
 async def set_default_branch(
     repo_id: str,
     branch_name: str,
@@ -195,8 +269,14 @@ async def set_default_branch(
     resolved_actor = current_user.username if current_user else actor_username
     require_repository_access(db, resolved_actor, repository, "set default branch in", required_scope="manage")
 
+    name = _normalize_branch_name(branch_name)
+    target = BranchCRUD.get_branch(db, repo_id, name)
+    if not target:
+        raise HTTPException(status_code=404, detail=f"Branch '{name}' not found")
+    if not target.head_commit_id:
+        raise HTTPException(status_code=400, detail=f"Branch '{name}' has no commits yet")
     previous = getattr(_get_default_branch(db, repo_id), "name", None)
-    branch = BranchCRUD.set_default_branch(db, repo_id, _normalize_branch_name(branch_name))
+    branch = BranchCRUD.set_default_branch(db, repo_id, name)
     if branch.head_commit_id:
         repository.head_commit_id = branch.head_commit_id
         db.commit()
@@ -214,7 +294,7 @@ async def set_default_branch(
 
     return {"success": True, "branch": {"name": branch.name, "is_default": branch.is_default}}
 
-@router.delete("/api/repository/{repo_id}/branches/{branch_name}")
+@router.delete("/api/repository/{repo_id}/branches/{branch_name:path}")
 async def delete_branch(
     repo_id: str,
     branch_name: str,
@@ -222,6 +302,8 @@ async def delete_branch(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    """Delete a branch. The response carries its last commit, so it can be restored by
+    creating a branch of the same name from that commit."""
     repository = RepositoryCRUD.get_repository(db, repo_id)
     if not repository:
         raise HTTPException(status_code=404, detail="Repository not found")
@@ -235,10 +317,28 @@ async def delete_branch(
     if branch.is_default:
         raise HTTPException(status_code=400, detail="Cannot delete the default branch")
 
+    # An open pull request whose branch disappears can be neither merged nor shown. Say
+    # which ones, so they can be merged or closed first.
+    in_use = repo_refs.open_pull_requests_for(db, repository).get(branch.name, [])
+    if in_use:
+        numbers = ", ".join(f"#{pr['id']}" for pr in in_use)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "BRANCH_IN_USE",
+                "message": f"'{branch.name}' is used by open pull request {numbers}. "
+                           "Merge or close it first.",
+                "pull_requests": in_use,
+            },
+        )
+
+    head = branch.head_commit_id
+    name = branch.name
     refs.delete_reference(
-        db, repository=repository, actor=current_user, branch_name=branch.name
+        db, repository=repository, actor=current_user, branch_name=name
     )
-    return {"success": True, "message": f"Branch '{branch.name}' deleted"}
+    return {"success": True, "message": f"Branch '{name}' deleted",
+            "branch": {"name": name, "head_commit_id": head}}
 
 
 def _branch_op(fn, db, repo_id, current_user, *args, **kwargs):

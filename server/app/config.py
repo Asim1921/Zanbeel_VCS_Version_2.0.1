@@ -17,7 +17,9 @@ load_dotenv()
 
 SERVER_ROOT = Path("/tmp/foxnest_server")  # Keep for backward compatibility
 REPOS_DIR = SERVER_ROOT / "repositories"
-DOCS_DIR = SERVER_ROOT / "docs"  # Store generated docs
+# Generated documentation, one folder per repository. FOXNEST_DOCS_DIR moves it to a
+# data volume (or, for a test server, a throwaway directory).
+DOCS_DIR = Path(os.getenv("FOXNEST_DOCS_DIR") or (SERVER_ROOT / "docs"))
 DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
 
