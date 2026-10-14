@@ -20,8 +20,8 @@ import {
   FiTag,
   FiArrowRight,
 } from 'react-icons/fi'
-import api from '../utils/api'
 import { activityTargetLink, profileLink } from '../lib/links'
+import { absoluteTime, relativeTime } from '../lib/time'
 import { cn } from '../lib/utils'
 
 /**
@@ -79,30 +79,6 @@ const TONES = {
 
 const DANGER = new Set(['branch_deleted', 'branch_force_updated', 'delete_repository', 'credentials_revoked',
   'rollback_branch', 'delete_commit', 'gc'])
-
-function absoluteTime(iso) {
-  const when = api.parseServerTimestamp(iso)
-  if (!when) return ''
-  return when.toLocaleString(undefined, {
-    year: 'numeric', month: 'short', day: 'numeric',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-  })
-}
-
-function relativeTime(iso) {
-  // Server times are naive UTC; new Date() alone would read them as local time.
-  const when = api.parseServerTimestamp(iso)
-  if (!when) return ''
-  const seconds = Math.round((Date.now() - when.getTime()) / 1000)
-  if (seconds < 60) return 'just now'
-  const minutes = Math.round(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.round(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.round(hours / 24)
-  if (days < 30) return `${days}d ago`
-  return when.toLocaleDateString()
-}
 
 function credentialText(credential) {
   if (!credential) return null

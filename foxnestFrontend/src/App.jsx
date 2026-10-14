@@ -187,9 +187,9 @@ function App() {
         }
         return (
           <Repositories
-            onBrowseRepo={(repo) => {
+            onBrowseRepo={(repo, params = {}) => {
               setKnownRepo(repo)
-              navigate(repositoryLink(repo.id))
+              navigate(repositoryLink(repo.id, params))
             }}
             onReviewPullRequest={({ repo, prId }) => {
               setKnownRepo(repo)

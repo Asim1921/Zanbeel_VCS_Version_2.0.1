@@ -32,6 +32,9 @@ export const pullRequestLink = (repoId, prId) => `/repositories/${enc(repoId)}/p
 
 export const repositoryActivityLink = (repoId) => repositoryLink(repoId, { tab: 'activity' })
 
+/** A repository tab: branches, releases, tags, docs, ... with its own parameters. */
+export const repositoryTabLink = (repoId, tab, params = {}) => repositoryLink(repoId, { tab, ...params })
+
 export const searchLink = (params = {}) => `/search${query(params)}`
 
 export const activityLink = (params = {}) => `/activity${query(params)}`
@@ -71,6 +74,12 @@ export function activityTargetLink(item) {
   if (!item?.repository_id) return null
   const repoId = item.repository_id
   if (item.target_type === 'pull_request' && item.target_id) return pullRequestLink(repoId, item.target_id)
+  // A tag or release row carries a commit too, but the row is about the tag or release.
+  if (item.target_type === 'release') return repositoryTabLink(repoId, 'releases')
+  if (item.target_type === 'tag') return repositoryTabLink(repoId, 'tags')
+  if (item.activity_type === 'generate_project_docs' || item.activity_type === 'generate_docs') {
+    return repositoryTabLink(repoId, 'docs')
+  }
   if (item.commit_id && item.activity_type !== 'branch_deleted') return commitLink(repoId, item.commit_id)
   if (item.target_type === 'branch' && item.target_id && item.activity_type !== 'branch_deleted') {
     return repositoryLink(repoId, { branch: item.target_id })

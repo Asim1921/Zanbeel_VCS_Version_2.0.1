@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { useLocalStorage } from '../hooks/useCustomHooks'
-import { FiFolder, FiGitCommit, FiUsers, FiStar, FiGitBranch, FiClock, FiArchive, FiEdit3, FiTrash2, FiLoader, FiCode, FiMessageSquare, FiSearch, FiX, FiCheck, FiFileText, FiRotateCcw, FiGitPullRequest, FiHash, FiSettings, FiChevronLeft, FiChevronRight } from 'react-icons/fi'
+import { FiFolder, FiGitCommit, FiUsers, FiStar, FiGitBranch, FiClock, FiArchive, FiEdit3, FiTrash2, FiLoader, FiCode, FiMessageSquare, FiSearch, FiX, FiCheck, FiFileText, FiRotateCcw, FiGitPullRequest, FiHash, FiSettings, FiChevronLeft, FiChevronRight, FiPackage } from 'react-icons/fi'
 import GlassCard from '../components/ui/GlassCard'
 import Badge from '../components/ui/Badge'
 import Button from '../components/ui/Button'
@@ -13,7 +13,7 @@ import PullRequestsModal from '../components/PullRequestsModal'
 import IssuesModal from '../components/IssuesModal'
 import AutomationModal from '../components/repository/AutomationModal'
 import api from '../utils/api'
-import { API_SERVER_URL } from '../config'
+import { downloadAuthed } from '../utils/authedDownload'
 import { getSessionUser, getSessionToken } from '../utils/session'
 
 /** Icon-only buttons are square. The size="sm" default pads for text, which made
@@ -1247,6 +1247,26 @@ const Repositories = ({ onBrowseRepo, onReviewPullRequest }) => {
                 Browse code
               </button>
             )}
+            {typeof onBrowseRepo === 'function' && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => onBrowseRepo(selectedRepo, { tab: 'branches' })}
+                  className="inline-flex items-center gap-2 rounded-full border border-border bg-white/[0.02] px-3.5 py-1.5 text-[13px] text-ink-soft transition-colors hover:border-border-strong hover:text-ink"
+                >
+                  <FiGitBranch className="h-3.5 w-3.5" />
+                  Branches
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onBrowseRepo(selectedRepo, { tab: 'releases' })}
+                  className="inline-flex items-center gap-2 rounded-full border border-border bg-white/[0.02] px-3.5 py-1.5 text-[13px] text-ink-soft transition-colors hover:border-border-strong hover:text-ink"
+                >
+                  <FiPackage className="h-3.5 w-3.5" />
+                  Releases
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={(e) => handleStarToggle(e, selectedRepo)}
@@ -1286,11 +1306,11 @@ const Repositories = ({ onBrowseRepo, onReviewPullRequest }) => {
             <button
               type="button"
               onClick={() => setAutomationRepo(selectedRepo)}
-              title="Branches, releases, docs, webhooks, checks and push rules"
+              title="Webhooks, status checks and push rules"
               className="inline-flex items-center gap-2 rounded-full border border-border bg-white/[0.02] px-3.5 py-1.5 text-[13px] text-ink-soft transition-colors hover:border-border-strong hover:text-ink"
             >
               <FiSettings className="h-3.5 w-3.5" />
-              Manage
+              Integrations
             </button>
           </div>
 
@@ -1500,52 +1520,52 @@ const Repositories = ({ onBrowseRepo, onReviewPullRequest }) => {
                   <span className="text-sm">Checking docs...</span>
                 </div>
               ) : docsInfo?.success ? (
+                // These used to be plain links to the API, which carry no token, so every
+                // one of them answered 401. They open the Docs tab and download with the
+                // session instead.
                 <div className="space-y-3">
                   <div className="flex items-center justify-between text-sm text-ink-soft">
                     <span>Files:</span>
                     <span className="text-ink">{docsInfo.files?.length || 0}</span>
                   </div>
-                  {docsInfo.metadata?.generated_at && (
+                  {docsInfo.last_generation?.generated_at && (
                     <div className="flex items-center justify-between text-sm text-ink-soft">
                       <span>Generated:</span>
-                      <span className="text-ink">{new Date(docsInfo.metadata.generated_at).toLocaleString()}</span>
+                      <span className="text-ink">
+                        {api.parseServerTimestamp(docsInfo.last_generation.generated_at)?.toLocaleString()}
+                        {docsInfo.up_to_date === false ? ' (the code has changed since)' : ''}
+                      </span>
                     </div>
                   )}
-                  <p className="text-xs text-muted">
-                    &quot;Open overview&quot; opens the main index only. Use the file list or ZIP to get all {docsInfo.files?.length || 0} files.
-                  </p>
                   <div className="flex flex-wrap gap-2">
+                    {typeof onBrowseRepo === 'function' && (
+                      <Button size="sm" onClick={() => onBrowseRepo(selectedRepo, { tab: 'docs' })}>
+                        <FiFileText className="w-4 h-4" />
+                        Open documentation
+                      </Button>
+                    )}
                     <Button
-                      variant="ghost"
+                      variant="secondary"
                       size="sm"
-                      className="bg-info-fg/20 hover:bg-info-fg/40 border border-info-fg/25 hover:border-info-fg"
-                      onClick={() => window.open(`${API_SERVER_URL}${docsInfo.index_url}`, '_blank', 'noopener,noreferrer')}
+                      onClick={() => downloadAuthed(api.docsArchiveUrl(selectedRepo.id), `${selectedRepo.name}-documentation.zip`)
+                        .catch((err) => setDocsError(err.message || 'Download failed'))}
                     >
-                      <FiFileText className="w-4 h-4 mr-2" />
-                      Open overview (index)
-                    </Button>
-                    <a
-                      href={`${API_SERVER_URL}${docsInfo.archive_url || api.getRepositoryDocsArchivePath(selectedRepo.id)}`}
-                      download
-                      className="inline-flex items-center justify-center rounded-lg text-sm px-3 py-1.5 bg-success-fg/20 hover:bg-success-fg/35 border border-success-fg/50 text-ink transition-colors"
-                    >
-                      <FiFileText className="w-4 h-4 mr-2" />
                       Download all ({docsInfo.files?.length || 0} files, ZIP)
-                    </a>
+                    </Button>
                   </div>
-                  {Array.isArray(docsInfo.files) && docsInfo.files.length > 0 && (
+                  {docsError && <p className="text-xs text-danger-fg">{docsError}</p>}
+                  {Array.isArray(docsInfo.files) && docsInfo.files.length > 0 && typeof onBrowseRepo === 'function' && (
                     <div className="max-h-40 space-y-1 overflow-y-auto rounded-lg border border-border bg-white/[0.03] p-2">
                       {docsInfo.files.map((f) => (
                         <div key={f.path} className="flex items-center justify-between gap-2 text-xs">
-                          <a
-                            href={`${API_SERVER_URL}${f.url}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-info-fg hover:text-info-fg truncate"
+                          <button
+                            type="button"
+                            onClick={() => onBrowseRepo(selectedRepo, { tab: 'docs', doc: f.path })}
+                            className="truncate text-left text-info-fg hover:underline"
                             title={f.path}
                           >
                             {f.path}
-                          </a>
+                          </button>
                           <span className="text-muted shrink-0">{api.formatSize(f.size)}</span>
                         </div>
                       ))}
@@ -1555,8 +1575,14 @@ const Repositories = ({ onBrowseRepo, onReviewPullRequest }) => {
               ) : (
                 <div className="text-sm text-muted">
                   <p>No documentation generated yet.</p>
-                  <p className="mt-1">Run <span className="text-ink">fox generate-docs</span> to create docs.</p>
-                  {docsError && <p className="mt-1 text-muted">{docsError}</p>}
+                  <p className="mt-1">
+                    Generate it from the repository&apos;s Docs tab, or run <span className="text-ink">fox generate-docs</span>.
+                  </p>
+                  {typeof onBrowseRepo === 'function' && (
+                    <Button size="sm" variant="secondary" className="mt-2" onClick={() => onBrowseRepo(selectedRepo, { tab: 'docs' })}>
+                      Open the Docs tab
+                    </Button>
+                  )}
                 </div>
               )}
             </div>

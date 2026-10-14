@@ -224,7 +224,7 @@ async def upsert_branch_protection(
     }
 
 
-@router.post("/api/repository/{repo_id}/branches/{branch_name}/freeze")
+@router.post("/api/repository/{repo_id}/branches/{branch_name:path}/freeze")
 async def freeze_branch(
     repo_id: str,
     branch_name: str,
@@ -243,7 +243,7 @@ async def freeze_branch(
     )
 
 
-@router.post("/api/repository/{repo_id}/branches/{branch_name}/unlock-requests")
+@router.post("/api/repository/{repo_id}/branches/{branch_name:path}/unlock-requests")
 async def create_unlock(
     repo_id: str,
     branch_name: str,

@@ -91,7 +91,7 @@ const visible = async (locator, timeout = 15000) => {
 }
 
 const dialog = () => page.getByRole('dialog').last()
-const manager = () => page.getByRole('dialog').filter({ hasText: `Manage — ${REPO}` }).first()
+const manager = () => page.getByRole('dialog').filter({ hasText: `Integrations — ${REPO}` }).first()
 
 async function signIn() {
   await page.goto(FRONTEND, { waitUntil: 'domcontentloaded' })
@@ -111,7 +111,7 @@ async function openRepository() {
 
 async function openManageTab(label) {
   if (!(await manager().isVisible().catch(() => false))) {
-    await page.getByRole('button', { name: 'Manage', exact: true }).first().click()
+    await page.getByRole('button', { name: 'Integrations', exact: true }).first().click()
   }
   await manager().getByRole('button', { name: label, exact: true }).click()
 }

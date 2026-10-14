@@ -25,6 +25,7 @@ Nothing here edits or deletes a row except retention pruning, which is off unles
 administrator sets ``FOXNEST_ACTIVITY_RETENTION_DAYS``.
 """
 
+import contextlib
 import contextvars
 import csv
 import io
@@ -86,6 +87,8 @@ TYPES: Dict[str, Dict[str, str]] = {
     "tag_created": {"label": "Created a tag", "category": CATEGORY_REPOSITORY},
     "tag_deleted": {"label": "Deleted a tag", "category": CATEGORY_REPOSITORY},
     "release_created": {"label": "Published a release", "category": CATEGORY_REPOSITORY},
+    "release_updated": {"label": "Edited a release", "category": CATEGORY_REPOSITORY},
+    "release_deleted": {"label": "Deleted a release", "category": CATEGORY_REPOSITORY},
     "generate_docs": {"label": "Generated docs", "category": CATEGORY_REPOSITORY},
     "generate_project_docs": {"label": "Generated project docs", "category": CATEGORY_REPOSITORY},
     "gc": {"label": "Collected garbage", "category": CATEGORY_REPOSITORY},
@@ -124,6 +127,7 @@ REF_ACTIONS = frozenset({
     "push_commit", "approve_commit", "merge_branch", "publish_branch", "copy_files",
     "rollback_branch", "rollback_file", "cherry_pick", "revert", "rebase",
     "resolve_merge_conflicts", "merge_pull_request", "delete_commit",
+    "generate_docs", "generate_project_docs",
 })
 
 
@@ -199,6 +203,25 @@ class AuditContextMiddleware:
             await self.app(scope, receive, send)
         finally:
             _current.reset(token)
+
+
+@contextlib.contextmanager
+def background():
+    """Treat a background job as one request, so the branch move it makes and the row
+    describing it become one row, as they do for a route.
+
+    A job started by a request (FastAPI's background tasks run with a copy of the
+    request's context) keeps that request, and with it the credential and client address
+    of whoever asked. A job with no request behind it records neither.
+    """
+    if _current.get() is not None:
+        yield
+        return
+    token = _current.set(_RequestAudit({"type": "background", "state": {}}))
+    try:
+        yield
+    finally:
+        _current.reset(token)
 
 
 def current_request_scope() -> Optional[dict]:

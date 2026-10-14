@@ -1,18 +1,25 @@
-"""Tag listing, creation and deletion."""
+"""Tag listing, creation and deletion.
+
+A tag name may contain slashes (``release/1.2``), so the delete route takes the rest of
+the path as the name.
+"""
 
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from database.crud import CommitCRUD, RepositoryCRUD, TagCRUD
+from database.crud import RepositoryCRUD
 from database.database import get_db
 from database.models import User
 
 from app.core.dependencies import get_current_user
-from app.core.permissions import _require_repository_read_access, require_repository_access
+from app.core.permissions import (
+    _require_repository_read_access, can_manage_repository, can_write_repository,
+    require_repository_access,
+)
 from app.schemas import TagCreateRequest
-from app.services.branches import _normalize_branch_name
+from app.services import release_ops
 from app.services import webhooks as hook_service
 
 
@@ -21,30 +28,28 @@ from app.services import audit
 router = APIRouter()
 
 
+def _repository(db: Session, repo_id: str):
+    repository = RepositoryCRUD.get_repository(db, repo_id)
+    if not repository:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    return repository
+
+
 @router.get("/api/repository/{repo_id}/tags")
-async def list_tags(
+def list_tags(
     repo_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    repository = RepositoryCRUD.get_repository(db, repo_id)
-    if not repository:
-        raise HTTPException(status_code=404, detail="Repository not found")
+    repository = _repository(db, repo_id)
     _require_repository_read_access(db, current_user, repository, "view tags")
-
-    tags = TagCRUD.list_tags(db, repo_id)
     return {
         "success": True,
-        "tags": [
-            {
-                "name": t.name,
-                "commit_id": t.commit_id,
-                "message": t.message,
-                "created_at": t.created_at.isoformat() if t.created_at else None,
-                "created_by": t.created_by.username if t.created_by else None
-            }
-            for t in tags
-        ]
+        "tags": release_ops.list_tags(db, repo_id),
+        "permissions": {
+            "can_write": can_write_repository(db, current_user, repository),
+            "can_manage": can_manage_repository(db, current_user, repository),
+        },
     }
 
 @router.post("/api/repository/{repo_id}/tags")
@@ -55,24 +60,19 @@ async def create_tag(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    repository = RepositoryCRUD.get_repository(db, repo_id)
-    if not repository:
-        raise HTTPException(status_code=404, detail="Repository not found")
+    """Name a commit. ``commit_id`` or ``target`` (a branch, tag or commit) says which;
+    neither means the tip of the default branch."""
+    repository = _repository(db, repo_id)
 
     resolved_actor = current_user.username if current_user else actor_username
     require_repository_access(db, resolved_actor, repository, "create tag in", required_scope="write")
 
-    tag_name = _normalize_branch_name(request.name)
-    commit_id = request.commit_id or repository.head_commit_id
-    if not commit_id:
-        raise HTTPException(status_code=400, detail="No commit available for tagging")
-    if not CommitCRUD.get_commit(db, commit_id):
-        raise HTTPException(status_code=400, detail="Commit not found")
-
-    tag = TagCRUD.create_tag(db, repo_id, tag_name, commit_id, request.message, current_user.id)
+    tag = release_ops.create_tag(db, repository, current_user, name=request.name,
+                                 commit_id=request.commit_id, target=request.target,
+                                 message=request.message)
     audit.record(db, current_user.id, "tag_created", repository_id=repo_id,
-                 description=f"Tagged {commit_id[:8]} as '{tag.name}'", target_type="tag",
-                 target_id=tag.name, commit_id=commit_id)
+                 description=f"Tagged {tag.commit_id[:8]} as '{tag.name}'", target_type="tag",
+                 target_id=tag.name, commit_id=tag.commit_id)
 
     hook_service.dispatch(db, hook_service.EVENT_TAG_CREATED, repo_id, {
         "repository": {"id": repo_id, "name": repository.name},
@@ -89,7 +89,7 @@ async def create_tag(
         }
     }
 
-@router.delete("/api/repository/{repo_id}/tags/{tag_name}")
+@router.delete("/api/repository/{repo_id}/tags/{tag_name:path}")
 async def delete_tag(
     repo_id: str,
     tag_name: str,
@@ -97,14 +97,18 @@ async def delete_tag(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    repository = RepositoryCRUD.get_repository(db, repo_id)
-    if not repository:
-        raise HTTPException(status_code=404, detail="Repository not found")
+    repository = _repository(db, repo_id)
 
     resolved_actor = current_user.username if current_user else actor_username
     require_repository_access(db, resolved_actor, repository, "delete tag in", required_scope="manage")
 
-    TagCRUD.delete_tag(db, repo_id, tag_name)
+    removed = release_ops.delete_tag(db, repository, tag_name)
     audit.record(db, current_user.id, "tag_deleted", repository_id=repo_id,
-                 description=f"Deleted tag '{tag_name}'", target_type="tag", target_id=tag_name)
-    return {"success": True, "message": f"Tag '{tag_name}' deleted"}
+                 description=f"Deleted tag '{tag_name}'", target_type="tag", target_id=tag_name,
+                 commit_id=removed["commit_id"])
+    hook_service.dispatch(db, hook_service.EVENT_TAG_DELETED, repo_id, {
+        "repository": {"id": repo_id, "name": repository.name},
+        "tag": removed,
+        "deleted_by": current_user.username,
+    })
+    return {"success": True, "message": f"Tag '{tag_name}' deleted", "tag": removed}

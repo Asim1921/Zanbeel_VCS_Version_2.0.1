@@ -222,8 +222,10 @@ def _template_instruction(key: str) -> str:
 class QwenLLM:
     """Interface to Qwen LLM via Ollama."""
     
-    def __init__(self, model="qwen2.5-coder:7b", base_url="http://localhost:11434"):
+    def __init__(self, model="qwen2.5-coder:7b", base_url=None):
         self.model = model
+        # Ollama on another host, or a stand-in for tests: FOXNEST_OLLAMA_URL.
+        base_url = (base_url or os.getenv("FOXNEST_OLLAMA_URL") or "http://localhost:11434").rstrip("/")
         self.base_url = base_url
         self.api_url = f"{base_url}/api/generate"
         self.tags_url = f"{base_url}/api/tags"
