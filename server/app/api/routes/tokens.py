@@ -15,7 +15,7 @@ replacement, and widen its own scopes on the way.
 from datetime import datetime, timedelta
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -27,6 +27,7 @@ from app.core.dependencies import (
     assert_password_session, current_access_token, get_current_user,
     require_admin_user, require_password_session,
 )
+from app.core.pagination import page_params, paginate_list, paginate_query, set_page_headers
 from app.services import access_tokens as token_service
 from app.services import credential_notifications
 from app.services import ssh_keys as key_service
@@ -45,16 +46,22 @@ class CreateTokenRequest(BaseModel):
 
 @router.get("/api/tokens")
 async def list_access_tokens(
+    request: Request,
+    response: Response,
     include_revoked: bool = False,
+    page=Depends(page_params()),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List the caller's tokens. Secrets are never returned."""
+    """List the caller's tokens, paged (revoked ones accumulate). Secrets are never returned."""
     tokens = token_service.list_tokens(db, current_user.id, include_revoked=include_revoked)
+    rows, meta = paginate_list(tokens, *page)
+    set_page_headers(request, response, meta)
     return {
         "success": True,
-        "tokens": [token_service.serialize(token) for token in tokens],
+        "tokens": [token_service.serialize(token) for token in rows],
         "valid_scopes": list(token_service.VALID_SCOPES),
+        "pagination": meta,
     }
 
 
@@ -182,11 +189,15 @@ def _credentials_of(db: Session, user: User) -> dict:
 
 @router.get("/api/admin/credentials")
 async def list_all_credentials(
+    request: Request,
+    response: Response,
     username: Optional[str] = None,
+    page=Depends(page_params(default=50)),
     current_user: User = Depends(require_admin_user),
     db: Session = Depends(get_db),
 ):
-    """Every live token and registered key, by user. Metadata only, never secrets.
+    """Every live token and registered key, by user, paged by user. Metadata only,
+    never secrets.
 
     Answers "which machines can act as whom" -- the first question after a laptop
     goes missing. Users with no credentials are left out.
@@ -195,21 +206,21 @@ async def list_all_credentials(
         user = UserCRUD.get_user_by_username(db, username)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        users = [user]
+        users, meta = [user], {"total": 1, "limit": 1, "offset": 0, "returned": 1,
+                               "has_more": False, "next_offset": None}
     else:
-        holder_ids = {
-            row[0] for row in db.query(AccessToken.user_id)
-            .filter(AccessToken.revoked_at.is_(None)).distinct()
-        } | {row[0] for row in db.query(SSHKey.user_id).distinct()}
-        users = (
-            db.query(User).filter(User.id.in_(holder_ids)).order_by(User.username).all()
-            if holder_ids else []
+        holders = (
+            db.query(AccessToken.user_id).filter(AccessToken.revoked_at.is_(None))
+            .union(db.query(SSHKey.user_id))
         )
+        users, meta = paginate_query(
+            db.query(User).filter(User.id.in_(holders)).order_by(User.username, User.id), *page)
+    set_page_headers(request, response, meta)
 
     entries = [_credentials_of(db, user) for user in users]
     if not username:
         entries = [e for e in entries if e["tokens"] or e["ssh_keys"]]
-    return {"success": True, "users": entries}
+    return {"success": True, "users": entries, "pagination": meta}
 
 
 @router.post("/api/admin/users/{username}/credentials/revoke")

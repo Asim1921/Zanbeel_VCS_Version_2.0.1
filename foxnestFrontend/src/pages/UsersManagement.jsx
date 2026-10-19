@@ -124,10 +124,7 @@ const UsersManagement = () => {
       }
 
       if (!engagementLoaded) {
-        const usersResponse = await fetch(`${API_SERVER_URL}/api/users`, {
-          headers: { Authorization: `Bearer ${token}` },
-        })
-        const usersData = await usersResponse.json()
+        const usersData = await api.getUsers()
         if (usersData.success) {
           setUsers(usersData.users || [])
           setEngagementSummary({
@@ -164,9 +161,7 @@ const UsersManagement = () => {
     try {
       const [detail, permRes] = await Promise.all([
         api.getUserDetail(user.username),
-        fetch(`${API_SERVER_URL}/api/permissions/user/${user.username}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        }).then((r) => r.json()).catch(() => ({ success: false, permissions: [] })),
+        api.getUserPermissions(user.username).catch(() => ({ success: false, permissions: [] })),
       ])
       setUserDetail({
         ...(detail || {}),

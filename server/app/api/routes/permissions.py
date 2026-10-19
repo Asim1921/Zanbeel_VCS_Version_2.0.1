@@ -1,6 +1,6 @@
 """Per-repository permission grants."""
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from database.crud import UserPermissionCRUD
@@ -8,6 +8,7 @@ from database.database import get_db
 from database.models import User
 
 from app.core.dependencies import require_admin_user
+from app.core.pagination import page_params, paginate_list, set_page_headers
 from app.schemas import CreatePermissionRequest
 from app.services import audit
 from app.services import notifications as notify
@@ -82,12 +83,22 @@ async def update_permission(request: CreatePermissionRequest, current_user: User
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @router.get("/api/permissions/repository/{repo_id}")
-async def get_repository_permissions(repo_id: str, current_user: User = Depends(require_admin_user), db: Session = Depends(get_db)):
-    """Get all permissions for a repository"""
+async def get_repository_permissions(
+    repo_id: str,
+    request: Request,
+    response: Response,
+    page=Depends(page_params()),
+    current_user: User = Depends(require_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Permissions granted on a repository, oldest grant first, paged."""
     try:
-        permissions = UserPermissionCRUD.get_repository_permissions(db, repo_id)
+        permissions, meta = paginate_list(
+            sorted(UserPermissionCRUD.get_repository_permissions(db, repo_id), key=lambda p: p.id), *page)
+        set_page_headers(request, response, meta)
         return {
             "success": True,
+            "pagination": meta,
             "permissions": [
                 {
                     "user": p.user.username,
@@ -102,12 +113,22 @@ async def get_repository_permissions(repo_id: str, current_user: User = Depends(
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @router.get("/api/permissions/user/{username}")
-async def get_user_permissions(username: str, current_user: User = Depends(require_admin_user), db: Session = Depends(get_db)):
-    """Get all permissions for a user"""
+async def get_user_permissions(
+    username: str,
+    request: Request,
+    response: Response,
+    page=Depends(page_params()),
+    current_user: User = Depends(require_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Permissions a user holds, oldest grant first, paged."""
     try:
-        permissions = UserPermissionCRUD.get_user_permissions(db, username)
+        permissions, meta = paginate_list(
+            sorted(UserPermissionCRUD.get_user_permissions(db, username), key=lambda p: p.id), *page)
+        set_page_headers(request, response, meta)
         return {
             "success": True,
+            "pagination": meta,
             "permissions": [
                 {
                     "repository_id": p.repository.id,

@@ -35,6 +35,7 @@ from database.models import (
     PullRequest,
     Repository,
     Tag,
+    User,
 )
 
 #: Deleting more than this in one sweep requires an explicit higher limit, so an
@@ -47,6 +48,9 @@ DEFAULT_DELETE_LIMIT = 5000
 #:   - pending commits hold the only reference to their content until a reviewer approves
 #:   - merge-conflict rows hold the only reference to the versions being reconciled
 #:   - lineage rows pin the content a rename was detected through
+#:   - profile pictures live in the blob store with no file_objects row of their own;
+#:     a commit of the same bytes would otherwise make one collectable
+#: Backups read this list too, to decide which blobs a snapshot needs.
 BLOB_REFERENCE_COLUMNS = (
     CommitFile.file_hash,
     PendingCommitFile.file_hash,
@@ -55,6 +59,7 @@ BLOB_REFERENCE_COLUMNS = (
     MergeConflictFile.ours_file_hash,
     MergeConflictFile.theirs_file_hash,
     MergeConflictFile.resolved_file_hash,
+    User.avatar_blob_hash,
 )
 
 
@@ -156,7 +161,20 @@ def collect(
     """Delete unreferenced blobs (and optionally dangling commits).
 
     ``dry_run`` defaults to True: a caller has to ask for deletion explicitly.
+
+    A real sweep holds the maintenance lock, so it never runs during a backup (which
+    would then be missing blobs its snapshot references). Raises MaintenanceBusy.
     """
+    if dry_run:
+        return _collect(db, True, limit, prune_dangling_commits)
+    from app.services import maintenance
+
+    with maintenance.acquire("garbage collection"):
+        return _collect(db, False, limit, prune_dangling_commits)
+
+
+def _collect(db: Session, dry_run: bool, limit: Optional[int],
+             prune_dangling_commits: bool) -> Dict[str, Any]:
     report = analyze(db)
     limit = DEFAULT_DELETE_LIMIT if limit is None else max(0, limit)
 

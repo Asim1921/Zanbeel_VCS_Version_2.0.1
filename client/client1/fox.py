@@ -841,6 +841,49 @@ class FoxClient:
         """GET with auth header; on 401, recover the credential once and retry."""
         return self._authed_request("GET", url, timeout=timeout, params=params)
 
+    def _authed_get_all(self, url, key, params=None, timeout=30, page_size=1000):
+        """GET every page of a paged list and return one response holding all of it.
+
+        The server pages every list it returns (``pagination.has_more`` and a Link
+        header). Commands that need the whole collection -- clone, push deciding what the
+        server already has, log, the branch list -- follow the pages here, so none of them
+        works from the first 200 commits or branches without saying so. A failing page is
+        returned as it is; a server too old to page answers once, and that is everything.
+        """
+        query = dict(params or {})
+        query["limit"] = page_size
+        offset = 0
+        first = None
+        items = []
+        for _ in range(100000):
+            query["offset"] = offset
+            resp = self._authed_get(url, params=query, timeout=timeout)
+            if resp.status_code != 200:
+                return resp
+            try:
+                data = resp.json()
+            except ValueError:
+                return resp
+            if first is None:
+                first = data
+            items.extend(data.get(key) or [])
+            meta = data.get("pagination") or {}
+            if not meta.get("has_more") or meta.get("next_offset") is None:
+                break
+            offset = meta["next_offset"]
+
+        merged = dict(first or {})
+        merged[key] = items
+        if isinstance(merged.get("pagination"), dict):
+            merged["pagination"] = {**merged["pagination"], "offset": 0, "returned": len(items),
+                                    "has_more": False, "next_offset": None}
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps(merged).encode("utf-8")
+        response.headers["Content-Type"] = "application/json"
+        response.encoding = "utf-8"
+        return response
+
     def _authed_delete(self, url, timeout=30):
         """DELETE with auth header; on 401, recover the credential once and retry."""
         return self._authed_request("DELETE", url, timeout=timeout)
@@ -1710,6 +1753,177 @@ class FoxClient:
         data = response.json()
         print(f"Marked {data.get('updated', 0)} read; {data.get('unread', 0)} unread.")
         return True
+
+    # ------------------------------------------------------------------
+    # Administration: sign-in limits, backups, schema health.
+    #
+    # What an administrator can do from any machine. A real restore replaces the
+    # live database, so it stays a step on the server itself (tools/backup.py
+    # --restore); the restore *drill* runs there too, but is started from here.
+    # ------------------------------------------------------------------
+
+    def _admin_get(self, path, timeout=60):
+        response = self._authed_get(f"{self._resolve_server_url()}{path}", timeout=timeout)
+        if response.status_code != 200:
+            print(f"Failed: {self._response_error_message(response)}")
+            return None
+        return response.json()
+
+    @staticmethod
+    def _mb(n):
+        return f"{(n or 0) / 1024 / 1024:.1f} MB"
+
+    def admin_lockouts(self, as_json=False):
+        """Locked accounts, throttled addresses and where failed sign-ins come from."""
+        data = self._admin_get("/api/admin/security/lockouts")
+        if data is None:
+            return False
+        if as_json:
+            print(json.dumps(data, indent=2))
+            return True
+        p = data.get("policy", {})
+        print(f"Policy: {p.get('max_failures_per_address')} failures from one address stop it for that "
+              f"account; {p.get('max_account_failures')} from anywhere lock the account for "
+              f"{p.get('lockout_minutes')} min, doubling each time; {p.get('max_ip_failures')} from one "
+              f"address across accounts throttle it (windows: {p.get('account_window_minutes')} min).")
+        print()
+        locked = data.get("locked_accounts", [])
+        if not locked:
+            print("No accounts are locked.")
+        else:
+            print(f"{'USERNAME':<24} {'REMAINING':<12} {'FAILURES':<10} {'LOCK':<6} LAST IP")
+            for lock in locked:
+                mins = max(1, round(lock["seconds_remaining"] / 60))
+                print(f"{lock['username'][:23]:<24} {str(mins) + ' min':<12} {lock['failed_count']:<10} "
+                      f"{('#' + str(lock.get('lock_count') or 1)):<6} {lock.get('last_ip') or '-'}")
+        for pair in data.get("throttled_pairs", []):
+            print(f"  throttled: {pair['username']} from {pair['ip_address']} ({pair['failures']} failures)")
+        for row in data.get("throttled_addresses", []):
+            print(f"  throttled address: {row['ip_address']} ({row['failures']} failures across accounts)")
+        ips = data.get("recent_failures_by_ip", [])
+        if ips:
+            print()
+            print(f"Failed attempts in the last {p.get('ip_window_minutes')} minutes, by source:")
+            for row in ips[:10]:
+                print(f"  {row['ip_address']:<24} {row['failures']}")
+        return True
+
+    def admin_unlock(self, username=None, ip_address=None):
+        """Clear sign-in limits early, for an account, an address, or both."""
+        if not username and not ip_address:
+            print("Name an account, or --ip ADDRESS.")
+            return False
+        body = {k: v for k, v in (("username", username), ("ip_address", ip_address)) if v}
+        response = self._authed_post(f"{self._resolve_server_url()}/api/admin/security/unlock", json=body)
+        if response.status_code != 200:
+            print(f"Unlock failed: {self._response_error_message(response)}")
+            return False
+        data = response.json()
+        what = " and ".join(x for x in (username, ip_address and f"address {ip_address}") if x)
+        state = "was locked; now unlocked" if data.get("was_locked") else "was not locked"
+        print(f"{what}: {state}. Cleared {data.get('cleared_failures', 0)} failed attempt(s).")
+        return True
+
+    def admin_schema(self, as_json=False):
+        """Whether the server's database is at its revision and matches its models."""
+        data = self._admin_get("/api/admin/schema")
+        if data is None:
+            return False
+        if as_json:
+            print(json.dumps(data, indent=2))
+            return True
+        s = data.get("schema", {})
+        revision = s.get("revision") or {}
+        print(f"  revision        : {revision.get('current') or '(none recorded)'} (code: {revision.get('head')})")
+        print(f"  tables present  : {s.get('tables_present')}/{s.get('tables_expected')}")
+        print(f"  missing columns : {len(s.get('missing_columns') or [])}")
+        print(f"  missing unique  : {len(s.get('missing_unique') or [])}")
+        print(f"  missing indexes : {len(s.get('missing_indexes') or [])} (slower, not wrong)")
+        for run in (data.get("migrations") or [])[:3]:
+            print(f"  upgraded        : {run.get('finished_at')}  {run.get('from_revision') or '(none)'} -> "
+                  f"{run.get('to_revision')}")
+        if s.get("healthy"):
+            print("\n  healthy - the live schema matches the models.")
+            return True
+        if s.get("revision_problem"):
+            print(f"\n  {s['revision_problem']}")
+        for table in s.get("missing_tables") or []:
+            print(f"  missing table : {table}")
+        for column in (s.get("missing_columns") or [])[:20]:
+            print(f"  missing column: {column['table']}.{column['column']}")
+        print("\n  DRIFT - on the server: ..\\venv\\Scripts\\python.exe tools/schema.py --check")
+        return False
+
+    def _print_backup(self, b):
+        drill = b.get("restore_test_status") or "-"
+        print(f"  #{b['id']} {b['label']}  {b.get('status')}  verified: {'yes' if b.get('verified') else 'NO'}"
+              f"  drill: {drill}")
+        if b.get("status") == "complete":
+            print(f"     database {self._mb(b.get('database_bytes'))}, blobs {self._mb(b.get('blob_bytes'))} "
+                  f"({b.get('blob_count')} objects, {b.get('linked_blobs') or 0} linked from the previous backup)")
+        if b.get("error"):
+            print(f"     problems: {b['error']}")
+        report = b.get("restore_test_report") or {}
+        for problem in report.get("problems") or []:
+            print(f"     drill: {problem}")
+
+    def admin_backups(self, as_json=False):
+        """Backups on the server, with their verification and restore-drill results."""
+        data = self._admin_get("/api/admin/backups")
+        if data is None:
+            return False
+        if as_json:
+            print(json.dumps(data, indent=2))
+            return True
+        summary = data.get("summary") or {}
+        print(f"Destination: {data.get('destination')}")
+        age = summary.get("last_verified_age_hours")
+        print(f"Last verified backup: {'never' if age is None else f'{age} h ago'}"
+              + ("  (STALE)" if summary.get("stale") else ""))
+        schedule = summary.get("schedule") or {}
+        print(f"Schedule: {('every ' + str(schedule.get('interval_hours')) + ' h') if schedule.get('interval_hours') else 'off'}, "
+              f"keeping {schedule.get('keep')}")
+        if summary.get("same_volume_as_data"):
+            print("Note: backups are on the same disk as the data.")
+        print()
+        rows = data.get("backups", [])
+        if not rows:
+            print("No backups recorded. Take one: fox admin backup")
+            return True
+        for b in rows:
+            self._print_backup(b)
+        return True
+
+    def admin_backup(self, label=None, drill=False):
+        """Take a backup on the server and wait for it (and its restore drill)."""
+        body = {"test_restore": bool(drill)}
+        if label:
+            body["label"] = label
+        print("Backing up on the server (every blob is read back; this can take minutes) ...")
+        response = self._authed_post(f"{self._resolve_server_url()}/api/admin/backups",
+                                     json=body, params={"wait": "true"}, timeout=6 * 3600)
+        if response.status_code not in (200, 202):
+            print(f"Backup failed: {self._response_error_message(response)}")
+            return False
+        b = response.json().get("backup") or {}
+        self._print_backup(b)
+        return bool(b.get("verified")) and (not drill or b.get("restore_test_status") == "passed")
+
+    def admin_restore_test(self, backup_id):
+        """Restore a backup into a scratch directory on the server and read it back."""
+        print(f"Test-restoring backup #{backup_id} on the server ...")
+        response = self._authed_post(
+            f"{self._resolve_server_url()}/api/admin/backups/{backup_id}/restore-test",
+            params={"wait": "true"}, timeout=6 * 3600)
+        if response.status_code not in (200, 202):
+            print(f"Restore drill failed to run: {self._response_error_message(response)}")
+            return False
+        b = response.json().get("backup") or {}
+        self._print_backup(b)
+        report = b.get("restore_test_report") or {}
+        if report.get("branches_checked") is not None:
+            print(f"     {report['branches_checked']} branch heads, {report.get('head_files_checked')} files read back")
+        return b.get("restore_test_status") == "passed"
 
     def save_global_config(self, config):
         """Save global FoxNest credentials"""
@@ -2741,8 +2955,8 @@ class FoxClient:
             return None
         server_url = self._resolve_server_url()
         try:
-            resp = self._authed_get(
-                f"{server_url}/api/repository/{config['repo_id']}/branches",
+            resp = self._authed_get_all(
+                f"{server_url}/api/repository/{config['repo_id']}/branches", "branches",
                 timeout=60,
             )
             if resp.status_code != 200:
@@ -3097,8 +3311,8 @@ class FoxClient:
         server_branch_is_tip = False
         if repo_id and server_url and not local_only:
             try:
-                br = self._authed_get(
-                    f"{server_url}/api/repository/{repo_id}/branches",
+                br = self._authed_get_all(
+                    f"{server_url}/api/repository/{repo_id}/branches", "branches",
                     timeout=60,
                 )
             except requests.exceptions.RequestException as e:
@@ -3410,7 +3624,8 @@ class FoxClient:
             return None
         server_url = self._resolve_server_url()
         try:
-            resp = self._authed_get(f"{server_url}/api/repository/{repo_id}/branches", timeout=30)
+            resp = self._authed_get_all(f"{server_url}/api/repository/{repo_id}/branches", "branches",
+                                        timeout=30)
         except requests.exceptions.RequestException:
             return None
         if resp.status_code != 200:
@@ -4123,8 +4338,8 @@ class FoxClient:
             self.update_head_commit(new_head)
 
             try:
-                branches_resp = self._authed_get(
-                    f"{server_url}/api/repository/{config['repo_id']}/branches",
+                branches_resp = self._authed_get_all(
+                    f"{server_url}/api/repository/{config['repo_id']}/branches", "branches",
                     timeout=30,
                 )
                 if branches_resp.status_code == 200:
@@ -4170,8 +4385,8 @@ class FoxClient:
             print("Repository not linked to server. Push first.")
             return False
         server_url = self._resolve_server_url()
-        response = self._authed_get(
-            f"{server_url}/api/repository/{config['repo_id']}/tags",
+        response = self._authed_get_all(
+            f"{server_url}/api/repository/{config['repo_id']}/tags", "tags",
             timeout=30,
         )
         if response.status_code == 200:
@@ -4228,8 +4443,8 @@ class FoxClient:
             print("Repository not linked to server. Push first.")
             return False
         server_url = self._resolve_server_url()
-        response = self._authed_get(
-            f"{server_url}/api/repository/{config['repo_id']}/releases",
+        response = self._authed_get_all(
+            f"{server_url}/api/repository/{config['repo_id']}/releases", "releases",
             timeout=30,
         )
         if response.status_code == 200:
@@ -4269,8 +4484,8 @@ class FoxClient:
             return False
         params = {"status": status} if status else {}
         server_url = self._resolve_server_url()
-        response = self._authed_get(
-            f"{server_url}/api/repository/{config['repo_id']}/pull-requests",
+        response = self._authed_get_all(
+            f"{server_url}/api/repository/{config['repo_id']}/pull-requests", "pull_requests",
             params=params,
             timeout=30,
         )
@@ -5321,8 +5536,8 @@ class FoxClient:
                             if repo["name"] in target_names or repo["name"].strip() in target_names:
                                 return repo["id"]
 
-            fallback = self._authed_get(
-                f"{server_url}/api/repositories/all",
+            fallback = self._authed_get_all(
+                f"{server_url}/api/repositories/all", "repositories",
                 timeout=60,
             )
             if fallback.status_code == 200:
@@ -5345,10 +5560,14 @@ class FoxClient:
     def pull_existing_repository(self, config):
         """Pull all commits from an existing repository"""
         try:
-            response = self._authed_get(
+            # Every page: the server returns 200 commits at a time, and a clone that
+            # kept only the newest 200 would leave parents pointing at nothing.
+            response = self._authed_get_all(
                 f"{self._resolve_server_url()}/api/repository/{config['repo_id']}/commits",
+                "commits",
                 params={"full": "true"},
-                timeout=30,
+                timeout=60,
+                page_size=200,
             )
             
             if response.status_code == 200:
@@ -5604,15 +5823,17 @@ class FoxClient:
             commits_url = f"{config['server_url']}/api/repository/{config['repo_id']}/commits"
 
             # Compare against the remote branch we are updating (default: current branch).
-            response = self._authed_get(
-                commits_url,
+            # All of the branch's history, not the newest page: older commits missing
+            # from a first page would be taken for new ones and pushed again.
+            response = self._authed_get_all(
+                commits_url, "commits",
                 params={"branch": remote_branch_name},
                 timeout=60,
             )
             # If server denies branch-specific commit listing (common for issue-scoped users),
             # fall back to default-branch history so we can still detect "already on remote" base commits.
             if response.status_code == 403:
-                response = self._authed_get(commits_url, params=None, timeout=60)
+                response = self._authed_get_all(commits_url, "commits", params=None, timeout=60)
             
             if response.status_code == 200:
                 data = response.json()
@@ -5855,8 +6076,9 @@ class FoxClient:
 
                     # Sync branch refs from server so branch list/checkout work on fresh machines
                     try:
-                        branches_response = self._authed_get(
+                        branches_response = self._authed_get_all(
                             f"{config['server_url']}/api/repository/{config['repo_id']}/branches",
+                            "branches",
                             timeout=30
                         )
                         if branches_response.status_code == 200:
@@ -6061,9 +6283,9 @@ class FoxClient:
             # If repo_id not cached locally, look it up by name from the public endpoint
             if not repo_id and config.get('repo_name'):
                 try:
-                    r = self._authed_get(
-                        f"{server_url}/api/repositories/all",
-                        timeout=10,
+                    r = self._authed_get_all(
+                        f"{server_url}/api/repositories/all", "repositories",
+                        timeout=30,
                     )
                     if r.status_code == 200:
                         for repo in r.json().get('repositories', []):
@@ -6079,10 +6301,10 @@ class FoxClient:
                 print("(log: repo_id not found - run 'fox push' first to link to server)")
                 return None, None
             branch = self.get_current_branch() or 'main'
-            resp = self._authed_get(
-                f"{server_url}/api/repository/{repo_id}/commits",
+            resp = self._authed_get_all(
+                f"{server_url}/api/repository/{repo_id}/commits", "commits",
                 params={'branch': branch},
-                timeout=10,
+                timeout=30,
             )
             if resp.status_code != 200:
                 print(f"(log: server returned HTTP {resp.status_code} for commits - showing local history)")
@@ -6689,6 +6911,10 @@ def print_extended_help():
     print("  search repos|commits|code|files Search what you can read (code: --regex, --all)")
     print("  activity                       Who did what: this repository, or --all")
     print("  notifications [read ID|--all]  What the server has told you")
+    print("  admin lockouts|unlock          Sign-in limits: who is locked or throttled, and clear them")
+    print("  admin backup [--drill]|backups Verified backups on the server, and restore drills")
+    print("  admin restore-test <id>        Restore a backup into a scratch directory and read it back")
+    print("  admin schema                   The database's revision and whether it matches the code")
     print("  config                  Show configuration")
     print("  gc                      Optimize repository (garbage collection)")
     print("  docs [path]             Generate documentation locally")
@@ -6707,6 +6933,7 @@ def print_extended_help():
     print("  fox search code parse_config --all")
     print("  fox search commits 'fix login'")
     print("  fox activity --type push_commit --since 2026-10-01")
+    print("  fox admin backup --label pre-upgrade --drill")
     print("  fox set username alice")
     print("  fox init --username alice --repo-name myproject")
     print("  fox set origin 192.168.15.207:502")
@@ -7438,6 +7665,23 @@ def main():
     notif_read.add_argument("ids", nargs="*", help="Notification ids (see: fox notifications)")
     notif_read.add_argument("--all", dest="notif_all", action="store_true", help="Every unread notification")
 
+    admin_parser = subparsers.add_parser("admin", help="Administration: sign-in limits, backups, schema")
+    admin_sub = admin_parser.add_subparsers(dest="admin_command")
+    ad_lockouts = admin_sub.add_parser("lockouts", help="Locked accounts and throttled addresses")
+    ad_lockouts.add_argument("--json", dest="admin_json", action="store_true", help="Print raw JSON")
+    ad_unlock = admin_sub.add_parser("unlock", help="Clear sign-in limits for an account or an address")
+    ad_unlock.add_argument("username", nargs="?", help="Account to unlock")
+    ad_unlock.add_argument("--ip", dest="unlock_ip", metavar="ADDRESS", help="Address to clear")
+    ad_schema = admin_sub.add_parser("schema", help="The database's revision and whether it matches the code")
+    ad_schema.add_argument("--json", dest="admin_json", action="store_true", help="Print raw JSON")
+    ad_backups = admin_sub.add_parser("backups", help="Backups on the server and their checks")
+    ad_backups.add_argument("--json", dest="admin_json", action="store_true", help="Print raw JSON")
+    ad_backup = admin_sub.add_parser("backup", help="Take a verified backup on the server and wait for it")
+    ad_backup.add_argument("--label", dest="backup_label", help="A name for it, e.g. pre-upgrade")
+    ad_backup.add_argument("--drill", action="store_true", help="Then test-restore it")
+    ad_drill = admin_sub.add_parser("restore-test", help="Test-restore a backup on the server")
+    ad_drill.add_argument("backup_id", type=int, help="Backup id (see: fox admin backups)")
+
     ssh_login = ssh_sub.add_parser("login", help="Sign in with a key (same as: fox login --ssh)")
     ssh_login.add_argument("--key", dest="key_path", metavar="PATH", help="Private key to sign with")
     ssh_login.add_argument("--username", help="Account to sign in to")
@@ -7912,6 +8156,28 @@ def main():
         else:
             ok = fox.notifications_list(unread=args.notif_unread, limit=args.notif_limit,
                                         as_json=args.notif_json)
+        if not ok:
+            sys.exit(1)
+
+    elif args.command == "admin":
+        sub = getattr(args, "admin_command", None)
+        as_json = getattr(args, "admin_json", False)
+        if sub == "lockouts":
+            ok = fox.admin_lockouts(as_json=as_json)
+        elif sub == "unlock":
+            ok = fox.admin_unlock(args.username, ip_address=args.unlock_ip)
+        elif sub == "schema":
+            ok = fox.admin_schema(as_json=as_json)
+        elif sub == "backups":
+            ok = fox.admin_backups(as_json=as_json)
+        elif sub == "backup":
+            ok = fox.admin_backup(label=args.backup_label, drill=args.drill)
+        elif sub == "restore-test":
+            ok = fox.admin_restore_test(args.backup_id)
+        else:
+            print("Usage: fox admin lockouts | unlock <user> [--ip ADDR] | schema | backups | "
+                  "backup [--drill] | restore-test <id>")
+            ok = False
         if not ok:
             sys.exit(1)
 

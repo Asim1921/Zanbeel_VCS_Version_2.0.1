@@ -6,7 +6,7 @@ the path as the name.
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from database.crud import RepositoryCRUD
@@ -14,6 +14,7 @@ from database.database import get_db
 from database.models import User
 
 from app.core.dependencies import get_current_user
+from app.core.pagination import page_params, set_page_headers
 from app.core.permissions import (
     _require_repository_read_access, can_manage_repository, can_write_repository,
     require_repository_access,
@@ -38,14 +39,21 @@ def _repository(db: Session, repo_id: str):
 @router.get("/api/repository/{repo_id}/tags")
 def list_tags(
     repo_id: str,
+    request: Request,
+    response: Response,
+    page=Depends(page_params()),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """Newest first, paged."""
     repository = _repository(db, repo_id)
     _require_repository_read_access(db, current_user, repository, "view tags")
+    tags, meta = release_ops.list_tags(db, repo_id, *page)
+    set_page_headers(request, response, meta)
     return {
         "success": True,
-        "tags": release_ops.list_tags(db, repo_id),
+        "tags": tags,
+        "pagination": meta,
         "permissions": {
             "can_write": can_write_repository(db, current_user, repository),
             "can_manage": can_manage_repository(db, current_user, repository),

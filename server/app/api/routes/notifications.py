@@ -2,7 +2,7 @@
 
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -11,6 +11,7 @@ from database.database import get_db
 from database.models import Notification, User
 
 from app.core.dependencies import get_current_user
+from app.core.pagination import page_params, paginate_query, set_page_headers
 from app.schemas import MarkNotificationsReadRequest
 
 
@@ -39,32 +40,30 @@ async def unread_notification_count(
 
 @router.get("/api/notifications")
 async def list_notifications(
+    request: Request,
+    response: Response,
     unread_only: bool = False,
-    limit: int = 50,
-    offset: int = 0,
+    page=Depends(page_params(default=50, maximum=200)),
     type: str = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """List notifications for the current user."""
+    """List notifications for the current user, newest first, paged."""
     query = db.query(Notification).filter(Notification.user_id == current_user.id)
     if unread_only:
         query = query.filter(Notification.is_read == False)  # noqa: E712
     if type:
         query = query.filter(Notification.notification_type == type)
 
-    total = query.count()
-    notifications = (
-        query.order_by(Notification.created_at.desc())
-        .offset(max(0, offset))
-        .limit(max(1, min(limit, 200)))
-        .all()
-    )
+    notifications, meta = paginate_query(
+        query.order_by(Notification.created_at.desc(), Notification.id.desc()), *page, maximum=200)
+    set_page_headers(request, response, meta)
 
     return {
         "success": True,
-        "total": total,
-        "offset": max(0, offset),
+        "total": meta["total"],
+        "offset": meta["offset"],
+        "pagination": meta,
         "unread": _unread_count(db, current_user.id),
         "types": sorted({
             row[0] for row in db.query(Notification.notification_type)

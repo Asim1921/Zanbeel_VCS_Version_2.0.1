@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from database.crud import (
@@ -11,9 +11,10 @@ from database.crud import (
     PendingUserRegistrationCRUD, RepositoryCRUD, UserCRUD,
 )
 from database.database import get_db
-from database.models import Repository, User
+from database.models import PendingUserRegistration, Repository, User
 
 from app.core.dependencies import require_admin_user, require_reviewer_user
+from app.core.pagination import page_params, paginate_query, set_page_headers
 from app.core.security import hash_password
 from app.schemas import ReviewRegistrationRequest
 from app.services import password_reset
@@ -173,13 +174,24 @@ async def get_pending_counts(
 
 @router.get("/api/admin/pending-user-registrations")
 async def list_pending_user_registrations(
+    request: Request,
+    response: Response,
     status: str = 'pending',
+    page=Depends(page_params()),
     current_user: User = Depends(require_admin_user),
     db: Session = Depends(get_db)
 ):
-    requests = PendingUserRegistrationCRUD.list_requests(db, status)
+    """Registration requests, newest first, paged; ``status=all`` includes reviewed ones."""
+    query = db.query(PendingUserRegistration)
+    if status and status.lower() != "all":
+        query = query.filter(PendingUserRegistration.status == status)
+    requests, meta = paginate_query(
+        query.order_by(PendingUserRegistration.created_at.desc(), PendingUserRegistration.id.desc()),
+        *page)
+    set_page_headers(request, response, meta)
     return {
         "success": True,
+        "pagination": meta,
         "pending_registrations": [
             {
                 "id": req.id,
@@ -326,13 +338,17 @@ async def run_garbage_collection(
     history rather than just reclaiming space.
     """
     from app.services import gc as gc_service
+    from app.services.maintenance import MaintenanceBusy
 
-    report = gc_service.collect(
-        db,
-        dry_run=dry_run,
-        limit=limit,
-        prune_dangling_commits=prune_dangling_commits,
-    )
+    try:
+        report = gc_service.collect(
+            db,
+            dry_run=dry_run,
+            limit=limit,
+            prune_dangling_commits=prune_dangling_commits,
+        )
+    except MaintenanceBusy as busy:
+        raise HTTPException(status_code=409, detail=str(busy))
 
     if not dry_run and (report["deleted_objects"] or report["deleted_commits"]):
         ActivityCRUD.create_activity(

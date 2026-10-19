@@ -7,7 +7,7 @@ swallow it.
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from database.crud import RepositoryCRUD
@@ -15,6 +15,7 @@ from database.database import get_db
 from database.models import User
 
 from app.core.dependencies import get_current_user
+from app.core.pagination import page_params, set_page_headers
 from app.core.permissions import (
     _require_repository_read_access, can_manage_repository, can_write_repository,
     require_repository_access,
@@ -49,15 +50,22 @@ def _release_payload(release) -> dict:
 @router.get("/api/repository/{repo_id}/releases")
 def list_releases(
     repo_id: str,
+    request: Request,
+    response: Response,
+    page=Depends(page_params()),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Newest first. ``latest`` marks the highest version that is not a pre-release."""
+    """Newest first, paged. ``latest`` marks the highest version that is not a
+    pre-release, across every release rather than within the page."""
     repository = _repository(db, repo_id)
     _require_repository_read_access(db, current_user, repository, "view releases")
+    releases, meta = release_ops.list_releases(db, repo_id, *page)
+    set_page_headers(request, response, meta)
     return {
         "success": True,
-        "releases": release_ops.list_releases(db, repo_id),
+        "releases": releases,
+        "pagination": meta,
         "permissions": {
             "can_write": can_write_repository(db, current_user, repository),
             "can_manage": can_manage_repository(db, current_user, repository),

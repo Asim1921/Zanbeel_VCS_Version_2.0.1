@@ -15,6 +15,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+SERVER_VERSION = "2.0.0"
+
 SERVER_ROOT = Path("/tmp/foxnest_server")  # Keep for backward compatibility
 REPOS_DIR = SERVER_ROOT / "repositories"
 # Generated documentation, one folder per repository. FOXNEST_DOCS_DIR moves it to a

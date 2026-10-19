@@ -1,19 +1,13 @@
-"""Baseline: the schema as it stood when Alembic was adopted.
+"""Baseline: the point at which Alembic was adopted (2.0.1).
 
-Deliberately a no-op upgrade. The schema already exists on every deployment,
-built by ``create_tables()`` and seventeen ``ensure_*`` startup patches. Emitting
-CREATE TABLE here would either fail against a live database or, worse, be run
-against a fresh one and diverge from the models.
+Deliberately empty. Databases of every age exist -- some created before passwords,
+some by today's models -- so there is no single schema this revision could create.
+Revision 0002 does that work: it brings a database of any age to the models.
 
-So this revision exists to be *stamped*, not run:
-
-    py -3.11 tools/schema.py --stamp     # existing database, already at baseline
-    py -3.11 -m alembic upgrade head     # thereafter, applies real revisions
-
-Every schema change from here on gets its own revision with real upgrade and
-downgrade bodies. ``tools/schema.py --check`` compares the live database against
-the models, so a revision that did not take effect is caught rather than
-assumed.
+A database from before Alembic has no ``alembic_version`` row, so it is below this
+revision and an upgrade runs 0001, 0002 and everything after. A database someone
+stamped at 0001 by hand (``tools/schema.py --stamp`` in 2.0.1) is at this revision
+and an upgrade runs 0002 onward. Both arrive at the same schema.
 
 Revision ID: 0001_baseline
 Revises:

@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -19,7 +19,7 @@ from database.database import get_db
 from database.models import PendingRepository, User
 
 from app.core.dependencies import get_current_user, has_admin_powers
-from app.core.pagination import paginate_list
+from app.core.pagination import page_params, paginate_list, set_page_headers
 from app.services import webhooks as hook_service
 from app.core.permissions import (
     _is_privileged_role, _require_repository_read_access, _user_can_view_issues,
@@ -197,12 +197,20 @@ async def create_repository(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+def _in_creation_order(repositories):
+    """The lists come back unordered from SQL; paging needs one order that never changes.
+    Creation order (then id) is the order SQLite happened to return them in, so no
+    screen reorders."""
+    return sorted(repositories, key=lambda r: (r.created_at or datetime.min, r.id))
+
+
 @router.get("/api/repository/list")
 async def list_repositories(
+    request: Request,
+    response: Response,
     username: Optional[str] = None,
     repo_name: Optional[str] = None,
-    limit: Optional[int] = None,
-    offset: Optional[int] = None,
+    page=Depends(page_params()),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -240,10 +248,11 @@ async def list_repositories(
 
         # Paged after the permission filter, which runs in Python, so `total`
         # counts what this caller may actually see rather than what exists.
-        page, meta = paginate_list(repositories, limit, offset)
+        rows, meta = paginate_list(_in_creation_order(repositories), *page)
+        set_page_headers(request, response, meta)
         return {
             "success": True,
-            "repositories": [repository_to_dict(repo, db=db, actor=current_user) for repo in page],
+            "repositories": [repository_to_dict(repo, db=db, actor=current_user) for repo in rows],
             "pagination": meta,
         }
 
@@ -251,19 +260,32 @@ async def list_repositories(
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @router.get("/api/repositories/all")
-async def list_all_repositories(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """List repositories by role scope (all for team lead/admin, accessible ones for developers)."""
+async def list_all_repositories(
+    request: Request,
+    response: Response,
+    page=Depends(page_params()),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List repositories by role scope (all for team lead/admin, accessible ones for developers).
+
+    Paged: ``repository_to_dict`` costs several queries a row, so the whole server's
+    repositories in one response was the slowest call the web client made.
+    """
     try:
         if _is_privileged_role(getattr(current_user, "role", "developer")):
             repositories = RepositoryCRUD.get_all_repositories(db)
         else:
             repositories = RepositoryCRUD.get_repositories_for_web_browser(db, current_user)
 
+        rows, meta = paginate_list(_in_creation_order(repositories), *page)
+        set_page_headers(request, response, meta)
         return {
-            "success": True, 
-            "repositories": [repository_to_dict(repo, db=db, actor=current_user) for repo in repositories]
+            "success": True,
+            "repositories": [repository_to_dict(repo, db=db, actor=current_user) for repo in rows],
+            "pagination": meta,
         }
-    
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
@@ -287,6 +309,9 @@ async def get_repository(
 @router.get("/api/repository/{repo_id}/contributors")
 async def get_repository_contributors(
     repo_id: str,
+    request: Request,
+    response: Response,
+    page=Depends(page_params()),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -299,10 +324,13 @@ async def get_repository_contributors(
         raise HTTPException(status_code=403, detail="Not allowed to view this repository")
 
     contributors = contributors_for_repository(db, repository)
+    rows, meta = paginate_list(contributors, *page)
+    set_page_headers(request, response, meta)
     return {
         "success": True,
-        "contributors": contributors,
-        "count": len(contributors),
+        "contributors": rows,
+        "count": meta["total"],
+        "pagination": meta,
     }
 
 
@@ -575,13 +603,19 @@ async def fork_repository(
 @router.get("/api/repository/{repo_id}/forks")
 async def list_repository_forks(
     repo_id: str,
+    request: Request,
+    response: Response,
+    page=Depends(page_params()),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Where this repository came from, and what has been forked off it."""
+    """Where this repository came from, and what has been forked off it (paged)."""
     repository = RepositoryCRUD.get_repository(db, repo_id)
     if not repository:
         raise HTTPException(status_code=404, detail="Repository not found")
     _require_repository_read_access(db, current_user, repository, "view forks")
 
-    return {"success": True, **forks.describe(db, repository)}
+    described = forks.describe(db, repository)
+    described["forks"], meta = paginate_list(described["forks"], *page)
+    set_page_headers(request, response, meta)
+    return {"success": True, **described, "pagination": meta}

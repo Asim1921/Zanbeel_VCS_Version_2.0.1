@@ -122,6 +122,11 @@ class Commit(Base):
         back_populates="commit",
     )
 
+    __table_args__ = (
+        # History listings read a repository's commits newest first.
+        Index("ix_commits_repo_created", "repository_id", "created_at", "id"),
+    )
+
 class CommitParent(Base):
     __tablename__ = "commit_parents"
 
@@ -254,6 +259,11 @@ class MergeConflictSession(Base):
     created_by = relationship("User", foreign_keys=[created_by_id])
     files = relationship("MergeConflictFile", back_populates="session",
                          cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("ix_merge_conflict_sessions_pr", "pull_request_id", "status"),
+        Index("ix_merge_conflict_sessions_branches", "repository_id", "target_branch", "status"),
+    )
 
 
 class MergeConflictFile(Base):
@@ -1065,6 +1075,8 @@ class CommitStatus(Base):
 
     __table_args__ = (
         Index("ix_commit_statuses_commit_context", "commit_id", "context"),
+        # Statuses are read per repository and commit, never by commit alone.
+        Index("ix_commit_statuses_repo_commit", "repository_id", "commit_id"),
     )
 
 
@@ -1093,6 +1105,10 @@ class ServerHook(Base):
     repository = relationship("Repository")
     created_by = relationship("User", foreign_keys=[created_by_id])
 
+    __table_args__ = (
+        Index("ix_server_hooks_repo_type", "repository_id", "hook_type"),
+    )
+
 
 # ---------------------------------------------------------------------------
 # Security and operations
@@ -1120,6 +1136,10 @@ class LoginAttempt(Base):
     success = Column(Boolean, default=False, nullable=False)
     user_agent = Column(String(300), nullable=True)
     created_at = Column(DateTime, server_default=func.now(), index=True)
+    # What was being guessed: "password" (sign-in), "otp" (a password-reset code) or
+    # "reset_request" (asking for a code to be mailed). Every kind counts toward the
+    # per-address limit; only password guesses lock an account.
+    kind = Column(String(20), nullable=False, default="password", server_default="password")
 
     __table_args__ = (
         Index("ix_login_attempts_user_time", "username", "created_at"),
@@ -1145,6 +1165,9 @@ class AccountLock(Base):
     last_ip = Column(String(64), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    # Consecutive locks, each twice as long as the last. The row outlives its lock so
+    # the next one can escalate; a successful sign-in or an administrator resets it.
+    lock_count = Column(Integer, nullable=False, default=1, server_default="1")
 
 
 class BackupRecord(Base):
@@ -1171,7 +1194,55 @@ class BackupRecord(Base):
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, server_default=func.now(), index=True)
 
+    # manual | scheduled
+    kind = Column(String(20), nullable=False, default="manual", server_default="manual")
+    # running | complete | failed | interrupted | pruned. Rows from before backups ran
+    # as jobs were written only on completion.
+    status = Column(String(20), nullable=False, default="running", server_default="complete")
+    # 1: database + blob tree, presence-checked. 2: adds checksums, an integrity check,
+    # the schema revision and generated documents, and every blob is re-hashed.
+    format = Column(Integer, nullable=False, default=2, server_default="1")
+    database_sha256 = Column(String(64), nullable=True)
+    schema_revision = Column(String(64), nullable=True)
+    # Blobs hard-linked from the previous verified backup instead of copied again.
+    linked_blobs = Column(Integer, default=0)
+    finished_at = Column(DateTime, nullable=True)
+
+    # The most recent re-verification: running | passed | failed.
+    verify_status = Column(String(20), nullable=True)
+    verified_at = Column(DateTime, nullable=True)
+    verify_report = Column(Text, nullable=True)
+
+    # The most recent restore drill: restored into a scratch directory, upgraded to
+    # this server's schema and read back. running | passed | failed.
+    restore_test_status = Column(String(20), nullable=True)
+    restore_tested_at = Column(DateTime, nullable=True)
+    restore_test_report = Column(Text, nullable=True)
+
+    pruned_at = Column(DateTime, nullable=True)
+
     created_by = relationship("User", foreign_keys=[created_by_id])
+
+
+class SchemaMigrationRun(Base):
+    """One schema upgrade the server applied, and the snapshot taken before it.
+
+    ``alembic_version`` says where the schema is; this says how it got there and when,
+    which is what an operator needs after an upgrade goes wrong. Only successful runs
+    have a row: a failed run is rolled back, this table included.
+    """
+
+    __tablename__ = "schema_migration_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    from_revision = Column(String(64), nullable=True)
+    to_revision = Column(String(64), nullable=False)
+    revisions = Column(Text, nullable=True)  # JSON list, oldest first
+    snapshot_path = Column(String(500), nullable=True)
+    server_version = Column(String(40), nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, server_default=func.now(), index=True)
+    duration_ms = Column(Integer, nullable=True)
 
 
 class PasswordResetOTP(Base):
@@ -1258,6 +1329,10 @@ class BranchUnlock(Base):
 
     requested_by = relationship("User", foreign_keys=[requested_by_id])
 
+    __table_args__ = (
+        Index("ix_branch_unlocks_repo_branch", "repository_id", "branch_name"),
+    )
+
 
 class ImmutableRelease(Base):
     """A permanent name for one exact commit.
@@ -1321,3 +1396,7 @@ class RefAuditEvent(Base):
     occurred_at = Column(DateTime, server_default=func.now(), index=True)
     previous_event_hash = Column(String(64), nullable=True)
     event_hash = Column(String(64), nullable=False)
+
+    __table_args__ = (
+        Index("ix_ref_audit_repo_ref", "repository_id", "reference"),
+    )

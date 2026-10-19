@@ -7,6 +7,7 @@ import PageHeader from '../components/ui/PageHeader'
 import EmptyState from '../components/ui/EmptyState'
 import { API_SERVER_URL } from '../config.js'
 import { getSessionToken, getSessionUsername } from '../utils/session'
+import api from '../utils/api'
 
 const PendingApprovals = () => {
   const token = getSessionToken()
@@ -29,16 +30,8 @@ const PendingApprovals = () => {
       setLoading(true)
       setError(null)
 
-      const url = searchTeamLead 
-        ? `${API_SERVER_URL}/api/pending-commits?status=pending&team_lead_username=${searchTeamLead}`
-        : `${API_SERVER_URL}/api/pending-commits?status=pending`
-      
-      const response = await fetch(url, {
-        headers: {
-          Authorization: `Bearer ${token}`
-        }
-      })
-      const data = await response.json()
+      // Every page of the queue, not just the first (the server pages it).
+      const data = await api.listPendingCommits({ teamLead: searchTeamLead || null })
 
       if (data.success) {
         setPendingCommits(data.pending_commits)

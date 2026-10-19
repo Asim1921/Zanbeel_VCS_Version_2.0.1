@@ -5,6 +5,7 @@ import Badge from '../components/ui/Badge'
 import Button from '../components/ui/Button'
 import { API_SERVER_URL } from '../config.js'
 import { getSessionToken } from '../utils/session'
+import api from '../utils/api'
 
 const IssueAccessRequests = () => {
   const token = getSessionToken()
@@ -23,12 +24,8 @@ const IssueAccessRequests = () => {
       setLoading(true)
       setError(null)
 
-      const response = await fetch(`${API_SERVER_URL}/api/access-requests/pending`, {
-        headers: {
-          Authorization: `Bearer ${token}`
-        }
-      })
-      const data = await response.json()
+      // Every page, not just the first: this list used to stop silently at 100.
+      const data = await api.listPendingAccessRequests()
 
       if (data.success) {
         setRequests(data.requests || data.access_requests || [])

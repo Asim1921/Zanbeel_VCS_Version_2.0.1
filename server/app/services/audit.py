@@ -49,6 +49,7 @@ CATEGORY_REVIEW = "review"
 CATEGORY_ACCESS = "access"
 CATEGORY_SETTINGS = "settings"
 CATEGORY_REPOSITORY = "repository"
+CATEGORY_OPERATIONS = "operations"
 
 #: Every activity type, with how a person reads it. Served to clients so the audit
 #: view never shows a raw identifier or offers a filter for a type that does not exist.
@@ -119,6 +120,14 @@ TYPES: Dict[str, Dict[str, str]] = {
     "delete_user": {"label": "Deleted a user", "category": CATEGORY_ACCESS},
     "password_reset": {"label": "Reset a password", "category": CATEGORY_ACCESS},
     "password_reset_otp_sent": {"label": "Sent a password reset code", "category": CATEGORY_ACCESS},
+    "account_locked": {"label": "Sign-in locked after failed attempts", "category": CATEGORY_ACCESS},
+    "account_unlocked": {"label": "Unlocked sign-in", "category": CATEGORY_ACCESS},
+    # operations
+    "backup_created": {"label": "Took a backup", "category": CATEGORY_OPERATIONS},
+    "backup_failed": {"label": "A backup failed", "category": CATEGORY_OPERATIONS},
+    "backup_verified": {"label": "Re-verified a backup", "category": CATEGORY_OPERATIONS},
+    "backup_restore_tested": {"label": "Test-restored a backup", "category": CATEGORY_OPERATIONS},
+    "backup_pruned": {"label": "Removed old backups", "category": CATEGORY_OPERATIONS},
 }
 
 #: Descriptions of something that moves a branch. Recorded in the same request as that

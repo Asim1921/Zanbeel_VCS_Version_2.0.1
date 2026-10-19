@@ -1,13 +1,21 @@
-"""Inspect and manage the database schema.
+"""Inspect and upgrade the database schema.
 
-    py -3.11 tools/schema.py --check     # does the live schema match the models?
-    py -3.11 tools/schema.py --stamp     # mark an existing database at baseline
-    py -3.11 tools/schema.py --current   # which revision is applied
-    py -3.11 tools/schema.py --history   # revisions available
+Run from the ``server/`` directory:
 
-``--check`` is the one that matters day to day. The startup patches swallow
-their own errors, so "no error appeared" has never meant "the migration
-applied". This asks the database what it actually has.
+    ..\\venv\\Scripts\\python.exe tools/schema.py --status     # revision, and what is pending
+    ..\\venv\\Scripts\\python.exe tools/schema.py --check      # does the live schema match the models?
+    ..\\venv\\Scripts\\python.exe tools/schema.py --upgrade    # apply pending revisions (copy taken first)
+    ..\\venv\\Scripts\\python.exe tools/schema.py --history    # revisions this code has
+    ..\\venv\\Scripts\\python.exe tools/schema.py --stamp REV  # record REV without running anything
+
+``--url sqlite:///path/to.db`` points any of these at another database.
+
+The server applies pending revisions itself when it starts (unless
+``FOXNEST_AUTO_MIGRATE=0``), so ``--upgrade`` is for an operator who wants to upgrade
+first and start second -- for example to watch it, or to run it before a deploy.
+Either way the upgrade is one transaction: it applies completely or not at all.
+
+Exit status: 0 healthy / done, 1 drift or pending revisions, 2 an error.
 """
 
 import argparse
@@ -22,78 +30,136 @@ if str(SERVER_ROOT) not in sys.path:
 os.environ.setdefault("FOXNEST_AUTH_SECRET", "x" * 64)
 os.environ.setdefault("FOXNEST_PASSWORD_SETUP_KEY", "y" * 64)
 
-from app.db.schema_check import describe, inspect_schema  # noqa: E402
+
+def _engine(url):
+    from sqlalchemy import create_engine
+
+    if url:
+        return create_engine(url)
+    from database.database import engine
+
+    return engine
 
 
-def do_check():
-    report = inspect_schema()
+def do_status(url):
+    from app.db import upgrade
+
+    state = upgrade.status(url)
+    print(f"  database revision : {state['current'] or '(none recorded)'}")
+    print(f"  this code's head  : {state['head']}")
+    if state["unknown"]:
+        print(f"  UNKNOWN revision  : {', '.join(state['unknown'])} -- upgraded by a newer server")
+        return 1
+    if state["pending"]:
+        print(f"  pending           : {', '.join(state['pending'])}")
+        print(f"  startup migration : {'on' if state['auto_migrate'] else 'off (FOXNEST_AUTO_MIGRATE=0)'}")
+        return 1
+    print("  pending           : none")
+    from database.database import SessionLocal
+
+    if not url:
+        db = SessionLocal()
+        try:
+            runs = upgrade.recent_runs(db, limit=3)
+        finally:
+            db.close()
+        for run in runs:
+            print(f"  upgraded          : {run['finished_at']}  {run['from_revision'] or '(none)'} -> "
+                  f"{run['to_revision']}"
+                  + (f"\n                      copy before it: {run['snapshot_path']}"
+                     if run["snapshot_path"] else ""))
+    return 0
+
+
+def do_check(url):
+    from app.db.schema_check import describe, inspect_schema
+
+    report = inspect_schema(_engine(url))
+    print(f"  revision        : {report['revision'].get('current') or '(none recorded)'}"
+          f" (head {report['revision'].get('head')})")
     print(f"  tables expected : {report['tables_expected']}")
     print(f"  tables present  : {report['tables_present']}")
     print(f"  missing tables  : {len(report['missing_tables'])}")
     print(f"  missing columns : {len(report['missing_columns'])}")
+    print(f"  missing unique  : {len(report['missing_unique'])}")
+    print(f"  missing indexes : {len(report['missing_indexes'])} (not fatal)")
+    for entry in report["missing_indexes"][:10]:
+        print(f"      {entry['table']}({', '.join(entry['columns'])})")
     if not report["healthy"]:
         print()
         print(describe(report))
         print()
-        print("  RESULT: DRIFT — the server will refuse to start unless")
+        print("  RESULT: DRIFT -- the server will refuse to start unless")
         print("          FOXNEST_ALLOW_SCHEMA_DRIFT=1 is set.")
         return 1
     print()
-    print("  RESULT: healthy — the live schema matches the models.")
+    print("  RESULT: healthy -- the live schema matches the models.")
     return 0
 
 
-def _alembic_config():
-    from alembic.config import Config
+def do_upgrade(url, snapshot):
+    from app.db import upgrade
 
-    config = Config(str(SERVER_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(SERVER_ROOT / "alembic"))
-    return config
-
-
-def do_stamp():
-    from alembic import command
-
-    print("Stamping the existing database at the baseline revision.")
-    print("This records that the schema is already current; it runs no DDL.")
-    command.stamp(_alembic_config(), "head")
-    print("  done")
-    return 0
-
-
-def do_current():
-    from alembic import command
-
-    command.current(_alembic_config(), verbose=True)
-    return 0
+    try:
+        report = upgrade.upgrade_database(url, snapshot=snapshot)
+    except upgrade.MigrationError as exc:
+        print(f"Upgrade failed: {exc}")
+        return 2
+    if not report["applied"]:
+        print(f"  already at {report['to']}; nothing to do")
+    return do_check(url)
 
 
 def do_history():
     from alembic import command
+    from app.db.upgrade import alembic_config
 
-    command.history(_alembic_config(), verbose=False)
+    command.history(alembic_config(), verbose=False)
+    return 0
+
+
+def do_stamp(url, revision):
+    from alembic import command
+    from app.db.upgrade import alembic_config
+
+    print(f"Recording revision {revision} without running anything.")
+    print("Use this only for a database you know is at that revision.")
+    command.stamp(alembic_config(url or os.getenv("DATABASE_URL")), revision)
+    print("  done")
     return 0
 
 
 def main():
     parser = argparse.ArgumentParser(description="Zanbeel schema tools")
     group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--status", "--current", action="store_true", dest="status",
+                       help="Show the database's revision and what is pending")
     group.add_argument("--check", action="store_true",
                        help="Compare the live schema against the models")
-    group.add_argument("--stamp", action="store_true",
-                       help="Record an existing database as being at the baseline")
-    group.add_argument("--current", action="store_true", help="Show the applied revision")
+    group.add_argument("--upgrade", action="store_true",
+                       help="Apply pending revisions, taking a copy of the database first")
     group.add_argument("--history", action="store_true", help="List revisions")
+    group.add_argument("--stamp", metavar="REVISION",
+                       help="Record REVISION as applied without running it")
+    parser.add_argument("--url", help="Database URL (default: DATABASE_URL)")
+    parser.add_argument("--no-snapshot", action="store_true",
+                        help="With --upgrade: skip the copy taken before upgrading")
     args = parser.parse_args()
 
-    if args.check:
-        return do_check()
-    if args.stamp:
-        return do_stamp()
-    if args.current:
-        return do_current()
-    if args.history:
-        return do_history()
+    try:
+        if args.status:
+            return do_status(args.url)
+        if args.check:
+            return do_check(args.url)
+        if args.upgrade:
+            return do_upgrade(args.url, snapshot=not args.no_snapshot)
+        if args.history:
+            return do_history()
+        if args.stamp:
+            return do_stamp(args.url, args.stamp)
+    except Exception as exc:
+        print(f"Error: {type(exc).__name__}: {exc}")
+        return 2
     return 0
 
 

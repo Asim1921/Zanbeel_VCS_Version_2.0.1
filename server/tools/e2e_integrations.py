@@ -680,6 +680,8 @@ def scenario_upgrade(r, root, port):
             ALTER TABLE old_deliveries RENAME TO webhook_deliveries;
             CREATE INDEX ix_webhook_deliveries_hook_time ON webhook_deliveries (webhook_id, created_at);
             DROP INDEX IF EXISTS ix_commit_statuses_repo_commit;
+            -- A database that old is at the 2.0.1 baseline: the patches it lacks are in 0002.
+            UPDATE alembic_version SET version_num = '0001_baseline';
         """)
         db.commit()
 
