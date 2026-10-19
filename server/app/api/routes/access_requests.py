@@ -5,15 +5,16 @@ Declaration order matters: /api/access-requests/pending and
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from database.crud import IssueAccessRequestCRUD, NotificationCRUD, RepositoryCRUD
 from database.database import get_db
-from database.models import Repository, User
+from database.models import IssueAccessRequest, Repository, User
 
 from app.core.dependencies import get_current_user
+from app.core.pagination import page_params, paginate_query, set_page_headers
 from app.services.notifications import _notify_user_access_approved
 
 
@@ -22,47 +23,50 @@ router = APIRouter()
 
 @router.get("/api/access-requests/pending")
 async def list_pending_access_requests(
+    request: Request,
+    response: Response,
     repo_id: Optional[str] = None,
     status: Optional[str] = "pending",
+    page=Depends(page_params()),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List access requests for repository owner.
+    """List access requests for repository owner, newest first, paged.
 
-    status can be: pending (default), approved, denied, or all (no filter).
+    status can be: pending (default), approved, denied, or all (no filter). This used to
+    stop silently at 100 requests per repository and 1000 server-wide; a reviewer now
+    sees the true total and pages through it.
     """
     try:
         status_filter = None if (status or "").lower() == "all" else status
         role = (getattr(current_user, "role", "") or "").lower()
+        query = db.query(IssueAccessRequest)
+        if status_filter:
+            query = query.filter(IssueAccessRequest.status == status_filter)
         if repo_id:
             repository = RepositoryCRUD.get_repository(db, repo_id)
             if not repository:
                 raise HTTPException(status_code=404, detail="Repository not found")
             if repository.owner_id != current_user.id and role not in {"admin", "team_lead"}:
                 raise HTTPException(status_code=403, detail="Only repository owner can view access requests")
-            requests = IssueAccessRequestCRUD.list_pending_requests(db, repo_id=repo_id, status=status_filter)
+            query = query.filter(IssueAccessRequest.repository_id == repo_id)
+        elif role == "admin":
+            pass  # Admin can view platform-wide.
+        elif role == "team_lead":
+            # Team leads see requests created by their developers (requested_by.team_lead_id = me).
+            query = (query.join(User, User.id == IssueAccessRequest.requested_by_id)
+                     .filter(User.team_lead_id == current_user.id))
         else:
-            if role == "admin":
-                # Admin can view platform-wide.
-                requests = IssueAccessRequestCRUD.list_pending_requests(db, repo_id=None, status=status_filter, limit=1000)
-            elif role == "team_lead":
-                # Team leads see requests created by their developers (requested_by.team_lead_id = me).
-                from database.models import IssueAccessRequest
-                q = db.query(IssueAccessRequest)
-                if status_filter:
-                    q = q.filter(IssueAccessRequest.status == status_filter)
-                q = q.join(User, User.id == IssueAccessRequest.requested_by_id).filter(User.team_lead_id == current_user.id)
-                requests = q.order_by(desc(IssueAccessRequest.created_at)).limit(1000).all()
-            else:
-                # Non-privileged users: only across repositories they own.
-                user_repos = db.query(Repository).filter(Repository.owner_id == current_user.id).all()
-                repo_ids = [r.id for r in user_repos]
-                requests = []
-                for rid in repo_ids:
-                    requests.extend(IssueAccessRequestCRUD.list_pending_requests(db, repo_id=rid, status=status_filter))
-        
+            # Non-privileged users: only across repositories they own.
+            owned = db.query(Repository.id).filter(Repository.owner_id == current_user.id)
+            query = query.filter(IssueAccessRequest.repository_id.in_(owned))
+
+        requests, meta = paginate_query(
+            query.order_by(desc(IssueAccessRequest.created_at), desc(IssueAccessRequest.id)), *page)
+        set_page_headers(request, response, meta)
         return {
             "success": True,
+            "pagination": meta,
             "access_requests": [
                 {
                     "id": req.id,
@@ -90,16 +94,25 @@ async def list_pending_access_requests(
 
 @router.get("/api/access-requests/my-requests")
 async def list_my_access_requests(
+    request: Request,
+    response: Response,
     status: Optional[str] = None,
+    page=Depends(page_params()),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List access requests for the current user"""
+    """List access requests for the current user, newest first, paged."""
     try:
-        requests = IssueAccessRequestCRUD.list_user_requests(db, current_user.id, status=status)
-        
+        query = db.query(IssueAccessRequest).filter(IssueAccessRequest.requested_user_id == current_user.id)
+        if status and status.lower() != "all":
+            query = query.filter(IssueAccessRequest.status == status)
+        requests, meta = paginate_query(
+            query.order_by(desc(IssueAccessRequest.created_at), desc(IssueAccessRequest.id)), *page)
+        set_page_headers(request, response, meta)
+
         return {
             "success": True,
+            "pagination": meta,
             "access_requests": [
                 {
                     "id": req.id,

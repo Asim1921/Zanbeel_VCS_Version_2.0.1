@@ -20,7 +20,7 @@ from database.database import get_db
 from database.models import User
 
 from app.core.dependencies import get_current_user, has_admin_powers, require_admin_user
-from app.core.pagination import paginate_query
+from app.core.pagination import paginate_query, set_page_headers
 from app.core.permissions import _require_repository_read_access, readable_repository_ids
 from app.services import audit
 
@@ -58,6 +58,7 @@ def _filters(user, type, since, until, q, target_type, target_id, commit):
 @router.get("/api/activities")
 def list_activities(
     request: Request,
+    response: Response,
     limit: Optional[int] = Query(20, ge=1, le=500),
     offset: Optional[int] = Query(0, ge=0),
     user: Optional[str] = None,
@@ -77,6 +78,7 @@ def list_activities(
     query = _query(db, current_user, admin, repository_id=repository_id,
                    **_filters(user, type, since, until, q, target_type, target_id, commit))
     rows, meta = paginate_query(query, limit, offset)
+    set_page_headers(request, response, meta)
     return {
         "success": True,
         "pagination": meta,
@@ -94,7 +96,7 @@ def activity_types(current_user: User = Depends(get_current_user)):
             for name, entry in audit.TYPES.items()
         ],
         "categories": [audit.CATEGORY_CODE, audit.CATEGORY_REVIEW, audit.CATEGORY_REPOSITORY,
-                       audit.CATEGORY_SETTINGS, audit.CATEGORY_ACCESS],
+                       audit.CATEGORY_SETTINGS, audit.CATEGORY_ACCESS, audit.CATEGORY_OPERATIONS],
     }
 
 
@@ -132,6 +134,7 @@ def export_activities(
 def repository_activity(
     repo_id: str,
     request: Request,
+    response: Response,
     limit: Optional[int] = Query(30, ge=1, le=500),
     offset: Optional[int] = Query(0, ge=0),
     user: Optional[str] = None,
@@ -154,6 +157,7 @@ def repository_activity(
     query = _query(db, current_user, admin, repository_id=repo_id,
                    **_filters(user, type, since, until, q, target_type, target_id, commit))
     rows, meta = paginate_query(query, limit, offset)
+    set_page_headers(request, response, meta)
     return {
         "success": True,
         "repository": {"id": repository.id, "name": repository.name},

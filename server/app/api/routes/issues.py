@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from database.crud import (
@@ -13,6 +13,7 @@ from database.database import get_db
 from database.models import IssueWatcher, User
 
 from app.core.dependencies import get_current_user
+from app.core.pagination import page_meta, page_params, set_page_headers
 from app.core.permissions import (
     _user_can_view_issues, can_manage_repository, require_repository_access,
 )
@@ -36,13 +37,14 @@ router = APIRouter()
 @router.get("/api/repository/{repo_id}/issues")
 async def list_issues(
     repo_id: str,
+    request: Request,
+    response: Response,
     status: Optional[str] = None,
     search: Optional[str] = None,
     label: Optional[str] = None,
     milestone_id: Optional[int] = None,
     assignee: Optional[str] = None,
-    offset: int = 0,
-    limit: int = 50,
+    page=Depends(page_params(default=50, maximum=200)),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -52,6 +54,7 @@ async def list_issues(
     if not _user_can_view_issues(db, current_user, repository):
         raise HTTPException(status_code=403, detail="Not allowed to view issues for this repository")
 
+    limit, offset = page
     items, total = IssueCRUD.list_issues(
         db,
         repo_id,
@@ -60,14 +63,17 @@ async def list_issues(
         milestone_id=milestone_id,
         label=label or None,
         assignee_username=assignee or None,
-        limit=min(max(limit, 1), 200),
-        offset=max(offset, 0),
+        limit=limit,
+        offset=offset,
         include_total=True,
     )
+    meta = page_meta(total, limit, offset, len(items))
+    set_page_headers(request, response, meta)
     return {
         "success": True,
         "issues": [_issue_to_list_dict(db, i) for i in items],
         "total": total,
+        "pagination": meta,
     }
 
 

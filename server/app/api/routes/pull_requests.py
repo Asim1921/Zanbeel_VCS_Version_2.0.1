@@ -6,7 +6,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -15,9 +15,10 @@ from database.crud import (
 )
 from database.database import get_db
 
-from database.models import MergeConflictSession, User
+from database.models import MergeConflictSession, PullRequest, User
 
 from app.core.dependencies import get_actor_user, get_current_user
+from app.core.pagination import page_params, paginate_query, set_page_headers
 from app.core.errors import _raise_head_mismatch
 from app.core.permissions import (
     _require_repository_read_access, can_manage_repository, can_write_repository,
@@ -49,18 +50,28 @@ router = APIRouter()
 @router.get("/api/repository/{repo_id}/pull-requests")
 async def list_pull_requests(
     repo_id: str,
+    request: Request,
+    response: Response,
     status: Optional[str] = None,
+    page=Depends(page_params()),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """Newest first, paged in the database: closed and merged pull requests accumulate
+    for as long as the repository exists."""
     repository = RepositoryCRUD.get_repository(db, repo_id)
     if not repository:
         raise HTTPException(status_code=404, detail="Repository not found")
     _require_repository_read_access(db, current_user, repository, "view pull requests")
 
-    prs = PullRequestCRUD.list_pull_requests(db, repo_id, status)
+    query = db.query(PullRequest).filter(PullRequest.repository_id == repo_id)
+    if status:
+        query = query.filter(PullRequest.status == status)
+    prs, meta = paginate_query(query.order_by(PullRequest.created_at.desc(), PullRequest.id.desc()), *page)
+    set_page_headers(request, response, meta)
     return {
         "success": True,
+        "pagination": meta,
         "pull_requests": [
             {
                 "id": pr.id,

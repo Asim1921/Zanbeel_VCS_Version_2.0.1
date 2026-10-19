@@ -2,7 +2,7 @@
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from database.crud import (
@@ -14,14 +14,14 @@ from database.models import User
 
 from app.core.dependencies import get_current_user, has_admin_powers
 from app.core.errors import _raise_head_mismatch
-from app.core.pagination import paginate_list
+from app.core.pagination import MAX_PAGE_SIZE, paginate_list, set_page_headers
 from app.core.permissions import (
     _require_repository_checkout_access, _require_repository_read_access,
 )
 from app.schemas import PushCommitRequest
 from app.services import branch_ops, commit_changes, commit_dag
 from app.services.branches import _get_default_branch, _normalize_branch_name, _resolve_branch
-from app.services.commit_graph import _collect_reachable_commits
+from app.services.commit_graph import _collect_reachable_commits, newest_first
 from app.services.issues import _sync_issues_for_new_commit
 from app.services.notifications import (
     _notify_issue_commit_submitted, _notify_pending_commit_reviewer,
@@ -412,9 +412,16 @@ async def pull_commits(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+#: ``full=true`` carries every commit's complete file list -- a snapshot, a few hundred
+#: entries per commit on a typical repository -- so its pages are capped lower.
+FULL_COMMITS_MAX_PAGE = 200
+
+
 @router.get("/api/repository/{repo_id}/commits")
 async def get_commits(
     repo_id: str,
+    request: Request,
+    response: Response,
     full: bool = False,
     branch: Optional[str] = None,
     limit: Optional[int] = None,
@@ -422,7 +429,11 @@ async def get_commits(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get commit history"""
+    """Commit history, newest first, paged (200 by default).
+
+    A client that needs the whole history follows ``pagination.next_offset`` (or the
+    ``Link: rel="next"`` header) until there is none.
+    """
     repository = RepositoryCRUD.get_repository(db, repo_id)
     if not repository:
         raise HTTPException(status_code=404, detail="Repository not found")
@@ -431,14 +442,16 @@ async def get_commits(
     try:
         # No SQL limit: the branch filter and pagination below both need the full
         # history to report an honest total.
-        commits = CommitCRUD.get_commits_by_repository(db, repo_id, limit=None)
+        commits = newest_first(db, CommitCRUD.get_commits_by_repository(db, repo_id, limit=None))
         if branch:
             resolved_branch = _resolve_branch(db, repo_id, branch)
             reachable = set(_collect_reachable_commits(db, resolved_branch.head_commit_id))
             commits = [commit for commit in commits if commit.id in reachable]
         # Paged after the reachability filter so `total` is the number of
         # commits actually on this branch, not in the whole repository.
-        page, meta = paginate_list(commits, limit, offset)
+        page, meta = paginate_list(commits, limit, offset,
+                                   maximum=FULL_COMMITS_MAX_PAGE if full else MAX_PAGE_SIZE)
+        set_page_headers(request, response, meta)
         return {
             "success": True,
             "pagination": meta,

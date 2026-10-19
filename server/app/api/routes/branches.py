@@ -8,7 +8,7 @@ client, which only knows branches by name, could not manage them at all.
 
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -17,6 +17,7 @@ from database.database import get_db
 from database.models import BranchProtectionPolicy, MergeConflictSession, PullRequest, User
 
 from app.core.dependencies import get_current_user
+from app.core.pagination import page_params, paginate_list, set_page_headers
 from app.core.permissions import (
     _require_repository_checkout_access, _require_repository_read_access,
     can_manage_repository, can_write_repository, require_repository_access,
@@ -45,15 +46,19 @@ def _permissions(db: Session, user: User, repository) -> dict:
 @router.get("/api/repository/{repo_id}/branches")
 def list_branches(
     repo_id: str,
+    request: Request,
+    response: Response,
     details: bool = False,
+    page=Depends(page_params()),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Every branch, default first.
+    """Every branch, default first, paged.
 
     ``details=true`` adds what a branch list needs to be useful: the last commit, how far
     each branch is ahead of and behind the default branch, its protection, and the open
-    pull requests that use it. It walks history, so plain listings leave it off.
+    pull requests that use it. It walks history, so plain listings leave it off -- and it
+    is computed for the page only, not for every branch in the repository.
     """
     repository = RepositoryCRUD.get_repository(db, repo_id)
     if not repository:
@@ -64,13 +69,17 @@ def list_branches(
     branches = BranchCRUD.get_branches_by_repository(db, repo_id)
     if not user_sees_all_repository_branches(db, current_user, repository):
         branches = [b for b in branches if b.is_default] or branches[:1]
-    # Default branch first, then alphabetical.
+    # Default branch first, then alphabetical; the exact name and id break ties so
+    # pages never overlap.
     branches = sorted(
         branches,
-        key=lambda b: (not bool(b.is_default), (b.name or "").lower()),
+        key=lambda b: (not bool(b.is_default), (b.name or "").lower(), b.name or "", b.id or 0),
     )
+    default_branch = next((b.name for b in branches if b.is_default), None)
+    rows, meta = paginate_list(branches, *page)
+    set_page_headers(request, response, meta)
     if details:
-        listed = repo_refs.branch_overview(db, repository, branches)
+        listed = repo_refs.branch_overview(db, repository, rows)
     else:
         listed = [
             {
@@ -80,13 +89,14 @@ def list_branches(
                 "created_at": b.created_at.isoformat() if b.created_at else None,
                 "updated_at": b.updated_at.isoformat() if b.updated_at else None
             }
-            for b in branches
+            for b in rows
         ]
     return {
         "success": True,
         "branches": listed,
-        "default_branch": next((b.name for b in branches if b.is_default), None),
+        "default_branch": default_branch,
         "permissions": _permissions(db, current_user, repository),
+        "pagination": meta,
     }
 
 

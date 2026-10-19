@@ -4,7 +4,7 @@ from datetime import datetime
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from database.crud import ActivityCRUD, UserCRUD, UserEngagementCRUD
@@ -14,7 +14,7 @@ from database.models import User
 from app.core.dependencies import (
     assert_password_session, get_current_user, has_admin_powers, require_admin_user,
 )
-from app.core.pagination import paginate_query
+from app.core.pagination import page_params, paginate_list, paginate_query, set_page_headers
 from app.core.security import hash_password
 
 
@@ -23,14 +23,16 @@ router = APIRouter()
 
 @router.get("/api/users")
 async def list_users(
-    limit: Optional[int] = None,
-    offset: Optional[int] = None,
+    request: Request,
+    response: Response,
+    page=Depends(page_params()),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """List users, newest last. Paged so the response stays bounded."""
     try:
-        users, meta = paginate_query(db.query(User).order_by(User.id), limit, offset)
+        users, meta = paginate_query(db.query(User).order_by(User.id), *page)
+        set_page_headers(request, response, meta)
         return {
             "success": True,
             "pagination": meta,
@@ -57,10 +59,16 @@ async def list_users(
 
 @router.get("/api/admin/users/engagement")
 async def get_users_engagement(
+    request: Request,
+    response: Response,
+    page=Depends(page_params()),
     current_user: User = Depends(require_admin_user),
     db: Session = Depends(get_db),
 ):
-    """Admin: per-user engagement metrics (status, login, work, commits, score)."""
+    """Admin: per-user engagement metrics (status, login, work, commits, score).
+
+    The summary counts every user; the list is paged.
+    """
     try:
         users = UserEngagementCRUD.get_all_user_engagement(db)
         summary = {
@@ -69,7 +77,9 @@ async def get_users_engagement(
             "never_used": sum(1 for u in users if u["status"] == "never_used"),
             "total": len(users),
         }
-        return {"success": True, "summary": summary, "users": users}
+        rows, meta = paginate_list(users, *page)
+        set_page_headers(request, response, meta)
+        return {"success": True, "summary": summary, "users": rows, "pagination": meta}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 

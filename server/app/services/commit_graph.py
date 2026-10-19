@@ -1,5 +1,6 @@
 """Commit DAG traversal: parents, reachability, ancestry and merge bases."""
 
+from datetime import datetime
 from typing import Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -18,6 +19,48 @@ def _get_commit_parents(db: Session, commit_id: Optional[str]) -> List[str]:
     if commit and commit.parent_commit_id:
         return [commit.parent_commit_id]
     return []
+
+def newest_first(db: Session, commits: List[Commit]) -> List[Commit]:
+    """Order commits newest first, the same way every time.
+
+    ``created_at`` has one-second resolution, and commits pushed in the same second --
+    a script, a rebase, a cherry-pick of several -- tied, so their order was whatever
+    the database returned: a clone took the wrong one as the tip, and a page boundary
+    could fall differently from one request to the next. Ties are broken by depth in
+    the history (a child is always newer than its parent), then by id.
+    """
+    ids = {c.id for c in commits}
+    parents: Dict[str, List[str]] = {c.id: ([c.parent_commit_id] if c.parent_commit_id in ids else [])
+                                     for c in commits}
+    if ids:
+        repo_ids = {c.repository_id for c in commits}
+        for commit_id, parent_id in (
+            db.query(CommitParent.commit_id, CommitParent.parent_commit_id)
+            .join(Commit, Commit.id == CommitParent.commit_id)
+            .filter(Commit.repository_id.in_(repo_ids))
+        ):
+            if commit_id in ids and parent_id in ids and parent_id not in parents[commit_id]:
+                parents[commit_id].append(parent_id)
+
+    depth: Dict[str, int] = {}
+    for start in parents:
+        if start in depth:
+            continue
+        stack = [(start, False)]
+        while stack:
+            node, expanded = stack.pop()
+            if node in depth:
+                continue
+            pending = [p for p in parents.get(node, ()) if p not in depth]
+            if expanded or not pending:
+                depth[node] = 1 + max((depth.get(p, 0) for p in parents.get(node, ())), default=0)
+                continue
+            stack.append((node, True))
+            stack.extend((p, False) for p in pending)
+
+    return sorted(commits, key=lambda c: (c.created_at or datetime.min, depth.get(c.id, 0), c.id),
+                  reverse=True)
+
 
 def _collect_reachable_commits(db: Session, head_commit_id: Optional[str], stop_at: Optional[str] = None) -> List[str]:
     if not head_commit_id:

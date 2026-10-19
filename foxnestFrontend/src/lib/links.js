@@ -56,6 +56,9 @@ export function targetLink(target, payload = {}) {
       return '/pending-approvals'
     case 'settings':
       return `/settings${query({ tab: t.tab })}`
+    case 'profile':
+      // Your own profile is where the password is changed (e.g. after a sign-in lock).
+      return profileLink(t.username)
     case 'issue':
       return null // issues open in a dialog on the repositories page; see Header
     default:

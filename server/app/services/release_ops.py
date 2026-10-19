@@ -85,16 +85,29 @@ def latest_version(releases: List[Release]) -> Optional[str]:
     return max(stable, key=version_key) if stable else None
 
 
-def list_tags(db: Session, repository_id: str) -> List[Dict[str, Any]]:
-    tags = db.query(Tag).filter(Tag.repository_id == repository_id).order_by(Tag.created_at.desc(), Tag.id.desc()).all()
+def list_tags(db: Session, repository_id: str, limit: Optional[int] = None,
+              offset: Optional[int] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Newest first, one page. Returns (tags, pagination)."""
+    from app.core.pagination import paginate_query
+
+    query = db.query(Tag).filter(Tag.repository_id == repository_id).order_by(
+        Tag.created_at.desc(), Tag.id.desc())
+    tags, meta = paginate_query(query, limit, offset)
+    page_ids = [t.id for t in tags]
     by_tag = {
         r.tag_id: r for r in
-        db.query(Release).filter(Release.repository_id == repository_id).all()
-    }
-    return [tag_to_dict(t, by_tag.get(t.id)) for t in tags]
+        db.query(Release).filter(Release.repository_id == repository_id,
+                                 Release.tag_id.in_(page_ids)).all()
+    } if page_ids else {}
+    return [tag_to_dict(t, by_tag.get(t.id)) for t in tags], meta
 
 
-def list_releases(db: Session, repository_id: str) -> List[Dict[str, Any]]:
+def list_releases(db: Session, repository_id: str, limit: Optional[int] = None,
+                  offset: Optional[int] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Newest first, one page. ``latest`` is decided across every release, not the page,
+    so page two never claims a release is latest because the real one is on page one."""
+    from app.core.pagination import paginate_list
+
     rows = (
         db.query(Release)
         .filter(Release.repository_id == repository_id)
@@ -102,7 +115,8 @@ def list_releases(db: Session, repository_id: str) -> List[Dict[str, Any]]:
         .all()
     )
     newest = latest_version(rows)
-    return [release_to_dict(r, newest) for r in rows]
+    page, meta = paginate_list(rows, limit, offset)
+    return [release_to_dict(r, newest) for r in page], meta
 
 
 # --- tags ---------------------------------------------------------------------------

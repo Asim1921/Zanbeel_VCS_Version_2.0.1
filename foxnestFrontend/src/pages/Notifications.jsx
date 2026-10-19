@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import {
   FiBell, FiCheck, FiCheckCircle, FiLoader, FiAlertCircle, FiRotateCcw,
   FiGitPullRequest, FiGitMerge, FiMessageSquare, FiUserCheck, FiFolder, FiInbox,
-  FiKey, FiTerminal, FiSlash, FiArrowRight, FiXCircle, FiAtSign, FiGitCommit,
+  FiKey, FiTerminal, FiSlash, FiArrowRight, FiXCircle, FiAtSign, FiGitCommit, FiLock,
 } from 'react-icons/fi'
 import { hasTarget, openTarget } from '../lib/links'
 import api from '../utils/api'
@@ -38,6 +38,7 @@ const ICONS = {
   commit_approved: FiGitCommit,
   commit_rejected: FiXCircle,
   access_revoked: FiSlash,
+  account_locked: FiLock,
 }
 
 const LABELS = {
@@ -55,6 +56,7 @@ const LABELS = {
   commit_rejected: 'commit rejected',
   access_granted: 'access granted',
   access_revoked: 'access removed',
+  account_locked: 'sign-in locked',
 }
 
 // Structure, not information: shown as the Open button, not in the details.

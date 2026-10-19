@@ -10,45 +10,17 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from database.database import create_tables
-
 from app.api import register_routers
-from app.config import CORS_ORIGINS
+from app.config import CORS_ORIGINS, SERVER_VERSION
 from app.services.refs import ReferenceError
 from app.services.audit import AuditContextMiddleware
 from app.db.schema_check import verify_or_fail
-from app.db.migrations import (
-    ensure_access_tokens_table,
-    ensure_activity_columns,
-    ensure_branch_protection_tables,
-    ensure_credential_columns,
-    ensure_commit_signatures_table,
-    ensure_commit_statuses_table,
-    ensure_fork_columns,
-    ensure_integration_columns,
-    ensure_merge_conflict_branch_sessions,
-    ensure_merge_conflict_resolution_columns,
-    ensure_merge_conflict_tables,
-    ensure_password_reset_otp_table,
-    ensure_pull_request_comments_table,
-    ensure_pull_request_reviews_table,
-    ensure_repositories_branch_policy_column,
-    ensure_security_tables,
-    ensure_server_hooks_table,
-    ensure_ssh_key_tables,
-    ensure_user_permissions_issue_id_column,
-    ensure_user_permissions_show_in_web_ui_column,
-    ensure_user_profile_columns,
-    ensure_users_last_login_at_column,
-    ensure_users_password_hash_column,
-    ensure_versioning_schema,
-    ensure_webhook_tables,
-)
+from app.db import upgrade as schema_upgrade
 
 app = FastAPI(
     title="FoxNest Server",
     description="Central repository server for the FoxNest version control system",
-    version="2.0.0",
+    version=SERVER_VERSION,
 )
 
 # CORS: reflect configured origins only. Never pair Access-Control-Allow-Origin: * with credentials.
@@ -58,6 +30,9 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
+    # Paged lists say where the next page is in these headers, and a 429 says how long
+    # to wait; a browser on another origin can read neither unless they are exposed.
+    expose_headers=["Link", "X-Total-Count", "Retry-After"],
 )
 
 # Lets the activity log see the request (credential, client address) from any layer.
@@ -90,41 +65,14 @@ async def startup_event():
     print("=" * 60)
     print("Initializing database...")
 
-    # Create all tables if they don't exist
-    create_tables()
-    ensure_users_password_hash_column()
-    ensure_users_last_login_at_column()
-    ensure_user_profile_columns()
-    ensure_user_permissions_show_in_web_ui_column()
-    ensure_user_permissions_issue_id_column()
-    ensure_versioning_schema()
-    ensure_commit_signatures_table()
-    ensure_password_reset_otp_table()
-    ensure_branch_protection_tables()
-    ensure_merge_conflict_tables()
-    # Must follow the create above: it rebuilds that table to relax a constraint.
-    ensure_merge_conflict_branch_sessions()
-    # And this must follow the rebuild, which would otherwise drop the new columns.
-    ensure_merge_conflict_resolution_columns()
-    ensure_pull_request_reviews_table()
-    ensure_pull_request_comments_table()
-    ensure_fork_columns()
-    ensure_repositories_branch_policy_column()
-    ensure_access_tokens_table()
-    ensure_ssh_key_tables()
-    # Both tables above must exist first.
-    ensure_credential_columns()
-    ensure_webhook_tables()
-    ensure_commit_statuses_table()
-    ensure_server_hooks_table()
-    # After the webhook, status and hook tables above.
-    ensure_integration_columns()
-    ensure_activity_columns()
-    ensure_security_tables()
+    # Versioned migrations, applied once each, all or nothing (app/db/upgrade.py). A
+    # failure raises and the server does not start: serving requests against a schema
+    # half-way between two revisions is what the old startup patches used to do.
+    if schema_upgrade.auto_migrate_enabled():
+        schema_upgrade.upgrade_database()
 
-    # The patches above each swallow their own errors, so "nothing raised"
-    # has never meant "the schema is right". Ask the database instead, and
-    # refuse to serve requests against a schema we know is wrong.
+    # "The upgrade succeeded" is still not "the schema is right". Ask the database,
+    # and refuse to serve requests against a schema we know is wrong.
     verify_or_fail()
 
     # Code search: open the index and queue whatever is behind its default branch.
@@ -135,40 +83,36 @@ async def startup_event():
     # The activity log is kept forever unless an administrator sets a retention period.
     from app.services import audit
     from database.database import SessionLocal
+    from app.services import backup, rate_limit
     db = SessionLocal()
     try:
         removed = audit.prune(db)
         if removed:
             print(f"[ok] Pruned {removed} activity record(s) past FOXNEST_ACTIVITY_RETENTION_DAYS")
+        rate_limit.prune(db)
+        # A backup or drill recorded as running when no process holds the maintenance
+        # lock was cut off by the last shutdown; say so instead of showing it running.
+        interrupted = backup.recover_interrupted(db)
+        if interrupted:
+            print(f"[warn] Marked {interrupted} backup job(s) interrupted by the last shutdown")
     finally:
         db.close()
 
-    print("✓ Database tables created/verified")
-    print("  - users (with role and team_lead_id)")
-    print("  - repositories")
-    print("  - commits")
-    print("  - commit_files")
-    print("  - commit_parents")
-    print("  - file_objects")
-    print("  - repository_tags")
-    print("  - tags")
-    print("  - releases")
-    print("  - branches")
-    print("  - pull_requests")
-    print("  - activities")
-    print("  - pending_commits")
-    print("  - pending_repositories")
-    print("  - pending_user_registrations")
-    print("  - user_permissions")
-    print("  - repository_stars")
+    # Scheduled backups, when FOXNEST_BACKUP_INTERVAL_HOURS is set.
+    backup.start_scheduler()
+    if backup.interval_hours():
+        print(f"[ok] Backups scheduled every {backup.interval_hours()}h, keeping "
+              f"{backup.keep_count()}, in {backup.backup_root()}")
+
     print("=" * 60)
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Stop background indexing so shutdown does not wait for a queue of repositories."""
-    from app.services import search_index
+    from app.services import backup, search_index
     search_index.stop()
+    backup.stop_scheduler()
 
 
 register_routers(app)

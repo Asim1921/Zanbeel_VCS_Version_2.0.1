@@ -433,6 +433,8 @@ def scenario_upgrade(r, root, port):
                 title VARCHAR(100) NOT NULL, key_type VARCHAR(30) NOT NULL, public_key TEXT NOT NULL,
                 fingerprint VARCHAR(80) NOT NULL UNIQUE, last_used_at TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+            -- A database that old is at the 2.0.1 baseline: the patches it lacks are in 0002.
+            UPDATE alembic_version SET version_num = '0001_baseline';
         """)
         dev_id = db.execute("SELECT id FROM users WHERE username = 'dev'").fetchone()[0]
         db.execute("INSERT INTO ssh_keys (user_id, title, key_type, public_key, fingerprint) "

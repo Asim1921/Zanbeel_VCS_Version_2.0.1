@@ -44,83 +44,94 @@ class DbTestBase(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class RateLimitTests(DbTestBase):
+    """The 2.0.1 tests, kept for their intent, on the attempt lifecycle that replaced
+    record_failure/record_success: an attempt is admitted (and recorded) first, then
+    failed or succeeded. See test_security_and_operations.py for the rest."""
+
     def fail_n(self, username, n, ip="10.0.0.1"):
         for _ in range(n):
-            rl.record_failure(self.db, username, ip)
+            attempt = rl.begin_attempt(self.db, username, ip)
+            rl.fail(self.db, attempt, username, ip)
+
+    def lock(self, username):
+        """Enough failures, from enough addresses, to lock the account itself."""
+        for i in range(rl.MAX_ACCOUNT_FAILURES):
+            self.fail_n(username, 1, ip=f"172.16.0.{i}")
 
     def test_a_fresh_account_is_not_limited(self):
         rl.check(self.db, "alice", "10.0.0.1")  # must not raise
 
-    def test_lockout_after_the_threshold(self):
-        self.fail_n("alice", rl.MAX_ACCOUNT_FAILURES)
+    def test_refused_after_the_threshold_from_one_address(self):
+        self.fail_n("alice", rl.MAX_PAIR_FAILURES)
         with self.assertRaises(rl.RateLimited):
             rl.check(self.db, "alice", "10.0.0.1")
 
     def test_one_below_the_threshold_still_allowed(self):
-        self.fail_n("alice", rl.MAX_ACCOUNT_FAILURES - 1)
+        self.fail_n("alice", rl.MAX_PAIR_FAILURES - 1)
         rl.check(self.db, "alice", "10.0.0.1")  # must not raise
 
-    def test_lockout_reports_a_wait(self):
-        self.fail_n("alice", rl.MAX_ACCOUNT_FAILURES)
+    def test_a_refusal_reports_a_wait(self):
+        self.fail_n("alice", rl.MAX_PAIR_FAILURES)
         with self.assertRaises(rl.RateLimited) as ctx:
             rl.check(self.db, "alice", "10.0.0.1")
         self.assertGreater(ctx.exception.retry_after_seconds, 0)
 
     def test_a_nonexistent_username_locks_the_same_way(self):
         """Otherwise the lockout tells an attacker which usernames are real."""
-        self.fail_n("no-such-person", rl.MAX_ACCOUNT_FAILURES)
+        self.lock("no-such-person")
         with self.assertRaises(rl.RateLimited):
             rl.check(self.db, "no-such-person", "10.0.0.1")
 
     def test_usernames_are_case_insensitive(self):
-        self.fail_n("Alice", rl.MAX_ACCOUNT_FAILURES)
+        self.fail_n("Alice", rl.MAX_PAIR_FAILURES)
         with self.assertRaises(rl.RateLimited):
             rl.check(self.db, "alice", "10.0.0.1")
 
     def test_locking_one_account_does_not_lock_another(self):
-        self.fail_n("alice", rl.MAX_ACCOUNT_FAILURES)
+        self.lock("alice")
         rl.check(self.db, "bob", "10.0.0.1")  # must not raise
 
     def test_success_clears_the_failure_history(self):
-        self.fail_n("alice", rl.MAX_ACCOUNT_FAILURES - 1)
-        rl.record_success(self.db, "alice", "10.0.0.1")
-        self.fail_n("alice", rl.MAX_ACCOUNT_FAILURES - 1)
+        self.fail_n("alice", rl.MAX_PAIR_FAILURES - 1)
+        rl.succeed(self.db, rl.begin_attempt(self.db, "alice", "10.0.0.1"), "alice")
+        self.fail_n("alice", rl.MAX_PAIR_FAILURES - 1)
         rl.check(self.db, "alice", "10.0.0.1")  # still under, because it reset
 
     def test_success_removes_an_existing_lock(self):
-        self.fail_n("alice", rl.MAX_ACCOUNT_FAILURES)
+        self.lock("alice")
         self.assertIsNotNone(rl.active_lock(self.db, "alice"))
-        rl.record_success(self.db, "alice", "10.0.0.1")
+        rl.succeed(self.db, 0, "alice")
         self.assertIsNone(rl.active_lock(self.db, "alice"))
 
-    def test_an_expired_lock_clears_itself(self):
-        self.fail_n("alice", rl.MAX_ACCOUNT_FAILURES)
+    def test_an_expired_lock_stops_applying(self):
+        self.lock("alice")
         lock = self.db.query(AccountLock).filter(AccountLock.username == "alice").first()
         lock.locked_until = datetime.utcnow() - timedelta(seconds=1)
         self.db.commit()
         self.assertIsNone(rl.active_lock(self.db, "alice"))
-        rl.check(self.db, "alice", "10.0.0.1")  # must not raise
+        # Kept, so the next lock can be longer; prune removes it after a day.
+        self.assertIsNotNone(self.db.query(AccountLock).filter(AccountLock.username == "alice").first())
 
     def test_ip_throttle_catches_spraying_across_accounts(self):
         """One guess each against many accounts never trips a per-account limit."""
         for i in range(rl.MAX_IP_FAILURES):
-            rl.record_failure(self.db, f"victim{i}", "10.0.0.9")
+            self.fail_n(f"victim{i}", 1, ip="10.0.0.9")
         with self.assertRaises(rl.RateLimited):
             rl.check(self.db, "someone-else", "10.0.0.9")
 
     def test_ip_throttle_is_scoped_to_that_address(self):
         for i in range(rl.MAX_IP_FAILURES):
-            rl.record_failure(self.db, f"victim{i}", "10.0.0.9")
+            self.fail_n(f"victim{i}", 1, ip="10.0.0.9")
         rl.check(self.db, "someone-else", "10.0.0.10")  # a different host is fine
 
     def test_admin_unlock_clears_lock_and_history(self):
-        self.fail_n("alice", rl.MAX_ACCOUNT_FAILURES)
-        self.assertTrue(rl.unlock(self.db, "alice"))
+        self.lock("alice")
+        self.assertTrue(rl.unlock(self.db, "alice")["was_locked"])
         rl.check(self.db, "alice", "10.0.0.1")
-        self.assertEqual(rl.unlock(self.db, "alice"), False)  # already clear
+        self.assertFalse(rl.unlock(self.db, "alice")["was_locked"])  # already clear
 
     def test_old_attempts_are_pruned(self):
-        rl.record_failure(self.db, "alice", "10.0.0.1")
+        self.fail_n("alice", 1)
         row = self.db.query(LoginAttempt).first()
         row.created_at = datetime.utcnow() - timedelta(hours=rl.RETENTION_HOURS + 1)
         self.db.commit()
@@ -128,7 +139,7 @@ class RateLimitTests(DbTestBase):
         self.assertEqual(self.db.query(LoginAttempt).count(), 0)
 
     def test_status_reports_locks_and_policy(self):
-        self.fail_n("alice", rl.MAX_ACCOUNT_FAILURES)
+        self.lock("alice")
         report = rl.status(self.db)
         self.assertIn("alice", [x["username"] for x in report["locked_accounts"]])
         self.assertEqual(report["policy"]["max_account_failures"], rl.MAX_ACCOUNT_FAILURES)

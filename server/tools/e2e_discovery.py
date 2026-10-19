@@ -367,6 +367,8 @@ def scenario_upgrade(r, root, port):
                 FROM activities;
             DROP TABLE activities;
             ALTER TABLE old_activities RENAME TO activities;
+            -- A database that old is at the 2.0.1 baseline: the patches it lacks are in 0002.
+            UPDATE alembic_version SET version_num = '0001_baseline';
         """)
         db.commit()
     _remove_index(workdir / "search_index.db")

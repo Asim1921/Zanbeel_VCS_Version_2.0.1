@@ -1,6 +1,7 @@
 """Authentication, password management and self-service registration."""
 
 import logging
+import secrets
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -28,39 +29,64 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _too_many(limited: "rate_limit.RateLimited") -> HTTPException:
+    return HTTPException(
+        status_code=429,
+        detail=limited.message,
+        headers={"Retry-After": str(limited.retry_after_seconds)},
+    )
+
+
+_DUMMY_HASH = None
+
+
+def _dummy_hash() -> str:
+    """A real PBKDF2 hash of a password nobody knows, made once per process.
+
+    Checked against when the account does not exist or has no password, so those
+    answers take as long as a wrong password for a real account. Answering them
+    instantly would let anyone time the response to learn which usernames exist.
+    """
+    global _DUMMY_HASH
+    if _DUMMY_HASH is None:
+        _DUMMY_HASH = hash_password(secrets.token_urlsafe(24))
+    return _DUMMY_HASH
+
+
+# The routes that hash a password are plain `def`, so FastAPI runs them on its thread
+# pool. As `async def` the PBKDF2 work (a deliberate tenth of a second or more) ran on
+# the event loop itself: every sign-in stalled every other request on the server, and a
+# flood of sign-in attempts was a way to stop the whole server answering.
 @router.post("/api/auth/login")
-async def login(request: LoginRequest, http_request: Request, db: Session = Depends(get_db)):
+def login(request: LoginRequest, http_request: Request, db: Session = Depends(get_db)):
     ip = rate_limit.client_ip(http_request)
     user_agent = http_request.headers.get("user-agent") if http_request else None
 
-    # Checked before the password is verified, so a locked account costs no
-    # PBKDF2 work -- that work is exactly what an attacker wants to spend.
+    # Admitted (and recorded) before the password is verified, so a refused attempt
+    # costs no PBKDF2 work and concurrent guesses cannot all slip past the count.
     try:
-        rate_limit.check(db, request.username, ip)
+        attempt_id = rate_limit.begin_attempt(db, request.username, ip, user_agent)
     except rate_limit.RateLimited as limited:
-        raise HTTPException(
-            status_code=429,
-            detail=limited.message,
-            headers={"Retry-After": str(limited.retry_after_seconds)},
-        )
+        raise _too_many(limited)
 
     user = UserCRUD.get_user_by_username(db, request.username)
 
-    # Every rejection below records a failure against the *submitted* username,
-    # real or not. Counting only real accounts would make the lockout itself an
-    # account-existence oracle.
-    if not user:
-        rate_limit.record_failure(db, request.username, ip, user_agent)
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-    if not user.is_active:
-        raise HTTPException(status_code=403, detail="User is inactive")
-    if not user.password_hash:
-        raise HTTPException(status_code=403, detail="Password not set. Use bootstrap password setup.")
-    if not verify_password(request.password, user.password_hash):
-        rate_limit.record_failure(db, request.username, ip, user_agent)
+    # One answer, at one cost, for every way this can fail: an unknown username, an
+    # account with no password, a wrong password. Each records a failure against the
+    # *submitted* username, real or not -- counting only real accounts would make the
+    # lockout itself an account-existence oracle.
+    stored = user.password_hash if user is not None and user.password_hash else None
+    valid = verify_password(request.password, stored or _dummy_hash()) and stored is not None
+    if not valid:
+        rate_limit.fail(db, attempt_id, request.username, ip, user=user)
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
-    rate_limit.record_success(db, request.username, ip, user_agent)
+    # Only someone who knows the password learns that the account is disabled.
+    if not user.is_active:
+        rate_limit.fail(db, attempt_id, request.username, ip, user=user)
+        raise HTTPException(status_code=403, detail="User is inactive")
+
+    rate_limit.succeed(db, attempt_id, request.username)
 
     # Track last login for admin engagement monitoring
     try:
@@ -135,7 +161,7 @@ async def auth_me(
     }
 
 @router.post("/api/auth/change-password")
-async def change_password(request: ChangePasswordRequest, http_request: Request, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def change_password(request: ChangePasswordRequest, http_request: Request, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     # An account with no password yet has no current password to check, so without
     # this a token could set one -- and with it, take the account.
     assert_password_session(http_request, "Changing your password")
@@ -150,7 +176,7 @@ async def change_password(request: ChangePasswordRequest, http_request: Request,
     return {"success": True, "message": "Password updated successfully"}
 
 @router.post("/api/auth/bootstrap-password")
-async def bootstrap_password(request: BootstrapPasswordRequest, db: Session = Depends(get_db)):
+def bootstrap_password(request: BootstrapPasswordRequest, db: Session = Depends(get_db)):
     if not PASSWORD_SETUP_KEY:
         raise HTTPException(status_code=403, detail="Password bootstrap is disabled")
     if request.setup_key != PASSWORD_SETUP_KEY:
@@ -177,13 +203,23 @@ _FORGOT_PASSWORD_REPLY = (
 
 
 @router.post("/api/auth/forgot-password")
-async def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(get_db)):
+def forgot_password(request: ForgotPasswordRequest, http_request: Request,
+                          db: Session = Depends(get_db)):
     """Email a reset code to the address supplied, if it belongs to an account.
 
     Unauthenticated by necessity -- someone who has forgotten their password cannot log
     in first. The reply is identical whether or not the address is registered; anything
-    else turns this into a way to enumerate accounts.
+    else turns this into a way to enumerate accounts. Requests are limited per source
+    address (each account also has its own resend cooldown), so this cannot be used to
+    mail-bomb every account on the server.
     """
+    try:
+        rate_limit.begin_attempt(db, request.email, rate_limit.client_ip(http_request),
+                                 http_request.headers.get("user-agent"),
+                                 kind=rate_limit.KIND_RESET_REQUEST)
+    except rate_limit.RateLimited as limited:
+        raise _too_many(limited)
+
     user = password_reset.find_user_by_email(db, request.email)
 
     if user and password_reset.smtp_configured():
@@ -199,8 +235,9 @@ async def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(
 
 
 @router.post("/api/auth/reset-password")
-async def reset_password_with_otp(
+def reset_password_with_otp(
     request: ResetPasswordWithOtpRequest,
+    http_request: Request,
     db: Session = Depends(get_db),
 ):
     """Complete a self-service reset with the emailed code.
@@ -208,11 +245,23 @@ async def reset_password_with_otp(
     Failures are deliberately indistinguishable from one another: an unknown address,
     a missing code and a wrong code all produce the same message, so this cannot be
     used to probe for accounts either.
+
+    Each code allows a few guesses. Wrong codes are also counted per account across
+    codes, and per source address across accounts: otherwise requesting a fresh code
+    every minute would make the six-digit keyspace walkable after all.
     """
     if not request.new_password or len(request.new_password) < 8:
         raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
 
     generic = "That code is not correct, or it has expired. Request a new one."
+
+    ip = rate_limit.client_ip(http_request)
+    try:
+        attempt_id = rate_limit.begin_attempt(db, request.email, ip,
+                                              http_request.headers.get("user-agent"),
+                                              kind=rate_limit.KIND_OTP)
+    except rate_limit.RateLimited as limited:
+        raise _too_many(limited)
 
     user = password_reset.find_user_by_email(db, request.email)
     if not user:
@@ -226,6 +275,7 @@ async def reset_password_with_otp(
         detail = exc.message if exc.status_code == 429 else generic
         raise HTTPException(status_code=exc.status_code, detail=detail)
 
+    rate_limit.succeed(db, attempt_id, request.email)
     user.password_hash = hash_password(request.new_password)
     user.updated_at = datetime.now()
     db.commit()
@@ -241,7 +291,7 @@ async def reset_password_with_otp(
 
 
 @router.post("/api/auth/register-request")
-async def register_request(request: RegistrationRequest, db: Session = Depends(get_db)):
+def register_request(request: RegistrationRequest, db: Session = Depends(get_db)):
     """Create a self-registration request that requires admin approval."""
     username = request.username.strip()
     if not username:

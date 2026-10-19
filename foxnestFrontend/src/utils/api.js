@@ -61,9 +61,12 @@ class FoxNestAPI {
         error.status = response.status
         error.data = errorData
         error.code = (typeof detail === 'object' && detail?.code) ? detail.code : (errorData?.code || null)
+        // Sign-in limits answer 429 with the wait in seconds; the message already says it.
+        const retryAfter = Number(response.headers.get('Retry-After'))
+        if (retryAfter > 0) error.retryAfter = retryAfter
         throw error
       }
-      
+
       return await response.json()
     } catch (error) {
       if (error.name === 'AbortError') {
@@ -72,6 +75,38 @@ class FoxNestAPI {
       }
       console.error(`API Request failed: ${endpoint}`, error)
       throw error
+    }
+  }
+
+  // Every collection endpoint is paged on the server (a `pagination` object with
+  // has_more / next_offset, and a Link header), so no response grows without bound.
+  // Screens that show a whole list -- pickers, branch selectors, review queues -- follow
+  // the pages here instead, so none of them silently stops at the first page. The
+  // result has the first page's other fields and every item under `key`.
+  async requestAllPages(endpoint, key, { pageSize = 1000, maxPages = 100, ...options } = {}) {
+    const join = endpoint.includes('?') ? '&' : '?'
+    let offset = 0
+    let first = null
+    const items = []
+    for (let page = 0; page < maxPages; page += 1) {
+      const response = await this.request(`${endpoint}${join}limit=${pageSize}&offset=${offset}`, options)
+      if (!first) first = response
+      items.push(...((response && response[key]) || []))
+      const meta = response?.pagination
+      if (!meta || !meta.has_more || meta.next_offset == null) break
+      offset = meta.next_offset
+    }
+    const total = first?.pagination?.total ?? items.length
+    return {
+      ...(first || {}),
+      [key]: items,
+      pagination: {
+        ...(first?.pagination || {}),
+        offset: 0,
+        returned: items.length,
+        has_more: items.length < total,
+        next_offset: null,
+      },
     }
   }
 
@@ -152,11 +187,38 @@ class FoxNestAPI {
   }
 
   async getUsers() {
-    return this.request('/users')
+    return this.requestAllPages('/users', 'users')
   }
 
   async getUsersEngagement() {
-    return this.request('/admin/users/engagement')
+    return this.requestAllPages('/admin/users/engagement', 'users')
+  }
+
+  async getUserPermissions(username) {
+    return this.requestAllPages(`/permissions/user/${encodeURIComponent(username)}`, 'permissions')
+  }
+
+  // --- Review queues (the current queue by default; status 'all' adds the history) ---
+
+  async listPendingCommits({ status = 'pending', teamLead = null } = {}) {
+    const params = new URLSearchParams()
+    if (status) params.append('status', status)
+    if (teamLead) params.append('team_lead_username', teamLead)
+    return this.requestAllPages(`/pending-commits?${params.toString()}`, 'pending_commits')
+  }
+
+  async listPendingRepositories({ status = 'pending', teamLead = null } = {}) {
+    const params = new URLSearchParams()
+    if (status) params.append('status', status)
+    if (teamLead) params.append('team_lead_username', teamLead)
+    return this.requestAllPages(`/pending-repositories?${params.toString()}`, 'pending_repositories')
+  }
+
+  async listPendingAccessRequests({ status = 'pending', repoId = null } = {}) {
+    const params = new URLSearchParams()
+    if (status) params.append('status', status)
+    if (repoId) params.append('repo_id', repoId)
+    return this.requestAllPages(`/access-requests/pending?${params.toString()}`, 'access_requests')
   }
 
   async getUserDetail(username, limit = 100) {
@@ -184,7 +246,7 @@ class FoxNestAPI {
     const params = new URLSearchParams()
     if (status) params.append('status', status)
     const suffix = params.toString() ? `?${params.toString()}` : ''
-    return this.request(`/admin/pending-user-registrations${suffix}`)
+    return this.requestAllPages(`/admin/pending-user-registrations${suffix}`, 'pending_registrations')
   }
 
   async reviewPendingUserRegistration(requestId, payload) {
@@ -206,11 +268,11 @@ class FoxNestAPI {
     if (username) params.append('username', username)
     if (repoName) params.append('repo_name', repoName)
     const query = params.toString()
-    return this.request(`/repository/list${query ? `?${query}` : ''}`)
+    return this.requestAllPages(`/repository/list${query ? `?${query}` : ''}`, 'repositories')
   }
 
   async listAllRepositories() {
-    return this.request('/repositories/all')
+    return this.requestAllPages('/repositories/all', 'repositories', { timeout: 30000 })
   }
 
   async getRepository(repoId) {
@@ -218,7 +280,7 @@ class FoxNestAPI {
   }
 
   async getRepositoryContributors(repoId) {
-    return this.request(`/repository/${repoId}/contributors`)
+    return this.requestAllPages(`/repository/${repoId}/contributors`, 'contributors')
   }
 
   async getCommits(repoId, full = false, branch = null) {
@@ -251,7 +313,7 @@ class FoxNestAPI {
   }
 
   async getBranches(repoId) {
-    return this.request(`/repository/${repoId}/branches`)
+    return this.requestAllPages(`/repository/${repoId}/branches`, 'branches')
   }
 
   async starRepository(repoId) {
@@ -266,7 +328,7 @@ class FoxNestAPI {
     const params = new URLSearchParams()
     if (status) params.append('status', status)
     const suffix = params.toString() ? `?${params.toString()}` : ''
-    return this.request(`/repository/${repoId}/pull-requests${suffix}`)
+    return this.requestAllPages(`/repository/${repoId}/pull-requests${suffix}`, 'pull_requests')
   }
 
   async createPullRequest(repoId, payload) {
@@ -451,7 +513,7 @@ class FoxNestAPI {
   }
 
   async listForks(repoId) {
-    return this.request(`/repository/${repoId}/forks`)
+    return this.requestAllPages(`/repository/${repoId}/forks`, 'forks')
   }
 
   async createCrossRepoPullRequest(upstreamRepoId, payload) {
@@ -1004,7 +1066,7 @@ class FoxNestAPI {
       // Keep admin/team lead behavior unchanged; regular users get user-scoped dashboard data.
       const [reposResult, usersResult] = await Promise.allSettled([
         repoRequest,
-        isPrivileged ? this.request('/users') : Promise.resolve({ success: true, users: [] })
+        isPrivileged ? this.getUsers() : Promise.resolve({ success: true, users: [] })
       ])
 
       const reposResponse = reposResult.status === 'fulfilled' ? reposResult.value : { success: false, repositories: [] }
@@ -1127,7 +1189,7 @@ class FoxNestAPI {
 
   async listAccessTokens({ includeRevoked = false } = {}) {
     const suffix = includeRevoked ? '?include_revoked=true' : ''
-    return this.request(`/tokens${suffix}`)
+    return this.requestAllPages(`/tokens${suffix}`, 'tokens')
   }
 
   async createAccessToken({ name, scopes = null, expiresInDays = null }) {
@@ -1258,7 +1320,7 @@ class FoxNestAPI {
 
   async listAllCredentials(username = null) {
     const suffix = username ? `?username=${encodeURIComponent(username)}` : ''
-    return this.request(`/admin/credentials${suffix}`)
+    return this.requestAllPages(`/admin/credentials${suffix}`, 'users', { pageSize: 200 })
   }
 
   async revokeUserCredentials(username) {
@@ -1273,33 +1335,41 @@ class FoxNestAPI {
     return this.request('/admin/security/lockouts')
   }
 
-  async unlockAccount(username) {
-    return this.request('/admin/security/unlock', { method: 'POST', body: { username } })
+  // Clears limits for an account, an address, or both.
+  async unlockAccount(username = null, ipAddress = null) {
+    const body = {}
+    if (username) body.username = username
+    if (ipAddress) body.ip_address = ipAddress
+    return this.request('/admin/security/unlock', { method: 'POST', body })
   }
 
   async getSchemaHealth() {
-    return this.request('/admin/schema')
+    return this.request('/admin/schema', { timeout: 30000 })
   }
 
   async listBackups(limit = 25) {
     return this.request(`/admin/backups?limit=${limit}`)
   }
 
-  async createBackup(label = null) {
-    // Copying the blob store takes minutes on a real repository, and the caller
-    // waits because a backup nobody checked the result of is not a backup.
-    return this.request('/admin/backups', {
-      method: 'POST',
-      body: label ? { label } : {},
-      timeout: 600000,
-    })
+  async getBackup(backupId) {
+    return this.request(`/admin/backups/${backupId}`)
+  }
+
+  // Backups, re-verification and restore drills run on the server as jobs: these
+  // answer at once with the backup's record (status "running"), and the caller polls
+  // getBackup until it finishes. Reading every blob back takes minutes on a real store.
+  async createBackup(label = null, { testRestore = false } = {}) {
+    const body = { test_restore: !!testRestore }
+    if (label) body.label = label
+    return this.request('/admin/backups', { method: 'POST', body })
   }
 
   async verifyBackup(backupId) {
-    return this.request(`/admin/backups/${backupId}/verify`, {
-      method: 'POST',
-      timeout: 300000,
-    })
+    return this.request(`/admin/backups/${backupId}/verify`, { method: 'POST' })
+  }
+
+  async restoreTestBackup(backupId) {
+    return this.request(`/admin/backups/${backupId}/restore-test`, { method: 'POST' })
   }
 
   // --- Search ----------------------------------------------------------------
@@ -1377,13 +1447,14 @@ class FoxNestAPI {
   // Branches with their last commit, distance from the default branch, protection and
   // the open pull requests that use them. Walks history, so only the branch list asks.
   async getBranchesDetailed(repoId) {
-    return this.request(`/repository/${repoId}/branches?details=true`, { timeout: 30000 })
+    return this.requestAllPages(`/repository/${repoId}/branches?details=true`, 'branches',
+      { pageSize: 200, timeout: 30000 })
   }
 
   // --- Tags and releases -----------------------------------------------------
 
   async listTags(repoId) {
-    return this.request(`/repository/${repoId}/tags`)
+    return this.requestAllPages(`/repository/${repoId}/tags`, 'tags')
   }
 
   // `target` is a branch, tag or commit; without it (and without commitId) the tag
@@ -1403,7 +1474,7 @@ class FoxNestAPI {
   }
 
   async listReleases(repoId) {
-    return this.request(`/repository/${repoId}/releases`)
+    return this.requestAllPages(`/repository/${repoId}/releases`, 'releases')
   }
 
   async createRelease(repoId, { version, title = null, notes = null, tag = null, target = null }) {
