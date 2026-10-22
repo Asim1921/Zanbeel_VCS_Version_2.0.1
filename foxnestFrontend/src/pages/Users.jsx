@@ -163,7 +163,7 @@ const Users = () => {
             </p>
             {serverHealth?.status !== 'connected' && (
               <div className="text-sm text-warning-fg bg-warning-bg p-3 rounded-lg border border-warning-fg/20 max-w-md mx-auto">
-                <strong>Note:</strong> Please ensure the zanbeel server is running on {API_SERVER_URL}
+                <strong>Note:</strong> Please ensure the zanbeel server is running on {API_SERVER_URL || window.location.origin}
               </div>
             )}
           </div>

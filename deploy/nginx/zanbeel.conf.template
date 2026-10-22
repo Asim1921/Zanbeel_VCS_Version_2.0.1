@@ -1,0 +1,156 @@
+# Zanbeel: reverse proxy and load balancer.
+#
+# Rendered by deploy/setup-system.sh from deploy/nginx/zanbeel.conf.template and
+# deploy/deploy.env. Change those and run ./deploy.sh; this copy is overwritten.
+#
+#   /            the production build (npm run build), from __WEB_ROOT__/current
+#   /api/        the backend instances, least busy first
+#   /api-docs    the API reference (Swagger UI)
+#   /healthz     a backend's health check, through the load balancer
+#   /zanbeel.crt the server's certificate, for clients to trust when it is self-signed
+#
+# HTTPS only: plain HTTP to the same port is redirected to https.
+
+# Which instance answered each request, so the balancing can be seen in the log.
+log_format zanbeel '$remote_addr - $remote_user [$time_local] "$request" $status '
+                   '$body_bytes_sent "$http_referer" "$http_user_agent" '
+                   'upstream=$upstream_addr upstream_time=$upstream_response_time '
+                   'request_time=$request_time';
+
+# An instance whose connection fails (it is restarting, or down) is left out for a couple of
+# seconds and then tried again. The zone shares that, and the connection counts least_conn
+# goes by, between all nginx worker processes rather than each keeping its own.
+upstream zanbeel_api {
+    zone zanbeel_api 64k;
+    # Least connections rather than round robin: a push or an archive download keeps an
+    # instance busy far longer than a page of the web app does.
+    least_conn;
+__API_SERVERS__
+    keepalive 16;
+}
+
+# Documentation jobs are tracked in the memory of the process that runs them, so the
+# request that starts one and the requests that ask how it is going must reach the same
+# instance: the first one, with the others standing in only while it is down.
+upstream zanbeel_docs_jobs {
+    zone zanbeel_docs_jobs 64k;
+__DOCS_JOB_SERVERS__
+    keepalive 4;
+}
+
+server {
+    # nginx 1.25.1 and later prefer "http2 on;", and still accept this.
+    listen __PUBLIC_PORT__ ssl http2;
+    server_name __SERVER_NAME__;
+
+    # A plain-HTTP request to this TLS port is nginx's error 497; it gets a redirect to the
+    # same address over https instead of an error page.
+    error_page 497 =301 https://$host:$server_port$request_uri;
+
+    # deploy/setup-system.sh makes a self-signed pair at these paths when there is none.
+    # A CA-issued certificate (full chain) and key put at the same paths replace it.
+    ssl_certificate     __TLS_CERT__;
+    ssl_certificate_key __TLS_KEY__;
+    # Mozilla's "intermediate" profile: TLS 1.2 and 1.3, forward-secret AEAD ciphers only.
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:zanbeel_tls:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+    # No Strict-Transport-Security: browsers apply it to the host name or address on every
+    # port, and other projects on this server serve plain HTTP on other ports of the same
+    # address. HSTS here would make browsers refuse those.
+
+    access_log /var/log/nginx/zanbeel.access.log zanbeel;
+    error_log  /var/log/nginx/zanbeel.error.log warn;
+
+    root  __WEB_ROOT__/current;
+    index index.html;
+
+    # A push carries its files base64-encoded in JSON. The server's own limit
+    # (FOXNEST_MAX_PUSH_MB, 250 MB of files by default) is the real cap; this only has
+    # to stay above it once the encoding is counted.
+    client_max_body_size 512m;
+
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 5;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css text/javascript application/javascript application/json image/svg+xml;
+
+    # --- to the backends ------------------------------------------------------------
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    # With the port: the server builds the address it gives the fox CLI from this.
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    # Replaced, never appended to. With FOXNEST_TRUST_PROXY=1 the server takes the first
+    # address in this header as the client's, for sign-in limits and the activity log;
+    # appending would let a client put any address it likes in front of its own.
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $http_host;
+
+    proxy_connect_timeout 5s;
+    # Documentation generation, large pushes and archive downloads take minutes.
+    proxy_send_timeout 600s;
+    proxy_read_timeout 600s;
+
+    # An instance that is restarting refuses the connection, and the request goes to the
+    # next one, every instance in turn if need be. A POST an instance has already received
+    # is never sent again, and nothing is retried after 15 seconds.
+    proxy_next_upstream error timeout;
+    proxy_next_upstream_tries 0;
+    proxy_next_upstream_timeout 15s;
+
+    location /api/ {
+        proxy_pass http://zanbeel_api;
+    }
+
+    location ~ ^/api/repository/[^/]+/(generate-docs|generate-project-docs|docs-status)$ {
+        proxy_pass http://zanbeel_docs_jobs;
+    }
+
+    location = /healthz {
+        access_log off;
+        proxy_pass http://zanbeel_api/;
+    }
+
+    # FastAPI serves Swagger UI at /docs and has it load /openapi.json.
+    location = /api-docs {
+        proxy_pass http://zanbeel_api/docs;
+    }
+
+    location = /openapi.json {
+        proxy_pass http://zanbeel_api;
+    }
+
+    # The certificate only (never the key), so a client can download it and trust it.
+    location = /zanbeel.crt {
+        alias __TLS_CERT__;
+        default_type application/x-x509-ca-cert;
+    }
+
+    # --- the web app ----------------------------------------------------------------
+    # Built assets carry a content hash in their names, so they can be cached for good.
+    location /assets/ {
+        expires 1y;
+        try_files $uri =404;
+    }
+
+    # Any other path is a page of the single-page app.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Never cached, so a new deploy shows on the next page load.
+    location = /index.html {
+        expires -1;
+    }
+}
