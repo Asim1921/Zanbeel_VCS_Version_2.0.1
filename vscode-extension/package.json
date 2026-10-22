@@ -2,7 +2,7 @@
   "name": "zanbeel-vcs",
   "displayName": "Zanbeel VCS",
   "description": "Run the Zanbeel fox CLI from any VS Code terminal, without installing it per machine.",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "publisher": "zanbeel",
   "license": "UNLICENSED",
   "engines": {
@@ -51,7 +51,12 @@
         "zanbeel.serverUrl": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Zanbeel server this workspace talks to, for example `http://127.0.0.1:33333`. Exported as `FOXNEST_SERVER`, so it overrides the origin stored in the repository. Leave blank to use whatever the repository is already configured with."
+          "markdownDescription": "Zanbeel server this workspace talks to, for example `https://192.168.15.207:8090`. Exported as `FOXNEST_SERVER`, so it overrides the origin stored in the repository. Leave blank to use whatever the repository is already configured with; **Zanbeel: Sign In** fills it in."
+        },
+        "zanbeel.caCertificate": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Certificate file (PEM) to trust for the Zanbeel server, besides the usual public certificate authorities. Leave blank to use the server certificate bundled with this extension. Set it when the server's certificate has been replaced: download the new one from `<server>/zanbeel.crt`."
         },
         "zanbeel.pythonPath": {
           "type": "string",

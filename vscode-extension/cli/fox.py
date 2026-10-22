@@ -2276,6 +2276,23 @@ class FoxClient:
         with open(filepath, "rb") as f:
             content = f.read()
         return hashlib.sha256(content).hexdigest()[:16]
+
+    @staticmethod
+    def _entry_hash(key, info):
+        """The content hash of one file in a commit's "files" map.
+
+        The entry carries it as "hash". The key is only unique: two paths with the same
+        content (empty __init__.py files, say) used to share one key, and one of the two
+        files was dropped from the commit. Older entries without "hash" are keyed by it.
+        """
+        return (info.get("hash") if isinstance(info, dict) else None) or key
+
+    @staticmethod
+    def _unique_file_key(files, content_hash, path):
+        """A key for `files` that no other path holds: the content hash, else hash-pathhash."""
+        if content_hash not in files:
+            return content_hash
+        return f"{content_hash}-{hashlib.sha1(path.encode('utf-8')).hexdigest()[:8]}"
     
     def load_index(self):
         """Load the git-like index of tracked files"""
@@ -2300,7 +2317,7 @@ class FoxClient:
             if Path(file_path).exists():
                 stat = Path(file_path).stat()
                 index[file_path] = {
-                    "hash": file_hash,
+                    "hash": self._entry_hash(file_hash, file_data),
                     "mtime": stat.st_mtime,
                     "size": stat.st_size
                 }
@@ -2450,8 +2467,8 @@ class FoxClient:
             # Convert from hash-based storage to path-based for easy lookup
             path_to_hash = {}
             for file_hash, file_data in commit_files.items():
-                path_to_hash[file_data["path"]] = file_hash
-            
+                path_to_hash[file_data["path"]] = self._entry_hash(file_hash, file_data)
+
             return path_to_hash
         except:
             return {}
@@ -2610,8 +2627,11 @@ class FoxClient:
             return False
         self.ensure_refs()
         branches = []
-        for ref in self.heads_dir.glob("*"):
-            branches.append(ref.name)
+        # A branch named feature/login is the file refs/heads/feature/login: list files at
+        # any depth, by their path, not the top-level entries (which showed "feature").
+        for ref in self.heads_dir.rglob("*"):
+            if ref.is_file():
+                branches.append(ref.relative_to(self.heads_dir).as_posix())
         current = self.get_current_branch()
         for name in sorted(branches):
             marker = "*" if name == current else " "
@@ -3227,7 +3247,7 @@ class FoxClient:
                 continue
             p = (file_info.get("path") or "").replace("\\", "/")
             if p == normalized_path:
-                return str(file_hash), file_info
+                return str(self._entry_hash(file_hash, file_info)), file_info
         return None, None
 
     def _write_working_file_from_commit_entry(self, file_hash: str, file_info: dict) -> bool:
@@ -3500,6 +3520,91 @@ class FoxClient:
         print(f"Server error ({resp.status_code}): {detail}")
         return False
 
+    @property
+    def merge_head_file(self):
+        """The commit being merged in, while a merge waits for its conflicts to be resolved."""
+        return self.fox_dir / "MERGE_HEAD"
+
+    def _work_in_the_way(self, head_id, incoming_id):
+        """Paths holding work that moving from head_id to incoming_id would overwrite.
+
+        That is anything staged, any tracked file changed since head_id (or deleted), and
+        any untracked file incoming_id would replace with different content. Pull and merge
+        refuse while there is any, rather than silently writing over someone's work.
+        """
+        blocked = set()
+        for entry in self.staging_dir.glob("*"):
+            try:
+                blocked.add(json.loads(entry.read_text())["path"])
+            except Exception:
+                blocked.add(entry.name)
+        ours = self._commit_tree(head_id) if head_id else {}
+        theirs = self._commit_tree(incoming_id) if incoming_id else {}
+        for path in set(ours) | set(theirs):
+            current = Path(path).read_bytes() if Path(path).is_file() else None
+            if path in ours:
+                if current != ours[path]:
+                    blocked.add(path)
+            elif current is not None and current != theirs.get(path):
+                blocked.add(path)
+        return sorted(blocked)
+
+    def _report_work_in_the_way(self, paths, action):
+        print(f"Cannot {action}: these files have changes that are not committed:")
+        for path in paths:
+            print(f"  {path}")
+        print("Commit them first (fox add <files>, then fox commit -m \"...\"), then try again.")
+
+    def _switch_tree(self, from_id, to_id):
+        """Make the working files match commit to_id, coming from commit from_id."""
+        target = self.get_commit_by_id(to_id)
+        if not target:
+            return False
+        new_paths = set(self._commit_tree(to_id))
+        for path in set(self._commit_tree(from_id) if from_id else {}) - new_paths:
+            try:
+                Path(path).unlink()
+                print(f"Removed: {path}")
+            except FileNotFoundError:
+                pass
+        self.extract_commit_files(target)
+        self.update_index_from_commit(target.get("files", {}))
+        return True
+
+    def _merge_into_current(self, other_id, message):
+        """Merge commit other_id into the current branch, with a merge commit.
+
+        Files are merged three ways from the common ancestor. The merged files are written
+        and staged, and the commit records both parents, so the server sees the other side's
+        history as included. With conflicts, the files get markers and the merge waits in
+        MERGE_HEAD for `fox add` and `fox commit` to finish it.
+        """
+        ours_id = self.get_head_commit_id()
+        base_id = self._find_merge_base(ours_id, other_id)
+        ours = self._commit_tree(ours_id) if ours_id else {}
+        merged, conflicts = self._merge_trees(
+            self._commit_tree(base_id) if base_id else {}, ours, self._commit_tree(other_id)
+        )
+        changed = [path for path, content in merged.items() if ours.get(path) != content]
+        for path in changed:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(merged[path])
+        self.merge_head_file.write_text(other_id)
+
+        clean = [path for path in changed if path not in conflicts]
+        if clean:
+            self.add(clean)
+        if conflicts:
+            print("Merge conflicts in:")
+            for path in conflicts:
+                print(f"  {path}")
+            print("Edit those files (look for <<<<<<< OURS), then finish the merge:")
+            print(f"  fox add {' '.join(conflicts)}")
+            print(f"  fox commit -m \"{message}\"")
+            return False
+        return self.commit(message)
+
     def merge_branch(self, source_branch):
         if not self.check_repository("merge"):
             return False
@@ -3511,6 +3616,9 @@ class FoxClient:
         if source_branch == current_branch:
             print("Source and target branches are the same")
             return False
+        if self.merge_head_file.exists():
+            print("A merge is already in progress: resolve it, then fox add and fox commit.")
+            return False
 
         source_ref = self.heads_dir / source_branch
         if not source_ref.exists():
@@ -3519,29 +3627,27 @@ class FoxClient:
 
         target_commit = self._read_ref(self.heads_dir / current_branch)
         source_commit = self._read_ref(source_ref)
+        if not source_commit:
+            print(f"Branch {source_branch} has no commits to merge")
+            return False
+        if target_commit == source_commit or (
+            target_commit and self._is_ancestor_commit_local(source_commit, target_commit)
+        ):
+            print(f"Already up to date: {current_branch} already contains {source_branch}")
+            return True
 
-        base_commit = self._find_merge_base(target_commit, source_commit)
-        base_tree = self._commit_tree(base_commit)
-        target_tree = self._commit_tree(target_commit)
-        source_tree = self._commit_tree(source_commit)
-
-        merged_tree, conflicts = self._merge_trees(base_tree, target_tree, source_tree)
-
-        for file_path, content in merged_tree.items():
-            Path(file_path).parent.mkdir(parents=True, exist_ok=True)
-            with open(file_path, "wb") as f:
-                f.write(content)
-
-        if conflicts:
-            print("Merge conflicts detected in:")
-            for path in conflicts:
-                print(f"  {path}")
-            print("Resolve conflicts, then commit the merge.")
+        blocked = self._work_in_the_way(target_commit, source_commit)
+        if blocked:
+            self._report_work_in_the_way(blocked, f"merge {source_branch}")
             return False
 
+        # Always a merge commit, even when a fast-forward would do: the commits of
+        # source_branch are usually on the server already, so a fast-forward would leave
+        # `fox push` nothing new to send and the server's branch would never move.
         merge_message = f"Merge branch '{source_branch}' into '{current_branch}'"
-        self.commit(merge_message, parents=[target_commit, source_commit])
-        print("Merge completed")
+        if not self._merge_into_current(source_commit, merge_message):
+            return False
+        print(f"Merged {source_branch} into {current_branch}. Run fox push to publish it.")
         return True
 
     def _resolve_commit_ref_local(self, ref: str) -> Optional[str]:
@@ -3610,10 +3716,16 @@ class FoxClient:
                         decoded_content = base64.b64decode(content_b64)
                     except Exception:
                         continue
-                    self.store_object_compressed(decoded_content, file_hash)
-                    normalized_files[file_hash] = {
-                        "path": file_path if file_path else file_hash,
+                    # Re-keyed by this client's own hash (the server keys files by SHA-1,
+                    # fox by SHA-256): with the server's, status reported every file of a
+                    # pulled commit as modified.
+                    local_hash = hashlib.sha256(decoded_content).hexdigest()[:16]
+                    path = file_path if file_path else file_hash
+                    self.store_object_compressed(decoded_content, local_hash)
+                    normalized_files[self._unique_file_key(normalized_files, local_hash, path)] = {
+                        "path": path,
                         "content": content_b64,
+                        "hash": local_hash,
                     }
                 commit["files"] = normalized_files
                 local_commits.append(commit)
@@ -4223,19 +4335,35 @@ class FoxClient:
             return False
         
         config = self.load_config()
-        
+
+        # A merge waiting in MERGE_HEAD (see _merge_into_current) makes this its merge
+        # commit: both parents, and allowed with nothing staged, since the merged result
+        # may equal this branch's files.
+        merging = None
+        if parents is None and self.merge_head_file.exists():
+            merging = self.merge_head_file.read_text().strip() or None
+
         # Check if there are staged files
         staged_files = list(self.staging_dir.glob("*"))
-        if not staged_files:
+        if not staged_files and not merging:
             print("No changes staged for commit")
             return False
-        
+
         # Generate commit ID
         commit_id = hashlib.sha256(f"{message}{datetime.now().isoformat()}".encode()).hexdigest()[:16]
-        
+
         # Get parent commit(s)
         parent = self.get_head_commit_id()
+        if merging:
+            parents = [parent, merging] if parent else [merging]
         parents_list = parents if parents else ([parent] if parent else [])
+
+        # The snapshot this commit builds on is its parent's: the commit HEAD points at.
+        base_commit = self.get_commit_by_id(parent) if parent else None
+        if parent and not base_commit:
+            print(f"Error: the current commit {parent[:12]} is missing from .fox/commits.json.")
+            print("Nothing was committed. Run 'fox pull' to restore it, then commit again.")
+            return False
         
         # Collect staged files (path -> {hash, content})
         staged_files_data = {}
@@ -4286,25 +4414,28 @@ class FoxClient:
             with open(self.commits_file, "r") as f:
                 commits = json.load(f)
 
-        # Merge last commit snapshot with staged updates/additions
+        # The parent's snapshot, with the staged updates and additions on top. Not the last
+        # commit in commits.json: after a pull or a branch switch that is some other commit,
+        # and building on it silently undid other people's changes.
         merged_files_by_path = {}
-        if commits:
-            last_commit_files = commits[-1].get("files", {})
-            for file_hash, file_data in last_commit_files.items():
+        if base_commit:
+            for file_hash, file_data in base_commit.get("files", {}).items():
                 merged_files_by_path[file_data["path"]] = {
-                    "hash": file_hash,
+                    "hash": self._entry_hash(file_hash, file_data),
                     "content": file_data["content"]
                 }
 
         # Staged files replace or add entries
         merged_files_by_path.update(staged_files_data)
 
-        # Build commit file map (hash -> {path, content})
+        # Build commit file map (unique key -> {path, content, hash}). Keyed by the content
+        # hash alone, two files with the same content kept only one of their paths.
         files = {}
         for file_path, file_data in merged_files_by_path.items():
-            files[file_data["hash"]] = {
+            files[self._unique_file_key(files, file_data["hash"], file_path)] = {
                 "path": file_path,
-                "content": file_data["content"]
+                "content": file_data["content"],
+                "hash": file_data["hash"],
             }
         
         # Create commit object
@@ -4325,7 +4456,9 @@ class FoxClient:
         
         # Update HEAD
         self.update_head_commit(commit_id)
-        
+        if merging:
+            self.merge_head_file.unlink(missing_ok=True)
+
         # Update index with committed files for fast tracking
         self.update_index_from_commit(files)
         
@@ -4524,17 +4657,18 @@ class FoxClient:
                         # Reverse the order since server returns most recent first
                         remote_commits = list(reversed(remote_commits))
                         
-                        # Save remote commits to local
+                        # Save remote commits to local, re-keyed as fox keys files
                         with open(self.commits_file, "w") as f:
-                            json.dump(remote_commits, f, indent=2)
-                        
+                            json.dump([], f)
+                        self._merge_pulled_commits_into_local(remote_commits)
+
                         # Extract files from the latest commit
                         latest_commit = remote_commits[-1]
                         self.extract_commit_files(latest_commit)
-                        
-                        # Update HEAD to latest commit
-                        with open(self.head_file, "w") as f:
-                            f.write(latest_commit["id"])
+
+                        # Move the current branch to the latest commit (writing the id into
+                        # HEAD itself detached it from main)
+                        self.update_head_commit(latest_commit["id"])
                         
                         # Initialize index from the latest commit
                         self.init_index_from_last_commit()
@@ -4817,6 +4951,29 @@ class FoxClient:
             print(f"Warning: Could not check remote commits: {e}")
             pass
         
+        # Refuse to push over commits we do not have. The server lets an open branch be
+        # moved to any commit, so pushing on top of an old head would drop a teammate's
+        # commits from the branch. Like git: pull (which merges them in), then push.
+        try:
+            branches_response = self._authed_get(
+                f"{config['server_url']}/api/repository/{config['repo_id']}/branches", timeout=30
+            )
+            if branches_response.status_code == 200 and branches_response.json().get("success"):
+                remote_head = next(
+                    (b.get("head_commit_id") or b.get("head")
+                     for b in branches_response.json().get("branches", [])
+                     if b.get("name") == remote_branch_name),
+                    None,
+                )
+                if remote_head and remote_head != head_commit_id and not self._is_ancestor_commit_local(
+                    remote_head, head_commit_id
+                ):
+                    print(f"Rejected: '{remote_branch_name}' on the server has commits you do not have.")
+                    print("Run 'fox pull' to bring them in (it merges them with yours), then 'fox push' again.")
+                    return False
+        except Exception as e:
+            print(f"Warning: could not compare with the server's '{remote_branch_name}': {e}")
+
         # Verify commit authors match current username (from global config)
         global_config = self.load_global_config()
         current_username = global_config.get('username') or config.get('username')
@@ -5007,109 +5164,107 @@ class FoxClient:
                 print("Tip: Ensure repo name/username match an existing server repository, or run 'fox push' to create one.")
                 return False
         
+        if self.merge_head_file.exists():
+            print("A merge is in progress: resolve it, then fox add and fox commit, before pulling.")
+            return False
+
+        current_branch = self.get_current_branch() or "main"
+        local_head = self.get_head_commit_id()
+        base_url = f"{config['server_url']}/api/repository/{config['repo_id']}"
         try:
-            # Get current HEAD
-            since_commit = None
-            if self.head_file.exists():
-                with open(self.head_file, "r") as f:
-                    since_commit = f.read().strip()
-            
-            # Pull from server
-            current_branch = self.get_current_branch() or "main"
-            params = {"since": since_commit, "branch": current_branch} if since_commit else {"branch": current_branch}
-            response = self._authed_get(
-                f"{config['server_url']}/api/repository/{config['repo_id']}/pull",
-                params=params,
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data["success"]:
-                    commits = data["commits"]
-
-                    # Sync branch refs from server so branch list/checkout work on fresh machines
-                    try:
-                        branches_response = self._authed_get(
-                            f"{config['server_url']}/api/repository/{config['repo_id']}/branches",
-                            timeout=30
-                        )
-                        if branches_response.status_code == 200:
-                            branches_data = branches_response.json()
-                            if branches_data.get("success"):
-                                self.ensure_refs()
-                                for branch in branches_data.get("branches", []):
-                                    branch_name = branch.get("name")
-                                    branch_head = branch.get("head")
-                                    if branch_name:
-                                        self._write_ref(self.heads_dir / branch_name, branch_head or "")
-                    except Exception:
-                        pass
-                    
-                    if not commits:
-                        print("Already up to date")
-                        return True
-                    
-                    # Update local repository with pulled commits
-                    for commit in commits:
-                        normalized_files = {}
-                        # Save files from commit with compression
-                        for file_hash, file_info in commit.get("files", {}).items():
-                            if isinstance(file_info, dict):
-                                content_b64 = file_info.get("content", "")
-                                file_path = file_info.get("path")
-                            else:
-                                content_b64 = file_info
-                                file_path = None
-
-                            # Decode base64 content
-                            try:
-                                decoded_content = base64.b64decode(content_b64)
-                            except Exception:
-                                print(f"Failed to decode content for {file_hash}, skipping")
-                                continue
-
-                            # Store with compression using new structure
-                            self.store_object_compressed(decoded_content, file_hash)
-
-                            # Preserve path/content structure for later extraction
-                            normalized_files[file_hash] = {
-                                "path": file_path if file_path else file_hash,
-                                "content": content_b64
-                            }
-
-                        commit["files"] = normalized_files
-                    
-                    # Update local commits
-                    local_commits = []
-                    if self.commits_file.exists():
-                        with open(self.commits_file, "r") as f:
-                            local_commits = json.load(f)
-                    
-                    local_commits.extend(commits)
-                    with open(self.commits_file, "w") as f:
-                        json.dump(local_commits, f, indent=2)
-                    
-                    # Update HEAD
-                    if data.get("head"):
-                        self.update_head_commit(data["head"])
-
-                    # Restore files for the latest pulled commit into the working directory
-                    latest_commit = commits[-1]
-                    self.extract_commit_files(latest_commit)
-                    self.update_index_from_commit(latest_commit.get("files", {}))
-                    
-                    print(f"Pulled {len(commits)} commits")
-                    return True
-                else:
-                    print(f"Server error: {data.get('error')}")
-            else:
+            # since_commit (the server's parameter name) is the commit this branch is at,
+            # so only newer commits come back. The server lists them newest first.
+            params = {"branch": current_branch}
+            if local_head:
+                params["since_commit"] = local_head
+            response = self._authed_get(f"{base_url}/pull", params=params, timeout=30)
+            if response.status_code == 404:
+                print(f"Branch {current_branch} is not on the server yet: fox push creates it there.")
+                return False
+            if response.status_code != 200:
                 print(f"HTTP error: {response.status_code}")
-        
+                return False
+            data = response.json()
+            if not data.get("success"):
+                print(f"Server error: {data.get('error')}")
+                return False
+
+            known = {c.get("id") for c in self.load_commits()}
+            incoming = [c for c in data.get("commits") or [] if c.get("id") not in known]
+            # The server cuts the list at since_commit by date, not by ancestry, so after
+            # merges an older parent can be left out. Ancestry decides fast-forward versus
+            # merge below, so fetch the whole branch once when anything is missing.
+            have = known | {c.get("id") for c in incoming}
+            if any(p not in have for c in incoming for p in self._get_commit_parents(c)):
+                full = self._authed_get(f"{base_url}/pull", params={"branch": current_branch}, timeout=60)
+                if full.status_code == 200 and full.json().get("success"):
+                    incoming = [c for c in full.json().get("commits") or [] if c.get("id") not in known]
+            self._merge_pulled_commits_into_local(incoming)
+            self._sync_other_branches(base_url, current_branch)
+
+            remote_head = data.get("head")
+            if not remote_head or remote_head == local_head:
+                print("Already up to date")
+                return True
+            if not self.get_commit_by_id(remote_head):
+                print(f"The server's head commit {remote_head[:12]} did not arrive; nothing was changed.")
+                return False
+            if local_head and self._is_ancestor_commit_local(remote_head, local_head):
+                print(f"Already up to date: {current_branch} has commits the server does not. Run fox push.")
+                return True
+
+            blocked = self._work_in_the_way(local_head, remote_head)
+            if blocked:
+                self._report_work_in_the_way(blocked, "pull")
+                return False
+
+            if not local_head or self._is_ancestor_commit_local(local_head, remote_head):
+                # Nothing here the server lacks: move to the server's commit.
+                self._switch_tree(local_head, remote_head)
+                self.update_head_commit(remote_head)
+                print(f"Pulled {len(incoming)} new commit(s): {current_branch} is now at {remote_head[:12]}")
+                return True
+
+            # Both sides have new commits: merge the server's into this branch, then
+            # `fox push` sends the local commits and the merge.
+            print(f"Pulled {len(incoming)} new commit(s); {current_branch} also has commits the server "
+                  "does not, so merging the two.")
+            if not self._merge_into_current(remote_head, f"Merge server changes into '{current_branch}'"):
+                return False
+            print("Merged. Run fox push to send your commits and the merge to the server.")
+            return True
+
         except requests.exceptions.RequestException as e:
             print(f"Network error: {e}")
-        
         return False
+
+    def _sync_other_branches(self, base_url, current_branch):
+        """Bring in the server's other branches, so `fox branch` and `fox checkout` see them.
+
+        A local branch is created, or moved forward to the server's commit, never moved
+        back or sideways: commits on it that the server does not have yet stay put.
+        """
+        try:
+            response = self._authed_get(f"{base_url}/branches", timeout=30)
+            if response.status_code != 200 or not response.json().get("success"):
+                return
+            self.ensure_refs()
+            for branch in response.json().get("branches", []):
+                name = branch.get("name")
+                head = branch.get("head_commit_id") or branch.get("head")
+                if not name or not head or name == current_branch:
+                    continue
+                if not self.get_commit_by_id(head):
+                    fetched = self._authed_get(f"{base_url}/pull", params={"branch": name}, timeout=30)
+                    if fetched.status_code == 200 and fetched.json().get("success"):
+                        self._merge_pulled_commits_into_local(fetched.json().get("commits") or [])
+                    if not self.get_commit_by_id(head):
+                        continue
+                local = self._read_ref(self.heads_dir / name)
+                if not local or self._is_ancestor_commit_local(local, head):
+                    self._write_ref(self.heads_dir / name, head)
+        except Exception:
+            pass
     
     def status(self):
         """Show repository status with colored output"""
@@ -5284,13 +5439,24 @@ class FoxClient:
             print(f"(log: unexpected error: {e} - showing local history)")
             return None, None
 
+    def _log_source(self):
+        """(commits_by_id, head_id) from the server, or (None, None) to read local history.
+
+        Local history from the current commit when there is one, as git shows it: the
+        server's leaves out commits not pushed yet, and its head (the first commit nothing
+        points to) can be another branch's. The server's only before anything was pulled.
+        """
+        local_head = self.get_head_commit_id()
+        if local_head and self.get_commit_by_id(local_head):
+            return None, None
+        return self._get_server_commits_for_log()
+
     def log(self, max_count=None):
         """Show commit history"""
         if not self.check_repository("log"):
             return False
 
-        # Try server first for complete, up-to-date history
-        commits_by_id, head_id = self._get_server_commits_for_log()
+        commits_by_id, head_id = self._log_source()
         if commits_by_id is not None:
             if not commits_by_id:
                 print("No commits yet")
@@ -5351,8 +5517,7 @@ class FoxClient:
         if not self.check_repository("log"):
             return False
 
-        # Try server first for complete, up-to-date history
-        commits_by_id, head_id = self._get_server_commits_for_log()
+        commits_by_id, head_id = self._log_source()
         if commits_by_id is not None:
             if not commits_by_id:
                 print("No commits yet")

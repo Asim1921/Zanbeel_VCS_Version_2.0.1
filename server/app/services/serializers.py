@@ -1,6 +1,7 @@
 """Conversion of ORM rows into the JSON shapes the API returns."""
 
 import base64
+import hashlib
 
 from typing import Any, Dict, Optional
 
@@ -82,13 +83,21 @@ def commit_to_dict(commit: Commit, include_files: bool = False) -> Dict[str, Any
     }
     
     if include_files:
+        # Keyed by content hash, but two paths with the same content (empty __init__.py
+        # files, say) need two keys or a pull receives only one of them. The second gets
+        # the hash plus a short hash of its path; every entry carries its "hash".
         files = {}
         for commit_file in commit.files:
             if commit_file.file_object:
                 content_b64 = base64.b64encode(commit_file.file_object.content).decode()
-                files[commit_file.file_hash] = {
-                    "path": normalize_path(commit_file.file_path),
+                path = normalize_path(commit_file.file_path)
+                key = commit_file.file_hash
+                if key in files:
+                    key = f"{key}-{hashlib.sha1(path.encode('utf-8')).hexdigest()[:8]}"
+                files[key] = {
+                    "path": path,
                     "content": content_b64,
+                    "hash": commit_file.file_hash,
                     "size": commit_file.file_size,
                     "mime_type": getattr(commit_file.file_object, "mime_type", None)
                 }
