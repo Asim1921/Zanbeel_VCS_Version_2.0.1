@@ -4,3 +4,4 @@ node_modules/**
 **/*.map
 build/**
 *.vsix
+package-lock.json

@@ -16,14 +16,30 @@
 // The launcher is generated rather than shipped because the extension's own
 // install directory is not reliably writable, and because the interpreter path
 // is only known at runtime.
+//
+// The server's certificate
+// ------------------------
+// The Zanbeel server uses a self-signed certificate, which neither Node nor
+// Python trusts by default. The extension ships a copy (certs/zanbeel.crt) and
+// trusts it, alongside the usual public roots: for its own requests, and for
+// `fox` in its terminals through REQUESTS_CA_BUNDLE. Nothing on the machine
+// outside VS Code changes.
 
 const vscode = require('vscode');
 const cp = require('child_process');
+const crypto = require('crypto');
+const fs = require('fs');
+const http = require('http');
+const https = require('https');
 const os = require('os');
 const path = require('path');
+const tls = require('tls');
 
 const TOKEN_KEY = 'zanbeel.accessToken';
 const USER_KEY = 'zanbeel.username';
+
+/** Offered when signing in, unless zanbeel.serverUrl is already set. */
+const DEFAULT_SERVER = 'https://192.168.15.207:8090';
 
 /** @type {vscode.OutputChannel} */
 let output;
@@ -31,6 +47,8 @@ let output;
 let statusItem;
 /** Resolved interpreter, as argv (e.g. ['py', '-3.11'] or ['python3']). */
 let pythonArgv = null;
+/** CA bundle handed to the CLI as REQUESTS_CA_BUNDLE, once written. */
+let caBundlePath = null;
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -67,6 +85,123 @@ function run(command, args, options = {}) {
 /** The bundled CLI that ships inside this extension. */
 function bundledCli(context) {
   return vscode.Uri.joinPath(context.extensionUri, 'cli', 'fox.py').fsPath;
+}
+
+// ---------------------------------------------------------------------------
+// The server's certificate, and requests to the server
+// ---------------------------------------------------------------------------
+
+/** The certificate file to trust: zanbeel.caCertificate, else the bundled copy. */
+function caCertificateFile(context) {
+  const configured = (config().get('caCertificate') || '').trim();
+  if (!configured) return vscode.Uri.joinPath(context.extensionUri, 'certs', 'zanbeel.crt').fsPath;
+  return configured.replace(/^~(?=$|[\\/])/, os.homedir());
+}
+
+/** That certificate as PEM text, or '' when it cannot be read. */
+function caCertificatePem(context) {
+  const file = caCertificateFile(context);
+  try {
+    const pem = fs.readFileSync(file, 'utf8');
+    if (pem.includes('-----BEGIN CERTIFICATE-----')) return pem;
+    log(`Not a PEM certificate, ignored: ${file}`);
+  } catch (err) {
+    log(`Could not read the certificate ${file}: ${err.message}`);
+  }
+  return '';
+}
+
+/**
+ * A CA bundle for the CLI: the public roots Node ships, the server's certificate,
+ * and any bundle REQUESTS_CA_BUNDLE already named. requests takes this file
+ * instead of its own list, so the public roots stay in and other HTTPS sites
+ * keep working from the same terminals.
+ */
+async function writeCaBundle(context) {
+  const pem = caCertificatePem(context);
+  if (!pem) return null;
+  const target = vscode.Uri.joinPath(context.globalStorageUri, 'ca-bundle.pem');
+  const parts = [...tls.rootCertificates, pem.trim()];
+  const inherited = process.env.REQUESTS_CA_BUNDLE;
+  if (inherited && path.resolve(inherited) !== target.fsPath) {
+    try {
+      parts.push(fs.readFileSync(inherited, 'utf8').trim());
+    } catch {
+      /* not readable: keep ours */
+    }
+  }
+  await vscode.workspace.fs.createDirectory(context.globalStorageUri);
+  await vscode.workspace.fs.writeFile(target, new TextEncoder().encode(parts.join('\n') + '\n'));
+  return target.fsPath;
+}
+
+/**
+ * A request to the Zanbeel server, trusting its certificate as well as the
+ * public roots. Node's fetch() cannot be given extra CAs, hence https.request;
+ * this returns the part of a fetch Response the commands use.
+ */
+function request(context, url, { method = 'GET', headers = {}, body } = {}) {
+  return new Promise((resolve, reject) => {
+    let target;
+    try {
+      target = new URL(url);
+    } catch {
+      reject(new Error(`not a valid address: ${url}`));
+      return;
+    }
+    const secure = target.protocol === 'https:';
+    if (!secure && target.protocol !== 'http:') {
+      reject(new Error(`not an http(s) address: ${url}`));
+      return;
+    }
+    const options = { method, headers: { Accept: 'application/json', ...headers }, timeout: 30000 };
+    if (body !== undefined) options.headers['Content-Length'] = Buffer.byteLength(body);
+    const pem = secure ? caCertificatePem(context) : '';
+    if (pem) options.ca = [...tls.rootCertificates, pem];
+
+    const req = (secure ? https : http).request(target, options, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        // The server is HTTPS only and answers http:// with a redirect, which would
+        // turn a sign-in POST into a GET. Name the right address instead.
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          const where = new URL(res.headers.location, target);
+          reject(new Error(`the server redirects to ${where.origin}; use that address`));
+          return;
+        }
+        const text = Buffer.concat(chunks).toString('utf8');
+        resolve({
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          status: res.statusCode,
+          json: async () => JSON.parse(text),
+        });
+      });
+      res.on('error', reject);
+    });
+    req.on('timeout', () => req.destroy(new Error('the server did not answer within 30 seconds')));
+    req.on('error', reject);
+    if (body !== undefined) req.write(body);
+    req.end();
+  });
+}
+
+/** An error from request(), with what to do about a certificate problem. */
+function describeError(context, err) {
+  const certificateErrors = [
+    'DEPTH_ZERO_SELF_SIGNED_CERT',
+    'SELF_SIGNED_CERT_IN_CHAIN',
+    'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+    'CERT_HAS_EXPIRED',
+    'ERR_TLS_CERT_ALTNAME_INVALID',
+  ];
+  if (!certificateErrors.includes(err.code)) return err.message;
+  return (
+    `${err.message}. The server's certificate does not match the one this extension trusts ` +
+    `(${caCertificateFile(context)}). Download the server's certificate from /zanbeel.crt ` +
+    'and point the zanbeel.caCertificate setting at it.'
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -182,7 +317,8 @@ async function writeLauncher(context, argv, cliPath) {
 function injectPath(context, binDir) {
   const collection = context.environmentVariableCollection;
   collection.persistent = true;
-  collection.description = 'Zanbeel: adds fox to PATH and supplies FOXNEST_TOKEN';
+  collection.description =
+    "Zanbeel: adds fox to PATH, and supplies FOXNEST_TOKEN and the server's certificate";
   collection.prepend('PATH', binDir + path.delimiter);
   log(`PATH now includes: ${binDir}`);
 }
@@ -203,6 +339,12 @@ async function injectEnvironment(context) {
     collection.replace('FOXNEST_SERVER', server.replace(/\/+$/, ''));
   } else {
     collection.delete('FOXNEST_SERVER');
+  }
+
+  if (caBundlePath) {
+    collection.replace('REQUESTS_CA_BUNDLE', caBundlePath);
+  } else {
+    collection.delete('REQUESTS_CA_BUNDLE');
   }
 }
 
@@ -237,6 +379,7 @@ async function fox(context, args, cwd) {
   if (token && config().get('injectToken')) env.FOXNEST_TOKEN = token;
   const server = (config().get('serverUrl') || '').trim();
   if (server) env.FOXNEST_SERVER = server.replace(/\/+$/, '');
+  if (caBundlePath) env.REQUESTS_CA_BUNDLE = caBundlePath;
 
   return new Promise((resolve) => {
     cp.execFile(
@@ -293,7 +436,7 @@ async function commandSignIn(context) {
     (await vscode.window.showInputBox({
       title: 'Zanbeel server',
       prompt: 'Where is the Zanbeel server?',
-      value: 'http://127.0.0.1:33333',
+      value: DEFAULT_SERVER,
       ignoreFocusOut: true,
     }));
   if (!server) return;
@@ -343,7 +486,7 @@ async function commandSignIn(context) {
       async () => {
         const base = server.replace(/\/+$/, '');
         try {
-          const response = await fetch(`${base}/api/auth/login`, {
+          const response = await request(context, `${base}/api/auth/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username, password }),
@@ -362,7 +505,7 @@ async function commandSignIn(context) {
           // Keep a token named after this machine rather than the password
           // session: it shows up under Settings → Access tokens, can be revoked
           // on its own, and is what Sign Out revokes. The session is discarded.
-          const minted = await fetch(`${base}/api/tokens`, {
+          const minted = await request(context, `${base}/api/tokens`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -386,7 +529,7 @@ async function commandSignIn(context) {
           );
           return null;
         } catch (err) {
-          vscode.window.showErrorMessage(`Could not reach ${server}: ${err.message}`);
+          vscode.window.showErrorMessage(`Could not reach ${server}: ${describeError(context, err)}`);
           return null;
         }
       }
@@ -396,22 +539,28 @@ async function commandSignIn(context) {
 
   // Verify before storing, so a mistyped token fails here rather than on the
   // user's next push.
+  let unreachable = null;
   const verified = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'Verifying credential…' },
     async () => {
       try {
-        const response = await fetch(`${server.replace(/\/+$/, '')}/api/auth/me`, {
+        const response = await request(context, `${server.replace(/\/+$/, '')}/api/auth/me`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!response.ok) return null;
         const body = await response.json();
         return body.user ? body.user.username : null;
-      } catch {
+      } catch (err) {
+        unreachable = err;
         return null;
       }
     }
   );
 
+  if (unreachable) {
+    vscode.window.showErrorMessage(`Could not reach ${server}: ${describeError(context, unreachable)}`);
+    return;
+  }
   if (!verified) {
     vscode.window.showErrorMessage('That credential was rejected by the server.');
     return;
@@ -443,13 +592,13 @@ async function commandSignOut(context) {
   const server = (config().get('serverUrl') || '').trim().replace(/\/+$/, '');
   if (token && token.startsWith('fxp_') && server) {
     try {
-      const response = await fetch(`${server}/api/tokens/current`, {
+      const response = await request(context, `${server}/api/tokens/current`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       });
       log(response.ok ? 'Revoked the access token on the server' : `Token revoke: HTTP ${response.status}`);
     } catch (err) {
-      log(`Could not revoke the token on the server: ${err.message}`);
+      log(`Could not revoke the token on the server: ${describeError(context, err)}`);
     }
   }
   await context.secrets.delete(TOKEN_KEY);
@@ -520,7 +669,32 @@ async function commandDiagnostics(context) {
 
   const user = await context.secrets.get(USER_KEY);
   output.appendLine(`  signed in as      : ${user || 'nobody'}`);
-  output.appendLine(`  server            : ${(config().get('serverUrl') || '(from repository)').trim()}`);
+  const server = (config().get('serverUrl') || '').trim().replace(/\/+$/, '');
+  output.appendLine(`  server            : ${server || '(from repository)'}`);
+
+  const pem = caCertificatePem(context);
+  let certificate = 'NOT READABLE';
+  if (pem) {
+    try {
+      const cert = new crypto.X509Certificate(pem);
+      certificate = `${cert.subject.replace(/\n/g, ', ')}, valid until ${cert.validTo}`;
+    } catch (err) {
+      certificate = `unreadable (${err.message})`;
+    }
+  }
+  output.appendLine(`  trusted cert      : ${caCertificateFile(context)}`);
+  output.appendLine(`                      ${certificate}`);
+  output.appendLine(`  CA bundle for fox : ${caBundlePath || 'none'}`);
+  if (server) {
+    let reach;
+    try {
+      const response = await request(context, `${server}/api/`);
+      reach = response.ok ? 'yes, and its certificate is trusted' : `HTTP ${response.status}`;
+    } catch (err) {
+      reach = `NO: ${describeError(context, err)}`;
+    }
+    output.appendLine(`  server reachable  : ${reach}`);
+  }
 
   const folder = await findRepoFolder();
   output.appendLine(`  repository        : ${folder ? folder.uri.fsPath : 'none in this workspace'}`);
@@ -592,6 +766,10 @@ async function activate(context) {
     }
   }
 
+  caBundlePath = await writeCaBundle(context).catch((err) => {
+    log(`Could not write the CA bundle: ${err}`);
+    return null;
+  });
   await injectEnvironment(context);
 
   // Checked after PATH is wired up, so the offer to install lands on a terminal
@@ -620,6 +798,7 @@ async function activate(context) {
       } else if (!config().get('injectPath')) {
         context.environmentVariableCollection.clear();
       }
+      caBundlePath = await writeCaBundle(context).catch(() => null);
       await injectEnvironment(context);
       await refreshStatusBar(context);
     }),
